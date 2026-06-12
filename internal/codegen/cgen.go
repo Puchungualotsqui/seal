@@ -53,6 +53,7 @@ type valueInfo struct {
 type scope struct {
 	parent *scope
 	vars   map[string]valueInfo
+	defers []string
 }
 
 func newScope(parent *scope) *scope {
@@ -60,6 +61,10 @@ func newScope(parent *scope) *scope {
 		parent: parent,
 		vars:   map[string]valueInfo{},
 	}
+}
+
+func (s *scope) addDefer(code string) {
+	s.defers = append(s.defers, code)
 }
 
 func (s *scope) declare(name string, typ CType) {
@@ -80,6 +85,10 @@ type taskInfo struct {
 	Decl       *ast.TaskDecl
 	ReturnType CType
 	ParamTypes []CType
+
+	RequiredParams  int
+	ParamDefaults   []ast.Expr
+	ParamHasDefault []bool
 }
 
 type Generator struct {
@@ -88,25 +97,38 @@ type Generator struct {
 	out    strings.Builder
 	indent int
 
-	structs map[string]*ast.StructDecl
-	enums   map[string]*ast.EnumDecl
-	tasks   map[string]taskInfo
-	consts  map[string]CType
+	structs   map[string]*ast.StructDecl
+	enums     map[string]*ast.EnumDecl
+	unions    map[string]*ast.UnionDecl
+	tasks     map[string]taskInfo
+	overloads map[string][]string
+	consts    map[string]CType
 
-	scope *scope
+	scope     *scope
+	taskScope *scope
 
 	currentTask    *ast.TaskDecl
 	currentResults []CType
+
+	tempCounter int
 }
 
 func New(diags *diag.Reporter) *Generator {
 	return &Generator{
-		diags:   diags,
-		structs: map[string]*ast.StructDecl{},
-		enums:   map[string]*ast.EnumDecl{},
-		tasks:   map[string]taskInfo{},
-		consts:  map[string]CType{},
+		diags:     diags,
+		structs:   map[string]*ast.StructDecl{},
+		enums:     map[string]*ast.EnumDecl{},
+		unions:    map[string]*ast.UnionDecl{},
+		tasks:     map[string]taskInfo{},
+		overloads: map[string][]string{},
+		consts:    map[string]CType{},
 	}
+}
+
+func (g *Generator) newTemp(prefix string) string {
+	name := fmt.Sprintf("__seal_%s_%d", prefix, g.tempCounter)
+	g.tempCounter++
+	return name
 }
 
 func (g *Generator) Generate(file *ast.File) string {
@@ -125,6 +147,7 @@ func (g *Generator) Generate(file *ast.File) string {
 
 	g.emitEnums(file)
 	g.emitStructs(file)
+	g.emitUnions(file)
 	g.emitConstants(file)
 	g.emitTaskPrototypes(file)
 	g.emitTasks(file)
@@ -141,13 +164,22 @@ func (g *Generator) collect(file *ast.File) {
 		case *ast.EnumDecl:
 			g.enums[d.Name.Name] = d
 
+		case *ast.UnionDecl:
+			g.unions[d.Name.Name] = d
+
+		case *ast.OverloadDecl:
+			for _, name := range d.Names {
+				g.overloads[d.Name] = append(g.overloads[d.Name], name.Name)
+			}
+
 		case *ast.TaskDecl:
 			if d.IsTest {
 				continue
 			}
 
 			info := taskInfo{
-				Decl: d,
+				Decl:           d,
+				RequiredParams: len(d.Params),
 			}
 
 			if len(d.Results) == 0 {
@@ -163,8 +195,14 @@ func (g *Generator) collect(file *ast.File) {
 				info.ReturnType = CInvalid
 			}
 
-			for _, param := range d.Params {
+			for i, param := range d.Params {
 				info.ParamTypes = append(info.ParamTypes, g.cTypeFromAst(param.Type))
+				info.ParamDefaults = append(info.ParamDefaults, param.Default)
+				info.ParamHasDefault = append(info.ParamHasDefault, param.HasDefault)
+
+				if param.HasDefault && info.RequiredParams == len(d.Params) {
+					info.RequiredParams = i
+				}
 			}
 
 			g.tasks[d.Name.Name] = info
@@ -284,7 +322,10 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 	g.indent++
 
 	oldScope := g.scope
+	oldTaskScope := g.taskScope
+
 	g.scope = newScope(oldScope)
+	g.taskScope = g.scope
 
 	for i, param := range d.Params {
 		if i < len(info.ParamTypes) {
@@ -294,17 +335,36 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 
 	g.emitBlockStatements(d.Body)
 
+	g.emitActiveDefers()
+
 	if d.Name.Name == "Main" && len(d.Results) == 0 {
 		g.line("return 0;")
 	}
 
 	g.scope = oldScope
+	g.taskScope = oldTaskScope
 
 	g.indent--
 	g.line("}")
 
 	g.currentTask = nil
 	g.currentResults = nil
+}
+
+func (g *Generator) emitActiveDefers() {
+	for sc := g.scope; sc != nil; sc = sc.parent {
+		g.emitDefersInScope(sc)
+
+		if sc == g.taskScope {
+			break
+		}
+	}
+}
+
+func (g *Generator) emitDefersInScope(sc *scope) {
+	for i := len(sc.defers) - 1; i >= 0; i-- {
+		g.linef("%s;", sc.defers[i])
+	}
 }
 
 func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
@@ -360,7 +420,10 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 
 		oldScope := g.scope
 		g.scope = newScope(oldScope)
+
 		g.emitBlockStatements(s)
+		g.emitDefersInScope(g.scope)
+
 		g.scope = oldScope
 
 		g.indent--
@@ -370,7 +433,7 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 		g.emitReturnStmt(s)
 
 	case *ast.DeferStmt:
-		g.error(s.Span(), "defer is not supported by C codegen yet")
+		g.emitDeferStmt(s)
 
 	case *ast.SealStmt:
 		// `seal` is a checker/language rule. It has no first-backend C output.
@@ -379,8 +442,9 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 		g.linef("%s;", g.emitExpr(s.Expr, nil))
 
 	case *ast.AssignStmt:
+		leftType := g.inferExprType(s.Left, nil)
 		left := g.emitExpr(s.Left, nil)
-		right := g.emitExpr(s.Right, nil)
+		right := g.emitExpr(s.Right, &leftType)
 		g.linef("%s %s %s;", left, g.cAssignOp(s.Op), right)
 
 	case *ast.VarDeclStmt:
@@ -394,6 +458,7 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 		oldScope := g.scope
 		g.scope = newScope(oldScope)
 		g.emitBlockStatements(s.Then)
+		g.emitDefersInScope(g.scope)
 		g.scope = oldScope
 
 		g.indent--
@@ -405,6 +470,7 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 			oldScope := g.scope
 			g.scope = newScope(oldScope)
 			g.emitStmt(s.Else)
+			g.emitDefersInScope(g.scope)
 			g.scope = oldScope
 
 			g.indent--
@@ -423,6 +489,8 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 
 func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 	if len(s.Values) == 0 {
+		g.emitActiveDefers()
+
 		if g.currentTask != nil && g.currentTask.Name.Name == "Main" {
 			g.line("return 0;")
 			return
@@ -437,7 +505,17 @@ func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 		expected = &g.currentResults[0]
 	}
 
-	g.linef("return %s;", g.emitExpr(s.Values[0], expected))
+	resultTemp := g.newTemp("return_value")
+	resultType := CInvalid
+	if expected != nil {
+		resultType = *expected
+	} else {
+		resultType = g.inferExprType(s.Values[0], nil)
+	}
+
+	g.linef("%s = %s;", resultType.Decl(resultTemp), g.emitExpr(s.Values[0], &resultType))
+	g.emitActiveDefers()
+	g.linef("return %s;", resultTemp)
 }
 
 func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
@@ -482,6 +560,7 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 		g.line("for (;;) {")
 		g.indent++
 		g.emitBlockStatements(s.Body)
+		g.emitDefersInScope(g.scope)
 		g.indent--
 		g.line("}")
 		g.scope = oldScope
@@ -493,6 +572,7 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 		g.linef("for (; %s; ) {", cond)
 		g.indent++
 		g.emitBlockStatements(s.Body)
+		g.emitDefersInScope(g.scope)
 		g.indent--
 		g.line("}")
 		g.scope = oldScope
@@ -517,6 +597,7 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 	g.linef("for (%s; %s; %s) {", init, cond, post)
 	g.indent++
 	g.emitBlockStatements(s.Body)
+	g.emitDefersInScope(g.scope)
 	g.indent--
 	g.line("}")
 
@@ -559,7 +640,7 @@ func (g *Generator) emitForPart(stmt ast.Stmt) string {
 
 func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 	if s.IsUnionSwitch {
-		g.error(s.Span(), "union switch is not supported by C codegen yet")
+		g.emitUnionSwitchStmt(s)
 		return
 	}
 
@@ -594,11 +675,113 @@ func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 			g.emitStmt(stmt)
 		}
 
+		g.emitDefersInScope(g.scope)
 		g.line("break;")
 
 		g.scope = oldScope
 
 		g.indent--
+	}
+
+	g.indent--
+	g.line("}")
+}
+
+func (g *Generator) emitUnionSwitchStmt(s *ast.SwitchStmt) {
+	targetType := g.inferExprType(s.Target, nil)
+	if !g.isUnion(targetType) {
+		g.error(s.Target.Span(), fmt.Sprintf("union switch target is not a union: %s", targetType.String()))
+		return
+	}
+
+	targetTemp := g.newTemp("union_switch")
+	g.linef("%s = %s;", targetType.Decl(targetTemp), g.emitExpr(s.Target, &targetType))
+
+	g.linef("switch (%s.tag) {", targetTemp)
+	g.indent++
+
+	for _, swCase := range s.Cases {
+		switch swCase.Kind {
+		case ast.SwitchCaseUnionMember:
+			memberType := g.cTypeFromAst(swCase.UnionMember)
+			g.linef("case %s_Tag_%s:", targetType.SealName, memberType.SealName)
+			g.indent++
+			g.line("{")
+			g.indent++
+
+			oldScope := g.scope
+			g.scope = newScope(oldScope)
+
+			if s.BindName.Name != "" {
+				g.linef("%s = %s.as.%s;", memberType.Decl(s.BindName.Name), targetTemp, memberType.SealName)
+				g.scope.declare(s.BindName.Name, memberType)
+			}
+
+			for _, stmt := range swCase.Body {
+				g.emitStmt(stmt)
+			}
+
+			g.emitDefersInScope(g.scope)
+			g.line("break;")
+
+			g.scope = oldScope
+
+			g.indent--
+			g.line("}")
+			g.indent--
+
+		case ast.SwitchCaseNil:
+			g.linef("case %s_Tag_nil:", targetType.SealName)
+			g.indent++
+			g.line("{")
+			g.indent++
+
+			oldScope := g.scope
+			g.scope = newScope(oldScope)
+
+			if s.BindName.Name != "" {
+				g.linef("void *%s = NULL;", s.BindName.Name)
+				g.scope.declare(s.BindName.Name, CNil)
+			}
+
+			for _, stmt := range swCase.Body {
+				g.emitStmt(stmt)
+			}
+
+			g.emitDefersInScope(g.scope)
+			g.line("break;")
+
+			g.scope = oldScope
+
+			g.indent--
+			g.line("}")
+			g.indent--
+
+		case ast.SwitchCaseDefault:
+			g.line("default:")
+			g.indent++
+			g.line("{")
+			g.indent++
+
+			oldScope := g.scope
+			g.scope = newScope(oldScope)
+
+			for _, stmt := range swCase.Body {
+				g.emitStmt(stmt)
+			}
+
+			g.emitDefersInScope(g.scope)
+			g.line("break;")
+
+			g.scope = oldScope
+
+			g.indent--
+			g.line("}")
+			g.indent--
+
+		default:
+			g.error(swCase.Loc, "unsupported union switch case in C codegen")
+		}
 	}
 
 	g.indent--
@@ -641,12 +824,35 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return "false"
 
 	case *ast.NilLitExpr:
+		if expected != nil && g.isUnion(*expected) {
+			return fmt.Sprintf("(%s){.tag = %s_Tag_nil}", expected.Name, expected.SealName)
+		}
+
 		return "NULL"
 
 	case *ast.UnaryExpr:
 		return fmt.Sprintf("(%s%s)", g.cUnaryOp(e.Op), g.emitExpr(e.Expr, nil))
 
 	case *ast.BinaryExpr:
+		leftType := g.inferExprType(e.Left, nil)
+		rightType := g.inferExprType(e.Right, nil)
+
+		if g.hasOperatorOverload(e.Op.String()) {
+			if candidate, ok := g.resolveOverload(e.Op.String(), []CType{leftType, rightType}); ok {
+				left := g.emitExpr(e.Left, &leftType)
+				right := g.emitExpr(e.Right, &rightType)
+				return fmt.Sprintf("%s(%s, %s)", g.cTaskName(candidate), left, right)
+			}
+		}
+
+		if e.Op == token.NotEq && g.hasOperatorOverload("==") {
+			if candidate, ok := g.resolveOverload("==", []CType{leftType, rightType}); ok {
+				left := g.emitExpr(e.Left, &leftType)
+				right := g.emitExpr(e.Right, &rightType)
+				return fmt.Sprintf("(!%s(%s, %s))", g.cTaskName(candidate), left, right)
+			}
+		}
+
 		left := g.emitExpr(e.Left, nil)
 		right := g.emitExpr(e.Right, nil)
 		return fmt.Sprintf("(%s %s %s)", left, g.cBinaryOp(e.Op), right)
@@ -687,18 +893,19 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 
 	case *ast.CompoundLiteralExpr:
 		typ := g.cTypeFromAst(e.Type)
-		var values []string
 
-		for _, field := range e.Fields {
-			fieldType := g.lookupStructFieldType(typ.SealName, field.Name.Name)
-			values = append(values, fmt.Sprintf(".%s = %s", field.Name.Name, g.emitExpr(field.Value, &fieldType)))
+		if expected != nil && g.isUnion(*expected) && g.unionHasMember(expected.SealName, typ.SealName) {
+			payload := g.emitCompoundLiteral(e, typ)
+			return fmt.Sprintf("(%s){.tag = %s_Tag_%s, .as.%s = %s}",
+				expected.Name,
+				expected.SealName,
+				typ.SealName,
+				typ.SealName,
+				payload,
+			)
 		}
 
-		for _, value := range e.Values {
-			values = append(values, g.emitExpr(value, nil))
-		}
-
-		return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
+		return g.emitCompoundLiteral(e, typ)
 	}
 
 	g.error(expr.Span(), "unsupported expression in C codegen")
@@ -706,36 +913,83 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 }
 
 func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
+	return g.emitCallExprWithArgs(e, nil)
+}
+
+func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if id.Name.Name == "Print" {
-			return g.emitBuiltinPrint(e)
+			return g.emitBuiltinPrintWithArgs(e, preparedArgs)
 		}
 
-		name := g.cTaskName(id.Name.Name)
-		info, hasTask := g.tasks[id.Name.Name]
+		argTypes := make([]CType, 0, len(e.Args))
+		for _, arg := range e.Args {
+			argTypes = append(argTypes, g.inferExprType(arg, nil))
+		}
 
-		var args []string
-		for i, arg := range e.Args {
-			expected := (*CType)(nil)
-			if hasTask && i < len(info.ParamTypes) {
-				expected = &info.ParamTypes[i]
+		if _, isOverload := g.overloads[id.Name.Name]; isOverload {
+			candidate, ok := g.resolveOverload(id.Name.Name, argTypes)
+			if !ok {
+				g.error(e.Span(), fmt.Sprintf("could not resolve overload %q in C codegen", id.Name.Name))
+				return "0"
 			}
 
-			args = append(args, g.emitExpr(arg, expected))
+			return g.emitTaskCall(candidate, e.Args, preparedArgs)
 		}
 
-		return fmt.Sprintf("%s(%s)", name, strings.Join(args, ", "))
+		return g.emitTaskCall(id.Name.Name, e.Args, preparedArgs)
 	}
 
 	var args []string
-	for _, arg := range e.Args {
-		args = append(args, g.emitExpr(arg, nil))
+
+	if preparedArgs != nil {
+		args = append(args, preparedArgs...)
+	} else {
+		for _, arg := range e.Args {
+			args = append(args, g.emitExpr(arg, nil))
+		}
 	}
 
 	return fmt.Sprintf("%s(%s)", g.emitExpr(e.Callee, nil), strings.Join(args, ", "))
 }
 
+func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs []string) string {
+	name := g.cTaskName(taskName)
+	info, hasTask := g.tasks[taskName]
+
+	var outArgs []string
+
+	for i, arg := range args {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := (*CType)(nil)
+		if hasTask && i < len(info.ParamTypes) {
+			expected = &info.ParamTypes[i]
+		}
+
+		outArgs = append(outArgs, g.emitExpr(arg, expected))
+	}
+
+	if hasTask {
+		for i := len(args); i < len(info.ParamTypes); i++ {
+			if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
+				expected := info.ParamTypes[i]
+				outArgs = append(outArgs, g.emitExpr(info.ParamDefaults[i], &expected))
+			}
+		}
+	}
+
+	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+}
+
 func (g *Generator) emitBuiltinPrint(e *ast.CallExpr) string {
+	return g.emitBuiltinPrintWithArgs(e, nil)
+}
+
+func (g *Generator) emitBuiltinPrintWithArgs(e *ast.CallExpr, preparedArgs []string) string {
 	if len(e.Args) == 0 {
 		return `printf("")`
 	}
@@ -743,25 +997,32 @@ func (g *Generator) emitBuiltinPrint(e *ast.CallExpr) string {
 	var format strings.Builder
 	var args []string
 
-	for _, arg := range e.Args {
+	for i, arg := range e.Args {
 		argType := g.inferExprType(arg, nil)
+
+		rendered := ""
+		if preparedArgs != nil && i < len(preparedArgs) {
+			rendered = preparedArgs[i]
+		} else {
+			rendered = g.emitExpr(arg, nil)
+		}
 
 		switch argType.SealName {
 		case "int":
 			format.WriteString("%d")
-			args = append(args, g.emitExpr(arg, nil))
+			args = append(args, rendered)
 
 		case "f32", "f64":
 			format.WriteString("%f")
-			args = append(args, g.emitExpr(arg, nil))
+			args = append(args, rendered)
 
 		case "bool":
 			format.WriteString("%s")
-			args = append(args, fmt.Sprintf("(%s ? \"true\" : \"false\")", g.emitExpr(arg, nil)))
+			args = append(args, fmt.Sprintf("(%s ? \"true\" : \"false\")", rendered))
 
 		case "string":
 			format.WriteString("%s")
-			args = append(args, g.emitExpr(arg, nil))
+			args = append(args, rendered)
 
 		default:
 			g.error(arg.Span(), fmt.Sprintf("Print does not support %s in C codegen yet", argType.String()))
@@ -773,6 +1034,95 @@ func (g *Generator) emitBuiltinPrint(e *ast.CallExpr) string {
 	}
 
 	return fmt.Sprintf("printf(\"%s\", %s)", escapeCString(format.String()), strings.Join(args, ", "))
+}
+
+func (g *Generator) emitDeferStmt(s *ast.DeferStmt) {
+	call, ok := s.Call.(*ast.CallExpr)
+	if !ok {
+		g.error(s.Span(), "defer currently supports only task calls")
+		return
+	}
+
+	code := g.emitDeferredCall(call)
+	g.scope.addDefer(code)
+}
+
+func (g *Generator) emitDeferredCall(call *ast.CallExpr) string {
+	preparedArgs := make([]string, 0, len(call.Args))
+
+	for _, arg := range call.Args {
+		argType := g.inferExprType(arg, nil)
+		temp := g.newTemp("defer_arg")
+
+		g.linef("%s = %s;", argType.Decl(temp), g.emitExpr(arg, &argType))
+		preparedArgs = append(preparedArgs, temp)
+	}
+
+	return g.emitCallExprWithArgs(call, preparedArgs)
+}
+
+func (g *Generator) emitUnions(file *ast.File) {
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.UnionDecl)
+		if !ok {
+			continue
+		}
+
+		if d.Raw {
+			g.error(d.Name.Span(), "@rawUnion is not supported by this C codegen phase yet")
+			continue
+		}
+
+		g.linef("typedef enum %s_Tag {", d.Name.Name)
+		g.indent++
+		g.linef("%s_Tag_nil = 0,", d.Name.Name)
+
+		for i, member := range d.Members {
+			memberType := g.cTypeFromAst(member)
+			comma := ","
+			if i == len(d.Members)-1 {
+				comma = ""
+			}
+
+			g.linef("%s_Tag_%s%s", d.Name.Name, memberType.SealName, comma)
+		}
+
+		g.indent--
+		g.linef("} %s_Tag;", d.Name.Name)
+		g.line("")
+
+		g.linef("typedef struct %s {", d.Name.Name)
+		g.indent++
+		g.linef("%s_Tag tag;", d.Name.Name)
+		g.line("union {")
+		g.indent++
+
+		for _, member := range d.Members {
+			memberType := g.cTypeFromAst(member)
+			g.linef("%s;", memberType.Decl(memberType.SealName))
+		}
+
+		g.indent--
+		g.line("} as;")
+		g.indent--
+		g.linef("} %s;", d.Name.Name)
+		g.line("")
+	}
+}
+
+func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
+	var values []string
+
+	for _, field := range e.Fields {
+		fieldType := g.lookupStructFieldType(typ.SealName, field.Name.Name)
+		values = append(values, fmt.Sprintf(".%s = %s", field.Name.Name, g.emitExpr(field.Value, &fieldType)))
+	}
+
+	for _, value := range e.Values {
+		values = append(values, g.emitExpr(value, nil))
+	}
+
+	return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
 }
 
 func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
@@ -816,6 +1166,10 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return CBool
 
 	case *ast.NilLitExpr:
+		if expected != nil {
+			return *expected
+		}
+
 		return CNil
 
 	case *ast.UnaryExpr:
@@ -840,6 +1194,22 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return inner
 
 	case *ast.BinaryExpr:
+		left := g.inferExprType(e.Left, nil)
+		right := g.inferExprType(e.Right, nil)
+
+		if g.hasOperatorOverload(e.Op.String()) {
+			if candidate, ok := g.resolveOverload(e.Op.String(), []CType{left, right}); ok {
+				info := g.tasks[candidate]
+				return info.ReturnType
+			}
+		}
+
+		if e.Op == token.NotEq && g.hasOperatorOverload("==") {
+			if _, ok := g.resolveOverload("==", []CType{left, right}); ok {
+				return CBool
+			}
+		}
+
 		switch e.Op {
 		case token.EqEq,
 			token.NotEq,
@@ -851,9 +1221,6 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			token.OrOr:
 			return CBool
 		}
-
-		left := g.inferExprType(e.Left, nil)
-		right := g.inferExprType(e.Right, nil)
 
 		if left.SealName == "f64" || right.SealName == "f64" {
 			return CF64
@@ -867,8 +1234,26 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.IdentExpr); ok {
+			if id.Name.Name == "Print" {
+				return CVoid
+			}
+
 			if info, ok := g.tasks[id.Name.Name]; ok {
 				return info.ReturnType
+			}
+
+			if _, ok := g.overloads[id.Name.Name]; ok {
+				argTypes := make([]CType, 0, len(e.Args))
+				for _, arg := range e.Args {
+					argTypes = append(argTypes, g.inferExprType(arg, nil))
+				}
+
+				candidate, ok := g.resolveOverload(id.Name.Name, argTypes)
+				if !ok {
+					return CInvalid
+				}
+
+				return g.tasks[candidate].ReturnType
 			}
 		}
 
@@ -907,6 +1292,136 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 	}
 
 	return CInvalid
+}
+
+func (g *Generator) resolveOverload(name string, argTypes []CType) (string, bool) {
+	candidates := g.overloads[name]
+
+	bestName := ""
+	bestScore := 1 << 30
+	ambiguous := false
+
+	for _, candidate := range candidates {
+		info, ok := g.tasks[candidate]
+		if !ok {
+			continue
+		}
+
+		score, ok := g.callScore(info, argTypes)
+		if !ok {
+			continue
+		}
+
+		if score < bestScore {
+			bestName = candidate
+			bestScore = score
+			ambiguous = false
+			continue
+		}
+
+		if score == bestScore {
+			ambiguous = true
+		}
+	}
+
+	if ambiguous {
+		return "", false
+	}
+
+	if bestName == "" {
+		return "", false
+	}
+
+	return bestName, true
+}
+
+func (g *Generator) callScore(info taskInfo, argTypes []CType) (int, bool) {
+	required := info.RequiredParams
+	total := len(info.ParamTypes)
+
+	if len(argTypes) < required || len(argTypes) > total {
+		return 0, false
+	}
+
+	score := 0
+
+	for i, argType := range argTypes {
+		itemScore, ok := g.conversionScore(info.ParamTypes[i], argType)
+		if !ok {
+			return 0, false
+		}
+
+		score += itemScore
+	}
+
+	score += (total - len(argTypes)) * 5
+
+	return score, true
+}
+
+func (g *Generator) conversionScore(dst CType, src CType) (int, bool) {
+	if dst.SealName == src.SealName {
+		return 0, true
+	}
+
+	if src.SealName == "int" && (dst.SealName == "f32" || dst.SealName == "f64") {
+		return 2, true
+	}
+
+	if src.SealName == "f32" && dst.SealName == "f64" {
+		return 2, true
+	}
+
+	if g.isUnion(dst) {
+		if src.SealName == "nil" || g.unionHasMember(dst.SealName, src.SealName) {
+			return 1, true
+		}
+	}
+
+	if src.SealName == "nil" && strings.HasPrefix(dst.SealName, "*") {
+		return 1, true
+	}
+
+	return 0, false
+}
+
+func (g *Generator) isUnion(t CType) bool {
+	_, ok := g.unions[t.SealName]
+	return ok
+}
+
+func (g *Generator) unionHasMember(unionName string, memberName string) bool {
+	u := g.unions[unionName]
+	if u == nil {
+		return false
+	}
+
+	for _, member := range u.Members {
+		memberType := g.cTypeFromAst(member)
+		if memberType.SealName == memberName {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (g *Generator) hasOperatorOverload(name string) bool {
+	if !isOperatorName(name) {
+		return false
+	}
+
+	_, ok := g.overloads[name]
+	return ok
+}
+
+func isOperatorName(name string) bool {
+	switch name {
+	case "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "^":
+		return true
+	default:
+		return false
+	}
 }
 
 func (g *Generator) cTypeFromAst(t ast.Type) CType {

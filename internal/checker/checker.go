@@ -1693,6 +1693,10 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 		return
 	}
 
+	if c.sameType(dst, src) {
+		return
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		if !c.enumHasVariant(dst, src.Name) {
 			c.diags.Add(span, fmt.Sprintf("enum %s has no variant .%s", dst.String(), src.Name))
@@ -1741,6 +1745,10 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return true
 	}
 
+	if c.sameType(dst, src) {
+		return true
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		return c.enumHasVariant(dst, src.Name)
 	}
@@ -1751,10 +1759,6 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 
 	if src.Kind == TypeNil {
 		return dst.Kind == TypePointer || dst.Kind == TypeUnion
-	}
-
-	if c.sameType(dst, src) {
-		return true
 	}
 
 	if src.Kind == TypeUntypedInt {

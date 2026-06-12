@@ -1,0 +1,33 @@
+Circle :: struct {
+    radius f32
+}
+
+Rectangle :: struct {
+    width f32
+    height f32
+}
+
+Shape :: union {
+    Circle,
+    Rectangle,
+}
+
+Area :: task(s Shape) f32 {
+    switch shape in s {
+    case Circle:
+        return shape.radius * shape.radius
+
+    case Rectangle:
+        return shape.width * shape.height
+
+    case nil:
+        return 0
+    }
+
+    return 0
+}
+
+Main :: task() {
+    s: Shape = Circle{radius = 5.0}
+    Print(Area(s))
+}
