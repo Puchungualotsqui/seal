@@ -419,3 +419,274 @@ Main :: task() {
 		t.Fatalf("expected struct field diagnostic, got:\n%s", reporter.String())
 	}
 }
+
+func TestEnumTypedVariable(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+    ErrorReading
+}
+
+Main :: task() {
+    err: Error = .None
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInvalidEnumVariant(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+    ErrorReading
+}
+
+Main :: task() {
+    err: Error = .Missing
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "enum Error has no variant .Missing") {
+		t.Fatalf("expected invalid enum variant diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectEnumLiteralWithoutContext(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+}
+
+Main :: task() {
+    err := .None
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "enum literal .None needs explicit type") {
+		t.Fatalf("expected enum literal context diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestEnumReturn(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+    ErrorReading
+}
+
+Read :: task() Error {
+    return .None
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestEnumSwitch(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+    ErrorReading
+}
+
+Code :: task(err Error) int {
+    switch err {
+    case .None:
+        return 0
+
+    case .ErrorReading:
+        return 1
+    }
+
+    return 2
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInvalidEnumSwitchCase(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None
+}
+
+Code :: task(err Error) int {
+    switch err {
+    case .Missing:
+        return 0
+    }
+
+    return 1
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "enum Error has no variant .Missing") {
+		t.Fatalf("expected enum switch diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestUnionAssignmentFromMember(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct {
+    radius f32
+}
+
+Rectangle :: struct {
+    width f32
+    height f32
+}
+
+Shape :: union {
+    Circle,
+    Rectangle,
+}
+
+Main :: task() {
+    s: Shape = Circle{radius = 5.0}
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestUnionAssignmentNil(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct {
+    radius f32
+}
+
+Shape :: union {
+    Circle,
+}
+
+Main :: task() {
+    s: Shape = nil
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInvalidUnionAssignment(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct {
+    radius f32
+}
+
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Shape :: union {
+    Circle,
+}
+
+Main :: task() {
+    s: Shape = Vec2{x = 1.0, y = 2.0}
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign Vec2 to union Shape") {
+		t.Fatalf("expected union assignment diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestUnionSwitchNarrowing(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct {
+    radius f32
+}
+
+Rectangle :: struct {
+    width f32
+    height f32
+}
+
+Shape :: union {
+    Circle,
+    Rectangle,
+}
+
+Area :: task(s Shape) f32 {
+    switch shape in s {
+    case Circle:
+        return shape.radius * shape.radius
+
+    case Rectangle:
+        return shape.width * shape.height
+
+    case nil:
+        return 0
+    }
+
+    return 0
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInvalidUnionSwitchMember(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct {
+    radius f32
+}
+
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Shape :: union {
+    Circle,
+}
+
+Area :: task(s Shape) f32 {
+    switch shape in s {
+    case Vec2:
+        return shape.x
+    }
+
+    return 0
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "union Shape has no member Vec2") {
+		t.Fatalf("expected invalid union member diagnostic, got:\n%s", reporter.String())
+	}
+}

@@ -333,6 +333,51 @@ func (s *IfStmt) Span() source.Span {
 	return s.Loc
 }
 
+type SwitchStmt struct {
+	// For normal enum switch:
+	//     switch err { ... }
+	//
+	// For union switch:
+	//     switch shape in s { ... }
+	BindName      Ident
+	Target        Expr
+	IsUnionSwitch bool
+	Cases         []SwitchCase
+	Loc           source.Span
+}
+
+func (*SwitchStmt) stmtNode() {}
+
+func (s *SwitchStmt) Span() source.Span {
+	return s.Loc
+}
+
+type SwitchCaseKind int
+
+const (
+	SwitchCaseExpr SwitchCaseKind = iota
+	SwitchCaseEnumVariant
+	SwitchCaseUnionMember
+	SwitchCaseNil
+	SwitchCaseDefault
+)
+
+type SwitchCase struct {
+	Kind SwitchCaseKind
+
+	// case .None:
+	EnumVariant Ident
+
+	// case Circle:
+	UnionMember Type
+
+	// case 10:
+	Expr Expr
+
+	Body []Stmt
+	Loc  source.Span
+}
+
 type ForStmt struct {
 	Init Stmt
 	Cond Expr

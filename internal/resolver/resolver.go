@@ -503,6 +503,9 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 		}
 
 		r.resolveBlockInScope(s.Body, forScope, true)
+
+	case *ast.SwitchStmt:
+		r.resolveSwitchStmt(scope, s)
 	}
 }
 
@@ -618,6 +621,31 @@ func (r *Resolver) resolveSymbolUse(scope *Scope, name string, span source.Span)
 	}
 
 	return sym
+}
+
+func (r *Resolver) resolveSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
+	r.resolveExpr(scope, s.Target)
+
+	for _, swCase := range s.Cases {
+		caseScope := NewScope(ScopeBlock, scope)
+
+		switch swCase.Kind {
+		case ast.SwitchCaseUnionMember:
+			r.resolveType(scope, swCase.UnionMember)
+
+		case ast.SwitchCaseExpr:
+			r.resolveExpr(scope, swCase.Expr)
+
+		case ast.SwitchCaseEnumVariant,
+			ast.SwitchCaseNil,
+			ast.SwitchCaseDefault:
+			// Resolved by type checker.
+		}
+
+		for _, stmt := range swCase.Body {
+			r.resolveStmt(caseScope, stmt)
+		}
+	}
 }
 
 func DebugSummary(scope *Scope) string {

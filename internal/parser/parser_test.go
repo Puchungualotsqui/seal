@@ -401,3 +401,98 @@ Main :: task() {
 		t.Fatalf("expected BlockStmt, got %T", task.Body.Stmts[0])
 	}
 }
+
+func TestParseEnumSwitch(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task(err Error) int {
+    switch err {
+    case .None:
+        return 0
+
+    case .ErrorReading:
+        return 1
+
+    default:
+        return 2
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf("expected 1 statement")
+	}
+
+	sw, ok := task.Body.Stmts[0].(*ast.SwitchStmt)
+	if !ok {
+		t.Fatalf("expected SwitchStmt, got %T", task.Body.Stmts[0])
+	}
+
+	if sw.IsUnionSwitch {
+		t.Fatalf("expected normal switch")
+	}
+
+	if len(sw.Cases) != 3 {
+		t.Fatalf("expected 3 cases, got %d", len(sw.Cases))
+	}
+}
+
+func TestParseUnionSwitch(t *testing.T) {
+	file, reporter := parse(t, `
+Area :: task(s Shape) f32 {
+    switch shape in s {
+    case Circle:
+        return shape.radius * shape.radius
+
+    case Rectangle:
+        return shape.width * shape.height
+
+    case nil:
+        return 0
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+	sw := task.Body.Stmts[0].(*ast.SwitchStmt)
+
+	if !sw.IsUnionSwitch {
+		t.Fatalf("expected union switch")
+	}
+
+	if sw.BindName.Name != "shape" {
+		t.Fatalf("expected bind name shape, got %q", sw.BindName.Name)
+	}
+
+	if len(sw.Cases) != 3 {
+		t.Fatalf("expected 3 cases")
+	}
+}
+
+func TestInIsStillNormalIdentifier(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    in := 10
+    value := in
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+
+	if len(task.Body.Stmts) != 2 {
+		t.Fatalf("expected 2 statements")
+	}
+}

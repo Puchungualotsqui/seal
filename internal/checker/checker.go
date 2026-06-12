@@ -20,6 +20,8 @@ const (
 	TypeF32
 	TypeF64
 	TypeString
+	TypeNil
+	TypeEnumLiteral
 
 	TypeUntypedInt
 	TypeUntypedFloat
@@ -45,10 +47,17 @@ type Type struct {
 	Len      int
 	Inferred bool
 
-	Fields []FieldInfo
+	Fields   []FieldInfo
+	Variants []EnumVariantInfo
+	Members  []*Type
 
 	Params  []*Type
 	Results []*Type
+}
+
+type EnumVariantInfo struct {
+	Name string
+	Span source.Span
 }
 
 type FieldInfo struct {
@@ -109,6 +118,10 @@ func (t *Type) String() string {
 		return fmt.Sprintf("task(%s) %s", strings.Join(params, ", "), strings.Join(results, ", "))
 	case TypePackage:
 		return "package " + t.Name
+	case TypeNil:
+		return "nil"
+	case TypeEnumLiteral:
+		return "." + t.Name
 	default:
 		return "<unknown>"
 	}
@@ -122,6 +135,7 @@ var (
 	F32Type          = &Type{Kind: TypeF32, Name: "f32"}
 	F64Type          = &Type{Kind: TypeF64, Name: "f64"}
 	StringType       = &Type{Kind: TypeString, Name: "string"}
+	NilType          = &Type{Kind: TypeNil, Name: "nil"}
 	UntypedIntType   = &Type{Kind: TypeUntypedInt, Name: "untyped int"}
 	UntypedFloatType = &Type{Kind: TypeUntypedFloat, Name: "untyped float"}
 )
@@ -603,6 +617,9 @@ func (c *Checker) checkStmt(scope *Scope, stmt ast.Stmt) {
 		}
 
 		c.checkBlockInScope(forScope, s.Body, true)
+
+	case *ast.SwitchStmt:
+		c.checkSwitchStmt(scope, s)
 	}
 }
 
@@ -666,7 +683,15 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 		if s.HasType {
 			c.checkAssignable(varType, valueType, s.Value.Span())
 		} else {
-			varType = c.defaultType(valueType)
+			if valueType.Kind == TypeEnumLiteral {
+				c.diags.Add(s.Value.Span(), fmt.Sprintf("enum literal .%s needs explicit type", valueType.Name))
+				varType = InvalidType
+			} else if valueType.Kind == TypeNil {
+				c.diags.Add(s.Value.Span(), "nil needs explicit type")
+				varType = InvalidType
+			} else {
+				varType = c.defaultType(valueType)
+			}
 		}
 	}
 
@@ -699,9 +724,10 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 		return sym.Type
 
 	case *ast.DotIdentExpr:
-		// .None, .ErrorReading, etc. need contextual enum typing.
-		// Later phase.
-		return InvalidType
+		return &Type{
+			Kind: TypeEnumLiteral,
+			Name: e.Name.Name,
+		}
 
 	case *ast.IntLitExpr:
 		return UntypedIntType
@@ -716,7 +742,7 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 		return BoolType
 
 	case *ast.NilLitExpr:
-		return InvalidType
+		return NilType
 
 	case *ast.UnaryExpr:
 		return c.checkUnaryExpr(scope, e)
@@ -1093,6 +1119,48 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 }
 
 func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
+	if dst == nil || src == nil {
+		return
+	}
+
+	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
+		return
+	}
+
+	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
+		if !c.enumHasVariant(dst, src.Name) {
+			c.diags.Add(span, fmt.Sprintf("enum %s has no variant .%s", dst.String(), src.Name))
+		}
+		return
+	}
+
+	if src.Kind == TypeEnumLiteral {
+		c.diags.Add(span, fmt.Sprintf("enum literal .%s needs contextual enum type", src.Name))
+		return
+	}
+
+	if dst.Kind == TypeUnion {
+		if src.Kind == TypeNil {
+			return
+		}
+
+		if c.unionHasMember(dst, src) {
+			return
+		}
+
+		c.diags.Add(span, fmt.Sprintf("cannot assign %s to union %s", src.String(), dst.String()))
+		return
+	}
+
+	if src.Kind == TypeNil {
+		if dst.Kind == TypePointer {
+			return
+		}
+
+		c.diags.Add(span, fmt.Sprintf("cannot assign nil to %s", dst.String()))
+		return
+	}
+
 	if !c.assignable(dst, src) {
 		c.diags.Add(span, fmt.Sprintf("cannot assign %s to %s", src.String(), dst.String()))
 	}
@@ -1105,6 +1173,18 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 
 	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
 		return true
+	}
+
+	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
+		return c.enumHasVariant(dst, src.Name)
+	}
+
+	if dst.Kind == TypeUnion {
+		return src.Kind == TypeNil || c.unionHasMember(dst, src)
+	}
+
+	if src.Kind == TypeNil {
+		return dst.Kind == TypePointer || dst.Kind == TypeUnion
 	}
 
 	if c.sameType(dst, src) {
@@ -1195,6 +1275,10 @@ func (c *Checker) defaultType(t *Type) *Type {
 		return IntType
 	case TypeUntypedFloat:
 		return F64Type
+	case TypeEnumLiteral:
+		return InvalidType
+	case TypeNil:
+		return InvalidType
 	default:
 		return t
 	}
@@ -1264,6 +1348,186 @@ func (c *Checker) checkBoolCondition(t *Type, span source.Span, message string) 
 
 	if !c.sameType(t, BoolType) {
 		c.diags.Add(span, fmt.Sprintf("%s, got %s", message, t.String()))
+	}
+}
+
+func (c *Checker) prepareEnumDecl(parent *Scope, d *ast.EnumDecl) {
+	sym := parent.LookupLocal(d.Name.Name)
+	if sym == nil {
+		return
+	}
+
+	var variants []EnumVariantInfo
+
+	for _, variant := range d.Variants {
+		variants = append(variants, EnumVariantInfo{
+			Name: variant.Name,
+			Span: variant.Span(),
+		})
+	}
+
+	sym.Type.Variants = variants
+}
+
+func (c *Checker) prepareUnionDecl(parent *Scope, d *ast.UnionDecl) {
+	sym := parent.LookupLocal(d.Name.Name)
+	if sym == nil {
+		return
+	}
+
+	var members []*Type
+
+	for _, member := range d.Members {
+		memberType := c.typeFromAst(parent, member)
+		members = append(members, memberType)
+	}
+
+	sym.Type.Members = members
+}
+
+func (c *Checker) enumHasVariant(enumType *Type, name string) bool {
+	if enumType == nil || enumType.Kind != TypeEnum {
+		return false
+	}
+
+	for _, variant := range enumType.Variants {
+		if variant.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Checker) unionHasMember(unionType *Type, memberType *Type) bool {
+	if unionType == nil || unionType.Kind != TypeUnion {
+		return false
+	}
+
+	for _, member := range unionType.Members {
+		if c.sameType(member, memberType) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Checker) unionMemberByName(unionType *Type, name string) *Type {
+	if unionType == nil || unionType.Kind != TypeUnion {
+		return nil
+	}
+
+	for _, member := range unionType.Members {
+		if member.Name == name {
+			return member
+		}
+	}
+
+	return nil
+}
+
+func (c *Checker) checkSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
+	targetType := c.checkExpr(scope, s.Target)
+
+	if s.IsUnionSwitch {
+		c.checkUnionSwitch(scope, s, targetType)
+		return
+	}
+
+	c.checkNormalSwitch(scope, s, targetType)
+}
+
+func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
+	if targetType.Kind != TypeEnum {
+		c.diags.Add(s.Target.Span(), fmt.Sprintf("switch target must be enum for now, got %s", targetType.String()))
+	}
+
+	for _, swCase := range s.Cases {
+		caseScope := NewScope(scope)
+
+		switch swCase.Kind {
+		case ast.SwitchCaseEnumVariant:
+			if targetType.Kind == TypeEnum && !c.enumHasVariant(targetType, swCase.EnumVariant.Name) {
+				c.diags.Add(
+					swCase.EnumVariant.Span(),
+					fmt.Sprintf("enum %s has no variant .%s", targetType.String(), swCase.EnumVariant.Name),
+				)
+			}
+
+		case ast.SwitchCaseDefault:
+			// ok
+
+		case ast.SwitchCaseExpr:
+			caseType := c.checkExpr(scope, swCase.Expr)
+			c.checkAssignable(targetType, caseType, swCase.Expr.Span())
+
+		case ast.SwitchCaseNil:
+			c.diags.Add(swCase.Loc, "nil case is only valid in union switch")
+
+		case ast.SwitchCaseUnionMember:
+			c.diags.Add(swCase.Loc, "type case is only valid in union switch")
+		}
+
+		for _, stmt := range swCase.Body {
+			c.checkStmt(caseScope, stmt)
+		}
+	}
+}
+
+func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
+	if targetType.Kind != TypeUnion {
+		c.diags.Add(s.Target.Span(), fmt.Sprintf("union switch target must be union, got %s", targetType.String()))
+	}
+
+	for _, swCase := range s.Cases {
+		caseScope := NewScope(scope)
+
+		switch swCase.Kind {
+		case ast.SwitchCaseUnionMember:
+			memberType := c.typeFromAst(scope, swCase.UnionMember)
+
+			if targetType.Kind == TypeUnion && !c.unionHasMember(targetType, memberType) {
+				c.diags.Add(
+					swCase.UnionMember.Span(),
+					fmt.Sprintf("union %s has no member %s", targetType.String(), memberType.String()),
+				)
+			}
+
+			if s.BindName.Name != "" {
+				caseScope.Declare(&Symbol{
+					Name: s.BindName.Name,
+					Kind: SymbolVar,
+					Type: memberType,
+					Span: s.BindName.Span(),
+					Node: s,
+				})
+			}
+
+		case ast.SwitchCaseNil:
+			if s.BindName.Name != "" {
+				caseScope.Declare(&Symbol{
+					Name: s.BindName.Name,
+					Kind: SymbolVar,
+					Type: NilType,
+					Span: s.BindName.Span(),
+					Node: s,
+				})
+			}
+
+		case ast.SwitchCaseDefault:
+			// No narrowing.
+
+		case ast.SwitchCaseEnumVariant:
+			c.diags.Add(swCase.EnumVariant.Span(), "enum case is not valid in union switch")
+
+		case ast.SwitchCaseExpr:
+			c.diags.Add(swCase.Expr.Span(), "expression case is not valid in union switch")
+		}
+
+		for _, stmt := range swCase.Body {
+			c.checkStmt(caseScope, stmt)
+		}
 	}
 }
 

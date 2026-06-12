@@ -730,6 +730,9 @@ func (p *Parser) parseStmt() ast.Stmt {
 
 	case p.match(token.KeywordFor):
 		return p.parseForStmt(start)
+
+	case p.match(token.KeywordSwitch):
+		return p.parseSwitchStmt(start)
 	}
 
 	return p.parseSimpleStmt()
@@ -789,6 +792,153 @@ func (p *Parser) parseForStmt(start int) ast.Stmt {
 		Cond: condStmt.Expr,
 		Body: body,
 		Loc:  p.span(start, body.Span().End),
+	}
+}
+
+func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
+	first := p.parseExpr(0)
+	if first == nil {
+		p.errorHere("expected expression after switch")
+		return nil
+	}
+
+	isUnionSwitch := false
+	var bindName ast.Ident
+	target := first
+
+	if id, ok := first.(*ast.IdentExpr); ok {
+		if p.at(token.Ident) && p.peek().Lexeme == "in" {
+			p.advance()
+
+			isUnionSwitch = true
+			bindName = id.Name
+
+			target = p.parseExpr(0)
+			if target == nil {
+				p.errorHere("expected union expression after 'in'")
+				return nil
+			}
+		}
+	}
+
+	if !p.expect(token.LBrace, "expected '{' after switch expression") {
+		return nil
+	}
+
+	var cases []ast.SwitchCase
+
+	for !p.at(token.RBrace) && !p.at(token.EOF) {
+		if p.match(token.KeywordCase) {
+			cases = append(cases, p.parseSwitchCase(isUnionSwitch))
+			continue
+		}
+
+		if p.match(token.KeywordDefault) {
+			cases = append(cases, p.parseDefaultSwitchCase())
+			continue
+		}
+
+		p.errorHere("expected switch case or default")
+		p.synchronizeSwitchCase()
+	}
+
+	endTok := p.expectToken(token.RBrace, "expected '}' after switch")
+
+	return &ast.SwitchStmt{
+		BindName:      bindName,
+		Target:        target,
+		IsUnionSwitch: isUnionSwitch,
+		Cases:         cases,
+		Loc:           p.span(start, endTok.Span.End),
+	}
+}
+
+func (p *Parser) parseSwitchCase(isUnionSwitch bool) ast.SwitchCase {
+	start := p.previous().Span.Start
+
+	var c ast.SwitchCase
+
+	if p.match(token.KeywordNil) {
+		c.Kind = ast.SwitchCaseNil
+	} else if p.match(token.Dot) {
+		name := p.expectIdent("expected enum variant after '.'")
+		c.Kind = ast.SwitchCaseEnumVariant
+		c.EnumVariant = name
+	} else if isUnionSwitch {
+		member := p.parseType()
+		if member == nil {
+			p.errorHere("expected union member type")
+		}
+
+		c.Kind = ast.SwitchCaseUnionMember
+		c.UnionMember = member
+	} else {
+		expr := p.parseExpr(0)
+		if expr == nil {
+			p.errorHere("expected case expression")
+		}
+
+		c.Kind = ast.SwitchCaseExpr
+		c.Expr = expr
+	}
+
+	p.expect(token.Colon, "expected ':' after switch case")
+
+	c.Body = p.parseSwitchCaseBody()
+
+	end := p.previous().Span.End
+	if len(c.Body) > 0 {
+		end = c.Body[len(c.Body)-1].Span().End
+	}
+
+	c.Loc = p.span(start, end)
+	return c
+}
+
+func (p *Parser) parseDefaultSwitchCase() ast.SwitchCase {
+	start := p.previous().Span.Start
+
+	p.expect(token.Colon, "expected ':' after default")
+
+	body := p.parseSwitchCaseBody()
+
+	end := p.previous().Span.End
+	if len(body) > 0 {
+		end = body[len(body)-1].Span().End
+	}
+
+	return ast.SwitchCase{
+		Kind: ast.SwitchCaseDefault,
+		Body: body,
+		Loc:  p.span(start, end),
+	}
+}
+
+func (p *Parser) parseSwitchCaseBody() []ast.Stmt {
+	var stmts []ast.Stmt
+
+	for !p.at(token.KeywordCase) &&
+		!p.at(token.KeywordDefault) &&
+		!p.at(token.RBrace) &&
+		!p.at(token.EOF) {
+		stmt := p.parseStmt()
+		if stmt != nil {
+			stmts = append(stmts, stmt)
+			continue
+		}
+
+		p.synchronizeStmt()
+	}
+
+	return stmts
+}
+
+func (p *Parser) synchronizeSwitchCase() {
+	for !p.at(token.EOF) &&
+		!p.at(token.KeywordCase) &&
+		!p.at(token.KeywordDefault) &&
+		!p.at(token.RBrace) {
+		p.advance()
 	}
 }
 
