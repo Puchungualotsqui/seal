@@ -70,95 +70,14 @@ Print :: task(format string, args ...any) {
 }
 
 Println :: task(format string = "", args ...any) {
-    argIndex := 0
-    i := 0
-
-    for i < len(format) {
-        ch := format[i]
-
-        if ch == '%' {
-            next := i + 1
-
-            if next < len(format) && format[next] == '%' {
-                writeChar('%')
-                i = i + 2
-            } else {
-                if argIndex < len(args) {
-                    writeAny(args[argIndex])
-                    argIndex = argIndex + 1
-                } else {
-                    writeChar('%')
-                }
-
-                i = i + 1
-            }
-        } else {
-            writeChar(ch)
-            i = i + 1
-        }
-    }
-
+    Print(format, args...)
     writeChar('\n')
 }
 
 Printf :: task(format string, args ...any) {
-    argIndex := 0
-    i := 0
-
-    for i < len(format) {
-        ch := format[i]
-
-        if ch == '%' {
-            next := i + 1
-
-            if next < len(format) && format[next] == '%' {
-                writeChar('%')
-                i = i + 2
-            } else {
-                if argIndex < len(args) {
-                    writeAny(args[argIndex])
-                    argIndex = argIndex + 1
-                } else {
-                    writeChar('%')
-                }
-
-                i = i + 1
-            }
-        } else {
-            writeChar(ch)
-            i = i + 1
-        }
-    }
+    Print(format, args...)
 }
 
 Printfl :: task(format string = "", args ...any) {
-    argIndex := 0
-    i := 0
-
-    for i < len(format) {
-        ch := format[i]
-
-        if ch == '%' {
-            next := i + 1
-
-            if next < len(format) && format[next] == '%' {
-                writeChar('%')
-                i = i + 2
-            } else {
-                if argIndex < len(args) {
-                    writeAny(args[argIndex])
-                    argIndex = argIndex + 1
-                } else {
-                    writeChar('%')
-                }
-
-                i = i + 1
-            }
-        } else {
-            writeChar(ch)
-            i = i + 1
-        }
-    }
-
-    writeChar('\n')
+    Println(format, args...)
 }

@@ -8,6 +8,8 @@
 #define NULL ((void*)0)
 #endif
 
+#include "stdlib.h"
+
 typedef struct sealString {
 	const unsigned char *data;
 	size_t byte_len;
@@ -149,6 +151,22 @@ typedef struct sealVariadic_any {
 	size_t len;
 } sealVariadic_any;
 
+void fmt_Print(sealString arg0, sealVariadic_any arg1);
+void fmt_Printf(sealString arg0, sealVariadic_any arg1);
+void fmt_Printfl(sealString arg0, sealVariadic_any arg1);
+void fmt_Println(sealString arg0, sealVariadic_any arg1);
+void fmt_writeAny(sealAny arg0);
+void seal_fmt_write_bool(bool arg0);
+void seal_fmt_write_cstring(const char * arg0);
+void seal_fmt_write_char(uint32_t arg0);
+void seal_fmt_write_f32(float arg0);
+void seal_fmt_write_f64(double arg0);
+void seal_fmt_write_int(int arg0);
+void seal_fmt_write_rawptr(void * arg0);
+void seal_fmt_write_string(sealString arg0);
+void seal_fmt_write_usize(size_t arg0);
+
+int main(void);
 void seal_fmt_write_cstring(const char * s);
 void seal_fmt_write_string(sealString s);
 void seal_fmt_write_char(uint32_t c);
@@ -158,13 +176,23 @@ void seal_fmt_write_f32(float v);
 void seal_fmt_write_f64(double v);
 void seal_fmt_write_bool(bool v);
 void seal_fmt_write_rawptr(void * v);
-void fmt_writeAny(sealAny v);
-void fmt_Print(sealString format, sealVariadic_any args);
-void fmt_Println(sealString format, sealVariadic_any args);
-void fmt_Printf(sealString format, sealVariadic_any args);
-void fmt_Printfl(sealString format, sealVariadic_any args);
+void app_writeAny(sealAny v);
+void app_Print(sealString format, sealVariadic_any args);
+void app_Println(sealString format, sealVariadic_any args);
+void app_Printf(sealString format, sealVariadic_any args);
+void app_Printfl(sealString format, sealVariadic_any args);
+void * malloc(size_t size);
+void free(void * ptr);
 
-void fmt_writeAny(sealAny v) {
+int main(void) {
+	sealString name = (sealString){.data = (const unsigned char *)"Roger", .byte_len = 5};
+	int hp = 64;
+	fmt_Print((sealString){.data = (const unsigned char *)"player % has % hp\n", .byte_len = 18}, (sealVariadic_any){.data = (sealAny[]){sealAny_string(name), sealAny_int(hp)}, .len = 2});
+	fmt_Println((sealString){.data = (const unsigned char *)"done", .byte_len = 4}, (sealVariadic_any){.data = NULL, .len = 0});
+	return 0;
+}
+
+void app_writeAny(sealAny v) {
 	switch ((v).type) {
 		case sealType_int:
 			seal_fmt_write_int(((v).value.as_int));
@@ -196,7 +224,7 @@ void fmt_writeAny(sealAny v) {
 	}
 }
 
-void fmt_Print(sealString format, sealVariadic_any args) {
+void app_Print(sealString format, sealVariadic_any args) {
 	int argIndex = 0;
 	int i = 0;
 	for (; (i < sealString_len(format)); ) {
@@ -209,7 +237,7 @@ void fmt_Print(sealString format, sealVariadic_any args) {
 			} else {
 				{
 					if ((argIndex < ((args).len))) {
-						fmt_writeAny((args).data[argIndex]);
+						app_writeAny((args).data[argIndex]);
 						argIndex = (argIndex + 1);
 					} else {
 						{
@@ -228,16 +256,16 @@ void fmt_Print(sealString format, sealVariadic_any args) {
 	}
 }
 
-void fmt_Println(sealString format, sealVariadic_any args) {
-	fmt_Print(format, args);
+void app_Println(sealString format, sealVariadic_any args) {
+	app_Print(format, args);
 	seal_fmt_write_char(10);
 }
 
-void fmt_Printf(sealString format, sealVariadic_any args) {
-	fmt_Print(format, args);
+void app_Printf(sealString format, sealVariadic_any args) {
+	app_Print(format, args);
 }
 
-void fmt_Printfl(sealString format, sealVariadic_any args) {
-	fmt_Println(format, args);
+void app_Printfl(sealString format, sealVariadic_any args) {
+	app_Println(format, args);
 }
 

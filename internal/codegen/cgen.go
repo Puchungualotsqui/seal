@@ -1107,6 +1107,10 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	case *ast.CallExpr:
 		return g.emitCallExpr(e)
 
+	case *ast.SpreadExpr:
+		g.error(e.Span(), "spread can only be emitted as a call argument")
+		return "0"
+
 	case *ast.SelectorExpr:
 		if id, ok := e.Left.(*ast.IdentExpr); ok {
 			if _, ok := g.packages[id.Name.Name]; ok {
@@ -1284,10 +1288,6 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		return g.emitLenCall(e)
 	}
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
-		if id.Name.Name == "Print" {
-			return g.emitBuiltinPrintWithArgs(e, preparedArgs)
-		}
-
 		argTypes := make([]CType, 0, len(e.Args))
 		for _, arg := range e.Args {
 			argTypes = append(argTypes, g.inferExprType(arg, nil))
@@ -1529,9 +1529,112 @@ func (g *Generator) emitSealVariadicTaskCall(name string, info TaskInfo, args []
 		rest = args[fixedCount:]
 	}
 
+	if len(rest) == 1 {
+		if spread, ok := rest[0].(*ast.SpreadExpr); ok {
+			outArgs = append(outArgs, g.emitSpreadAsVariadic(elemType, spread))
+			return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+		}
+	}
+
 	outArgs = append(outArgs, g.emitVariadicLiteral(elemType, rest, preparedArgs, fixedCount))
 
 	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+}
+
+func (g *Generator) emitSpreadAsVariadic(elem CType, spread *ast.SpreadExpr) string {
+	variadicType := g.variadicCType(elem)
+	srcType := g.inferExprType(spread.Expr, nil)
+
+	if srcType.IsVariadic {
+		if srcType.Elem == nil {
+			g.error(spread.Span(), "cannot spread invalid variadic value")
+			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+		}
+
+		if srcType.Elem.SealName != elem.SealName {
+			g.error(spread.Span(), fmt.Sprintf("cannot spread %s into ...%s", srcType.String(), elem.SealName))
+			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+		}
+
+		return g.emitExpr(spread.Expr, nil)
+	}
+
+	if srcType.IsArray {
+		if srcType.Elem == nil {
+			g.error(spread.Span(), "cannot spread invalid array")
+			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+		}
+
+		if srcType.ArrayLen == "" {
+			g.error(spread.Span(), "cannot spread array with unknown length")
+			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+		}
+
+		if srcType.Elem.SealName == elem.SealName {
+			return fmt.Sprintf(
+				"(%s){.data = %s, .len = %s}",
+				variadicType.Name,
+				g.emitArrayDataPointer(spread.Expr, elem),
+				srcType.ArrayLen,
+			)
+		}
+
+		return g.emitRepackedArraySpread(elem, spread.Expr, srcType, variadicType)
+	}
+
+	g.error(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", srcType.String()))
+	return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+}
+
+func (g *Generator) emitArrayDataPointer(expr ast.Expr, elem CType) string {
+	if arr, ok := expr.(*ast.ArrayLiteralExpr); ok {
+		var values []string
+
+		for _, value := range arr.Values {
+			values = append(values, g.emitExpr(value, &elem))
+		}
+
+		return fmt.Sprintf("(%s[]){%s}", elem.Name, strings.Join(values, ", "))
+	}
+
+	return g.emitExpr(expr, nil)
+}
+
+func (g *Generator) emitRepackedArraySpread(elem CType, expr ast.Expr, srcType CType, variadicType CType) string {
+	length, err := strconv.Atoi(srcType.ArrayLen)
+	if err != nil {
+		g.error(expr.Span(), "cannot repack spread array with non-literal length")
+		return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+	}
+
+	var values []string
+
+	if arr, ok := expr.(*ast.ArrayLiteralExpr); ok {
+		for _, value := range arr.Values {
+			values = append(values, g.emitExpr(value, &elem))
+		}
+	} else {
+		for i := 0; i < length; i++ {
+			indexExpr := &ast.IndexExpr{
+				Left: expr,
+				Index: &ast.IntLitExpr{
+					Value: fmt.Sprintf("%d", i),
+					Loc:   expr.Span(),
+				},
+				Loc: expr.Span(),
+			}
+
+			values = append(values, g.emitExpr(indexExpr, &elem))
+		}
+	}
+
+	return fmt.Sprintf(
+		"(%s){.data = (%s[]){%s}, .len = %d}",
+		variadicType.Name,
+		elem.Name,
+		strings.Join(values, ", "),
+		length,
+	)
 }
 
 func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArgs []string, preparedOffset int) string {
@@ -1561,74 +1664,6 @@ func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArg
 		strings.Join(values, ", "),
 		len(values),
 	)
-}
-
-func (g *Generator) emitBuiltinPrint(e *ast.CallExpr) string {
-	return g.emitBuiltinPrintWithArgs(e, nil)
-}
-
-func (g *Generator) emitBuiltinPrintWithArgs(e *ast.CallExpr, preparedArgs []string) string {
-	if len(e.Args) == 0 {
-		return `printf("")`
-	}
-
-	var format strings.Builder
-	var args []string
-
-	for i, arg := range e.Args {
-		argType := g.inferExprType(arg, nil)
-
-		rendered := ""
-		if preparedArgs != nil && i < len(preparedArgs) {
-			rendered = preparedArgs[i]
-		} else {
-			rendered = g.emitExpr(arg, nil)
-		}
-
-		switch argType.SealName {
-		case "int":
-			format.WriteString("%d")
-			args = append(args, rendered)
-
-		case "u8":
-			format.WriteString("%u")
-			args = append(args, rendered)
-
-		case "usize":
-			format.WriteString("%zu")
-			args = append(args, rendered)
-
-		case "f32", "f64":
-			format.WriteString("%f")
-			args = append(args, rendered)
-
-		case "bool":
-			format.WriteString("%s")
-			args = append(args, fmt.Sprintf("(%s ? \"true\" : \"false\")", rendered))
-
-		case "char":
-			format.WriteString("%u")
-			args = append(args, rendered)
-
-		case "cstring":
-			format.WriteString("%s")
-			args = append(args, rendered)
-
-		case "string":
-			format.WriteString("%.*s")
-			args = append(args, fmt.Sprintf("(int)((%s).byte_len)", rendered))
-			args = append(args, fmt.Sprintf("(const char *)((%s).data)", rendered))
-
-		default:
-			g.error(arg.Span(), fmt.Sprintf("Print does not support %s in C codegen yet", argType.String()))
-		}
-	}
-
-	if len(args) == 0 {
-		return fmt.Sprintf("printf(\"%s\")", escapeCString(format.String()))
-	}
-
-	return fmt.Sprintf("printf(\"%s\", %s)", escapeCString(format.String()), strings.Join(args, ", "))
 }
 
 func (g *Generator) emitDeferStmt(s *ast.DeferStmt) {
@@ -2005,6 +2040,9 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 		return CInvalid
 
+	case *ast.SpreadExpr:
+		return g.inferExprType(e.Expr, expected)
+
 	case *ast.IntLitExpr:
 		return CInt
 
@@ -2119,10 +2157,6 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		}
 
 		if id, ok := e.Callee.(*ast.IdentExpr); ok {
-			if id.Name.Name == "Print" {
-				return CVoid
-			}
-
 			if info, ok := g.tasks[id.Name.Name]; ok {
 				return info.ReturnType
 			}

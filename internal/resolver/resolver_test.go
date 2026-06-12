@@ -238,14 +238,14 @@ int :: struct {
 	}
 }
 
-func TestCannotShadowImportedLikeDirectiveSymbol(t *testing.T) {
+func TestCImportDirectiveDoesNotDeclareVisibleSymbol(t *testing.T) {
 	_, reporter := resolve(t, `
 c :: @c_import {
-    include "stdio.h"
+    include "stdlib.h"
 }
 
 Main :: task() {
-    c := 10
+    c
 }
 `)
 
@@ -253,8 +253,8 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `declaration of "c" shadows visible package`) {
-		t.Fatalf("expected package shadowing diagnostic, got:\n%s", reporter.String())
+	if !strings.Contains(reporter.String(), `undefined symbol "c"`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
 

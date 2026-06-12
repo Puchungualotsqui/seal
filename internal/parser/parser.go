@@ -475,7 +475,6 @@ func (p *Parser) parseParamList() []ast.Param {
 				break
 			}
 
-			// Grouped parameters: a, b int
 			nextName := p.expectIdent("expected parameter name")
 			names = append(names, nextName)
 		}
@@ -501,11 +500,13 @@ func (p *Parser) parseParamList() []ast.Param {
 			defaultValue = p.parseExpr(0)
 		}
 
-		for _, name := range names {
+		for i, name := range names {
+			paramIsVariadic := isVariadic && i == len(names)-1
+
 			params = append(params, ast.Param{
 				Name:       name,
 				Type:       paramType,
-				IsVariadic: isVariadic,
+				IsVariadic: paramIsVariadic,
 				HasDefault: hasDefault,
 				Default:    defaultValue,
 			})
@@ -1322,26 +1323,38 @@ func (p *Parser) parseGenericExpr(base ast.Expr) ast.Expr {
 	}
 }
 
+func (p *Parser) parseCallArgs() []ast.Expr {
+	var args []ast.Expr
+
+	for !p.at(token.RParen) && !p.at(token.EOF) {
+		arg := p.parseExpr(0)
+		if arg == nil {
+			break
+		}
+
+		if p.match(token.Ellipsis) {
+			arg = &ast.SpreadExpr{
+				Expr: arg,
+				Loc:  p.span(arg.Span().Start, p.previous().Span.End),
+			}
+		}
+
+		args = append(args, arg)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return args
+}
+
 func (p *Parser) parsePostfix(left ast.Expr) ast.Expr {
 	start := left.Span().Start
 
 	switch {
 	case p.match(token.LParen):
-		var args []ast.Expr
-
-		for !p.at(token.RParen) && !p.at(token.EOF) {
-			arg := p.parseExpr(0)
-			if arg == nil {
-				break
-			}
-
-			args = append(args, arg)
-
-			if !p.match(token.Comma) {
-				break
-			}
-		}
-
+		args := p.parseCallArgs()
 		endTok := p.expectToken(token.RParen, "expected ')' after arguments")
 
 		return &ast.CallExpr{

@@ -119,11 +119,33 @@ func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) err
 		compiler = "cc"
 	}
 
-	var args []string
+	args := make([]string, 0, len(loaded)*2+2)
+	seen := map[string]bool{}
+
+	addFile := func(path string) {
+		if path == "" {
+			return
+		}
+
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+
+		if seen[abs] {
+			return
+		}
+
+		seen[abs] = true
+		args = append(args, path)
+	}
 
 	for _, pkg := range loaded {
-		args = append(args, pkg.CPath)
-		args = append(args, pkg.NativeCFiles...)
+		addFile(pkg.CPath)
+
+		for _, native := range pkg.NativeCFiles {
+			addFile(native)
+		}
 	}
 
 	args = append(args, "-o", output)

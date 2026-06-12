@@ -525,6 +525,17 @@ func (e *CallExpr) Span() source.Span {
 	return e.Loc
 }
 
+type SpreadExpr struct {
+	Expr Expr
+	Loc  source.Span
+}
+
+func (*SpreadExpr) exprNode() {}
+
+func (e *SpreadExpr) Span() source.Span {
+	return e.Loc
+}
+
 type SelectorExpr struct {
 	Left Expr
 	Name Ident

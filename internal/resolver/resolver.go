@@ -306,8 +306,8 @@ func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 		r.declareSymbol(scope, d.Name, SymbolOverload, d.Span(), d)
 
 	case *ast.DirectiveDecl:
-		// c :: @c_import { ... } behaves like a package namespace symbol.
-		r.declareSymbol(scope, d.Name.Name, SymbolPackage, d.Name.Span(), d)
+		// c :: @c_import { ... } is codegen metadata, not a visible Seal symbol.
+		return
 
 	case *ast.ImplDecl:
 		// impl does not introduce a new symbol.
@@ -644,6 +644,9 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		for _, arg := range e.Args {
 			r.resolveType(scope, arg)
 		}
+
+	case *ast.SpreadExpr:
+		r.resolveExpr(scope, e.Expr)
 
 	case *ast.SelectorExpr:
 		if id, ok := e.Left.(*ast.IdentExpr); ok {

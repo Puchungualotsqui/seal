@@ -312,6 +312,73 @@ type overloadResolution struct {
 	Ambiguous bool
 }
 
+type checkedCallArg struct {
+	Type *Type
+	Span source.Span
+}
+
+func (c *Checker) checkCallArgumentTypes(scope *Scope, args []ast.Expr) ([]*Type, []source.Span) {
+	var types []*Type
+	var spans []source.Span
+
+	for i, arg := range args {
+		spread, ok := arg.(*ast.SpreadExpr)
+		if !ok {
+			types = append(types, c.checkExpr(scope, arg))
+			spans = append(spans, arg.Span())
+			continue
+		}
+
+		if i != len(args)-1 {
+			c.diags.Add(spread.Span(), "spread argument must be the last argument")
+		}
+
+		spreadType := c.checkExpr(scope, spread.Expr)
+
+		switch spreadType.Kind {
+		case TypeArray:
+			if spreadType.Elem == nil {
+				types = append(types, InvalidType)
+				spans = append(spans, spread.Span())
+				continue
+			}
+
+			if spreadType.Len < 0 {
+				c.diags.Add(spread.Span(), "cannot spread array with unknown length")
+				types = append(types, InvalidType)
+				spans = append(spans, spread.Span())
+				continue
+			}
+
+			for j := 0; j < spreadType.Len; j++ {
+				types = append(types, spreadType.Elem)
+				spans = append(spans, spread.Span())
+			}
+
+		case TypeVariadic:
+			if spreadType.Elem == nil {
+				types = append(types, InvalidType)
+				spans = append(spans, spread.Span())
+				continue
+			}
+
+			types = append(types, &Type{
+				Kind: TypeVariadic,
+				Elem: spreadType.Elem,
+				Name: "..." + spreadType.Elem.String(),
+			})
+			spans = append(spans, spread.Span())
+
+		default:
+			c.diags.Add(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", spreadType.String()))
+			types = append(types, InvalidType)
+			spans = append(spans, spread.Span())
+		}
+	}
+
+	return types, spans
+}
+
 func (c *Checker) resolveOverload(info *OverloadInfo, argTypes []*Type) overloadResolution {
 	best := overloadResolution{
 		Score: 1 << 30,
@@ -370,6 +437,10 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 		}
 
 		for i := 0; i < count; i++ {
+			if argTypes[i] != nil && argTypes[i].Kind == TypeVariadic {
+				return 0, false
+			}
+
 			itemScore, ok := c.conversionScore(taskType.Params[i], argTypes[i])
 			if !ok {
 				return 0, false
@@ -379,7 +450,12 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 		}
 
 		for i := fixedCount; i < len(argTypes); i++ {
-			itemScore, ok := c.conversionScore(variadicElem, argTypes[i])
+			got := argTypes[i]
+			if got != nil && got.Kind == TypeVariadic {
+				got = got.Elem
+			}
+
+			itemScore, ok := c.conversionScore(variadicElem, got)
 			if !ok {
 				return 0, false
 			}
@@ -401,6 +477,10 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 	score := 0
 
 	for i := range argTypes {
+		if argTypes[i] != nil && argTypes[i].Kind == TypeVariadic {
+			return 0, false
+		}
+
 		itemScore, ok := c.conversionScore(taskType.Params[i], argTypes[i])
 		if !ok {
 			return 0, false
@@ -409,7 +489,6 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 		score += itemScore
 	}
 
-	// Prefer candidates that do not need defaults when both match.
 	missingDefaults := total - len(argTypes)
 	score += missingDefaults * 5
 
@@ -649,16 +728,8 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 		})
 
 	case *ast.DirectiveDecl:
-		scope.Declare(&Symbol{
-			Name: d.Name.Name,
-			Kind: SymbolPackage,
-			Type: &Type{
-				Kind: TypePackage,
-				Name: d.Name.Name,
-			},
-			Span: d.Name.Span(),
-			Node: d,
-		})
+		// c :: @c_import { ... } is codegen metadata, not a visible Seal symbol.
+		return
 
 	case *ast.ImplDecl:
 		return
@@ -1307,6 +1378,11 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 			Name: e.Name.Name,
 		}
 
+	case *ast.SpreadExpr:
+		c.diags.Add(e.Span(), "spread can only be used as a call argument")
+		c.checkExpr(scope, e.Expr)
+		return InvalidType
+
 	case *ast.GenericExpr:
 		c.diags.Add(e.Span(), "generic expression cannot be used as a value")
 		return InvalidType
@@ -1657,10 +1733,7 @@ func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
 }
 
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
-	argTypes := make([]*Type, 0, len(e.Args))
-	for _, arg := range e.Args {
-		argTypes = append(argTypes, c.checkExpr(scope, arg))
-	}
+	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
 
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
@@ -1679,10 +1752,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 
 		switch sym.Kind {
 		case SymbolTask:
-			return c.checkDirectTaskCall(sym, argTypes, e.Args, e.Span())
+			return c.checkDirectTaskCall(sym, argTypes, argSpans, e.Span())
 
 		case SymbolOverload:
-			return c.checkOverloadCall(sym, argTypes, e.Args, e.Span())
+			return c.checkOverloadCall(sym, argTypes, argSpans, e.Span())
 
 		default:
 			c.diags.Add(id.Span(), fmt.Sprintf("cannot call non-task symbol %q", id.Name.Name))
@@ -1694,7 +1767,7 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		if id, ok := selector.Left.(*ast.IdentExpr); ok {
 			pkgSym := scope.Lookup(id.Name.Name)
 			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
-				return c.checkPackageCall(pkgSym, selector, argTypes, e.Args, e.Span())
+				return c.checkPackageCall(pkgSym, selector, argTypes, argSpans, e.Span())
 			}
 		}
 	}
@@ -1706,10 +1779,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		return InvalidType
 	}
 
-	return c.checkTaskTypeCall(calleeType, argTypes, e.Args, e.Span())
+	return c.checkTaskTypeCall(calleeType, argTypes, argSpans, e.Span())
 }
 
-func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
 	if pkgSym.Package == nil {
 		c.diags.Add(selector.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
 		return InvalidType
@@ -1723,10 +1796,10 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 
 	switch member.Kind {
 	case SymbolTask:
-		return c.checkDirectTaskCall(member, argTypes, args, span)
+		return c.checkDirectTaskCall(member, argTypes, argSpans, span)
 
 	case SymbolOverload:
-		return c.checkOverloadCall(member, argTypes, args, span)
+		return c.checkOverloadCall(member, argTypes, argSpans, span)
 
 	default:
 		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package symbol %s.%s is not callable", pkgSym.Name, selector.Name.Name))
@@ -1734,16 +1807,16 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 	}
 }
 
-func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
 		return InvalidType
 	}
 
-	return c.checkTaskTypeCall(sym.Type, argTypes, args, span)
+	return c.checkTaskTypeCall(sym.Type, argTypes, argSpans, span)
 }
 
-func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
 	required := taskType.RequiredParams
 	total := len(taskType.Params)
 
@@ -1771,11 +1844,21 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 		}
 
 		for i := 0; i < count; i++ {
-			c.checkAssignable(taskType.Params[i], argTypes[i], args[i].Span())
+			if argTypes[i] != nil && argTypes[i].Kind == TypeVariadic {
+				c.diags.Add(argSpans[i], "spread variadic argument cannot be used for fixed parameter")
+				continue
+			}
+
+			c.checkAssignable(taskType.Params[i], argTypes[i], argSpans[i])
 		}
 
 		for i := fixedCount; i < len(argTypes); i++ {
-			c.checkAssignable(variadicElem, argTypes[i], args[i].Span())
+			got := argTypes[i]
+			if got != nil && got.Kind == TypeVariadic {
+				got = got.Elem
+			}
+
+			c.checkAssignable(variadicElem, got, argSpans[i])
 		}
 
 		return c.resultTypeFromCall(taskType, span)
@@ -1801,7 +1884,12 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 	}
 
 	for i := 0; i < count; i++ {
-		c.checkAssignable(taskType.Params[i], argTypes[i], args[i].Span())
+		if argTypes[i] != nil && argTypes[i].Kind == TypeVariadic {
+			c.diags.Add(argSpans[i], "cannot spread variadic argument into non-variadic task")
+			continue
+		}
+
+		c.checkAssignable(taskType.Params[i], argTypes[i], argSpans[i])
 	}
 
 	return c.resultTypeFromCall(taskType, span)
@@ -1869,7 +1957,7 @@ func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Sp
 	}
 }
 
-func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
 	info := sym.Overload
 	if info == nil {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
@@ -1894,11 +1982,7 @@ func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, args []ast.Ex
 		return InvalidType
 	}
 
-	for i, arg := range args {
-		c.checkAssignable(result.Candidate.Type.Params[i], argTypes[i], arg.Span())
-	}
-
-	return c.resultTypeFromCall(result.Candidate.Type, span)
+	return c.checkTaskTypeCall(result.Candidate.Type, argTypes, argSpans, span)
 }
 
 func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
