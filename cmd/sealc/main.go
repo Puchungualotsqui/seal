@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"seal/internal/build"
 	"seal/internal/checker"
 	cgen "seal/internal/codegen"
 	"seal/internal/diag"
@@ -38,6 +39,9 @@ func main() {
 	case "emit-c":
 		runEmitC(os.Args[2])
 
+	case "packages":
+		runPackages(os.Args[2])
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		printUsage()
@@ -52,6 +56,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  sealc resolve <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc check <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc emit-c <file.seal>")
+	fmt.Fprintln(os.Stderr, "  sealc packages <path>")
 }
 
 func readAndLex(path string) ([]token.Token, *diag.Reporter) {
@@ -205,6 +210,16 @@ func runEmitC(path string) {
 	}
 
 	fmt.Print(out)
+}
+
+func runPackages(path string) {
+	graph, err := build.DiscoverAndBuildGraph(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Print(build.DebugGraph(graph))
 }
 
 func printToken(tok token.Token) {
