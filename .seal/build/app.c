@@ -151,6 +151,19 @@ typedef struct sealVariadic_any {
 	size_t len;
 } sealVariadic_any;
 
+typedef struct CAllocator {
+} CAllocator;
+
+typedef struct Allocator_vtable {
+	void * (*Alloc)(void *data, size_t arg1);
+	void (*Free)(void *data, void * arg1);
+} Allocator_vtable;
+
+typedef struct Allocator {
+	void *data;
+	Allocator_vtable *vtable;
+} Allocator;
+
 void fmt_Print(sealString arg0, sealVariadic_any arg1);
 void fmt_Printf(sealString arg0, sealVariadic_any arg1);
 void fmt_Printfl(sealString arg0, sealVariadic_any arg1);
@@ -183,12 +196,27 @@ void app_Printf(sealString format, sealVariadic_any args);
 void app_Printfl(sealString format, sealVariadic_any args);
 void * malloc(size_t size);
 void free(void * ptr);
+void * app_Alloc(CAllocator * a, size_t size);
+void app_Free(CAllocator * a, void * ptr);
+
+static void * Allocator_CAllocator_Alloc(void *data, size_t arg1) {
+	return app_Alloc((CAllocator *)data, arg1);
+}
+
+static void Allocator_CAllocator_Free(void *data, void * arg1) {
+	app_Free((CAllocator *)data, arg1);
+}
+
+static Allocator_vtable Allocator_CAllocator_vtable = {
+	.Alloc = Allocator_CAllocator_Alloc,
+	.Free = Allocator_CAllocator_Free,
+};
 
 int main(void) {
-	sealString name = (sealString){.data = (const unsigned char *)"Roger", .byte_len = 5};
-	int hp = 64;
-	fmt_Print((sealString){.data = (const unsigned char *)"player % has % hp\n", .byte_len = 18}, (sealVariadic_any){.data = (sealAny[]){sealAny_string(name), sealAny_int(hp)}, .len = 2});
-	fmt_Println((sealString){.data = (const unsigned char *)"done", .byte_len = 4}, (sealVariadic_any){.data = NULL, .len = 0});
+	CAllocator allocator = (CAllocator){};
+	Allocator a = (Allocator){.data = (void *)(&allocator), .vtable = &Allocator_CAllocator_vtable};
+	void * ptr = (a).vtable->Alloc((a).data, 64);
+	(a).vtable->Free((a).data, ptr);
 	return 0;
 }
 
@@ -267,5 +295,14 @@ void app_Printf(sealString format, sealVariadic_any args) {
 
 void app_Printfl(sealString format, sealVariadic_any args) {
 	app_Println(format, args);
+}
+
+void * app_Alloc(CAllocator * a, size_t size) {
+	void * __seal_return_value_0 = malloc(size);
+	return __seal_return_value_0;
+}
+
+void app_Free(CAllocator * a, void * ptr) {
+	free(ptr);
 }
 

@@ -2,5 +2,25 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-Alloc :: extern("malloc") task(size usize) rawptr
-Free  :: extern("free") task(ptr rawptr)
+Malloc :: extern("malloc") task(size usize) rawptr
+CFree  :: extern("free") task(ptr rawptr)
+
+Allocator :: interface {
+    Alloc :: task(a *$T, size usize) rawptr
+    Free  :: task(a *$T, ptr rawptr)
+}
+
+CAllocator :: struct {
+}
+
+Alloc :: task(a *CAllocator, size usize) rawptr {
+    return Malloc(size)
+}
+
+Free :: task(a *CAllocator, ptr rawptr) {
+    CFree(ptr)
+}
+
+CAllocator :: impl {
+    Allocator,
+}

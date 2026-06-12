@@ -290,8 +290,6 @@ func (c *Checker) CheckFile(file *ast.File) *Scope {
 		c.declareDecl(c.global, decl)
 	}
 
-	// Prepare all non-overload symbols first so overload declarations can
-	// refer to tasks declared later in the same global scope.
 	for _, decl := range file.Decls {
 		if _, ok := decl.(*ast.OverloadDecl); ok {
 			continue
@@ -308,7 +306,19 @@ func (c *Checker) CheckFile(file *ast.File) *Scope {
 		c.prepareDecl(c.global, decl)
 	}
 
+	// Check impls before task bodies, so interface assignments inside tasks
+	// can see Type.Implements.
 	for _, decl := range file.Decls {
+		if impl, ok := decl.(*ast.ImplDecl); ok {
+			c.checkImplDecl(c.global, impl)
+		}
+	}
+
+	for _, decl := range file.Decls {
+		if _, ok := decl.(*ast.ImplDecl); ok {
+			continue
+		}
+
 		c.checkDecl(c.global, decl)
 	}
 

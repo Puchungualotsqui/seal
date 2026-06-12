@@ -1,7 +1,8 @@
 Main :: task() {
-    name := "Roger"
-    hp := 64
+    allocator := CAllocator{}
 
-    fmt.Print("player % has % hp\n", name, hp)
-    fmt.Println("done")
+    a: Allocator = &allocator
+
+    ptr := Alloc(a, 64)
+    Free(a, ptr)
 }
