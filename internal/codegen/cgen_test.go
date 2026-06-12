@@ -397,3 +397,77 @@ Area :: task(s Shape) f32 {
 		t.Fatalf("expected narrowed Circle binding, got:\n%s", out)
 	}
 }
+
+func TestGenerateExternMallocFree(t *testing.T) {
+	out, reporter := generate(t, `
+c :: @c_import {
+    include "stdlib.h"
+}
+
+malloc :: extern("malloc") task(size usize) rawptr
+free :: extern("free") task(ptr rawptr)
+
+Main :: task() {
+    ptr := malloc(64)
+    free(ptr)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, `#include "stdlib.h"`) {
+		t.Fatalf("expected stdlib include, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void * malloc(size_t size);") {
+		t.Fatalf("expected malloc prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void free(void * ptr);") {
+		t.Fatalf("expected free prototype, got:\n%s", out)
+	}
+
+	if strings.Contains(out, "void * malloc(size_t size) {") {
+		t.Fatalf("extern malloc should not emit body, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void * ptr = malloc(64);") {
+		t.Fatalf("expected malloc call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "free(ptr);") {
+		t.Fatalf("expected free call, got:\n%s", out)
+	}
+}
+
+func TestGenerateExternVariadicPrintf(t *testing.T) {
+	out, reporter := generate(t, `
+c :: @c_import {
+    include "stdio.h"
+}
+
+printf :: extern("printf") task(format string, args ...any) int
+
+Main :: task() {
+    printf("%d %s", 10, "hello")
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, `#include "stdio.h"`) {
+		t.Fatalf("expected stdio include, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "int printf(const char * format, ...);") {
+		t.Fatalf("expected printf variadic prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `printf("%d %s", 10, "hello");`) {
+		t.Fatalf("expected printf call, got:\n%s", out)
+	}
+}

@@ -496,3 +496,44 @@ Main :: task() {
 		t.Fatalf("expected 2 statements")
 	}
 }
+
+func TestParseExternTaskDecl(t *testing.T) {
+	file, reporter := parse(t, `
+malloc :: extern("malloc") task(size usize) rawptr
+printf :: extern("printf") task(format string, args ...any) int
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if len(file.Decls) != 2 {
+		t.Fatalf("expected 2 decls, got %d", len(file.Decls))
+	}
+
+	mallocDecl, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf("expected TaskDecl")
+	}
+
+	if !mallocDecl.IsExtern || mallocDecl.ExternName != "malloc" {
+		t.Fatalf("expected extern malloc, got %+v", mallocDecl)
+	}
+
+	printfDecl, ok := file.Decls[1].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf("expected TaskDecl")
+	}
+
+	if !printfDecl.IsExtern || printfDecl.ExternName != "printf" {
+		t.Fatalf("expected extern printf, got %+v", printfDecl)
+	}
+
+	if len(printfDecl.Params) != 2 {
+		t.Fatalf("expected 2 params")
+	}
+
+	if !printfDecl.Params[1].IsVariadic {
+		t.Fatalf("expected variadic args")
+	}
+}

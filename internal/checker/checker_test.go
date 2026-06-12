@@ -1042,3 +1042,62 @@ Vec2Add :: pure task(a Vec2, b Vec2 = Vec2{x = 0.0, y = 0.0}) Vec2 {
 		t.Fatalf("expected operator default diagnostic, got:\n%s", reporter.String())
 	}
 }
+
+func TestExternTaskDecl(t *testing.T) {
+	_, reporter := check(t, `
+malloc :: extern("malloc") task(size usize) rawptr
+free :: extern("free") task(ptr rawptr)
+
+Main :: task() {
+    ptr := malloc(64)
+    free(ptr)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestExternVariadicAny(t *testing.T) {
+	_, reporter := check(t, `
+printf :: extern("printf") task(format string, args ...any) int
+
+Main :: task() {
+    printf("%d %s", 10, "hello")
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectNormalSealVariadicForNow(t *testing.T) {
+	_, reporter := check(t, `
+PrintAll :: task(args ...any) {
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "Seal variadic tasks require runtime any support") {
+		t.Fatalf("expected Seal variadic diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectVariadicNonAny(t *testing.T) {
+	_, reporter := check(t, `
+Bad :: extern("bad") task(format string, args ...int) int
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `variadic parameter "args" must have type any`) {
+		t.Fatalf("expected variadic any diagnostic, got:\n%s", reporter.String())
+	}
+}

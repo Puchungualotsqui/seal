@@ -43,6 +43,9 @@ var (
 	CInt     = CType{Name: "int", SealName: "int"}
 	CF32     = CType{Name: "float", SealName: "f32"}
 	CF64     = CType{Name: "double", SealName: "f64"}
+	CUsize   = CType{Name: "size_t", SealName: "usize"}
+	CRawptr  = CType{Name: "void *", SealName: "rawptr"}
+	CAny     = CType{Name: "sealAny", SealName: "any"}
 	CString  = CType{Name: "const char *", SealName: "string"}
 	CNil     = CType{Name: "void *", SealName: "nil"}
 )
@@ -90,6 +93,11 @@ type TaskInfo struct {
 	RequiredParams  int
 	ParamDefaults   []ast.Expr
 	ParamHasDefault []bool
+	ParamIsVariadic []bool
+	IsVariadic      bool
+
+	IsExtern   bool
+	ExternName string
 }
 
 type PackageInfo struct {
@@ -172,6 +180,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.line("#endif")
 	g.line("")
 
+	g.emitCImports(file)
 	g.emitEnums(file)
 	g.emitStructs(file)
 	g.emitUnions(file)
@@ -208,6 +217,8 @@ func (g *Generator) collect(file *ast.File) {
 			info := TaskInfo{
 				Decl:           d,
 				RequiredParams: len(d.Params),
+				IsExtern:       d.IsExtern,
+				ExternName:     d.ExternName,
 			}
 
 			if len(d.Results) == 0 {
@@ -227,6 +238,14 @@ func (g *Generator) collect(file *ast.File) {
 				info.ParamTypes = append(info.ParamTypes, g.cTypeFromAst(param.Type))
 				info.ParamDefaults = append(info.ParamDefaults, param.Default)
 				info.ParamHasDefault = append(info.ParamHasDefault, param.HasDefault)
+				info.ParamIsVariadic = append(info.ParamIsVariadic, param.IsVariadic)
+
+				if param.IsVariadic {
+					info.IsVariadic = true
+					if info.RequiredParams == len(d.Params) {
+						info.RequiredParams = i
+					}
+				}
 
 				if param.HasDefault && info.RequiredParams == len(d.Params) {
 					info.RequiredParams = i
@@ -383,6 +402,11 @@ func (g *Generator) emitTasks(file *ast.File) {
 			continue
 		}
 
+		info := g.tasks[d.Name.Name]
+		if info.IsExtern {
+			continue
+		}
+
 		g.emitTask(d)
 		g.line("")
 	}
@@ -451,6 +475,10 @@ func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
 	info := g.tasks[d.Name.Name]
 
 	name := g.cTaskName(d.Name.Name)
+	if info.IsExtern && info.ExternName != "" {
+		name = info.ExternName
+	}
+
 	ret := info.ReturnType.Name
 
 	if len(d.Params) == 0 {
@@ -460,6 +488,11 @@ func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
 	var params []string
 
 	for i, param := range d.Params {
+		if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+			params = append(params, "...")
+			break
+		}
+
 		paramType := CInvalid
 		if i < len(info.ParamTypes) {
 			paramType = info.ParamTypes[i]
@@ -1079,8 +1112,12 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 }
 
 func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs []string) string {
-	name := g.cTaskName(taskName)
 	info, hasTask := g.tasks[taskName]
+
+	name := g.cTaskName(taskName)
+	if hasTask && info.IsExtern && info.ExternName != "" {
+		name = info.ExternName
+	}
 
 	var outArgs []string
 
@@ -1092,13 +1129,17 @@ func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs 
 
 		expected := (*CType)(nil)
 		if hasTask && i < len(info.ParamTypes) {
-			expected = &info.ParamTypes[i]
+			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+				expected = nil
+			} else {
+				expected = &info.ParamTypes[i]
+			}
 		}
 
 		outArgs = append(outArgs, g.emitExpr(arg, expected))
 	}
 
-	if hasTask {
+	if hasTask && !info.IsVariadic {
 		for i := len(args); i < len(info.ParamTypes); i++ {
 			if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
 				expected := info.ParamTypes[i]
@@ -1274,14 +1315,6 @@ func (g *Generator) emitPackageTaskCall(packageName string, taskName string, arg
 	return fmt.Sprintf("%s(%s)", cPackageTaskName(packageName, taskName), strings.Join(outArgs, ", "))
 }
 
-func argsSpan(args []ast.Expr) source.Span {
-	if len(args) == 0 {
-		return source.Span{}
-	}
-
-	return args[0].Span()
-}
-
 func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
 	var values []string
 
@@ -1295,6 +1328,53 @@ func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) s
 	}
 
 	return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
+}
+
+func (g *Generator) emitCImports(file *ast.File) {
+	emitted := false
+
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.DirectiveDecl)
+		if !ok {
+			continue
+		}
+
+		if d.Directive.Name != "c_import" {
+			continue
+		}
+
+		for i := 0; i < len(d.Body); i++ {
+			tok := d.Body[i]
+
+			if tok.Kind == token.Ident && tok.Lexeme == "include" {
+				if i+1 >= len(d.Body) || d.Body[i+1].Kind != token.StringLit {
+					g.error(tok.Span, "expected string literal after include in @c_import")
+					continue
+				}
+
+				g.linef("#include %s", d.Body[i+1].Lexeme)
+				emitted = true
+				i++
+				continue
+			}
+
+			if tok.Kind == token.Ident {
+				g.error(tok.Span, fmt.Sprintf("unsupported @c_import directive item %q", tok.Lexeme))
+			}
+		}
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
+func argsSpan(args []ast.Expr) source.Span {
+	if len(args) == 0 {
+		return source.Span{}
+	}
+
+	return args[0].Span()
 }
 
 func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
@@ -1529,6 +1609,33 @@ func (g *Generator) callScore(info TaskInfo, argTypes []CType) (int, bool) {
 	required := info.RequiredParams
 	total := len(info.ParamTypes)
 
+	if info.IsVariadic {
+		fixedCount := total - 1
+
+		if len(argTypes) < required {
+			return 0, false
+		}
+
+		score := 0
+
+		count := len(argTypes)
+		if count > fixedCount {
+			count = fixedCount
+		}
+
+		for i, argType := range argTypes[:count] {
+			itemScore, ok := g.conversionScore(info.ParamTypes[i], argType)
+			if !ok {
+				return 0, false
+			}
+
+			score += itemScore
+		}
+
+		score += (len(argTypes) - count) * 20
+		return score, true
+	}
+
 	if len(argTypes) < required || len(argTypes) > total {
 		return 0, false
 	}
@@ -1552,6 +1659,10 @@ func (g *Generator) callScore(info TaskInfo, argTypes []CType) (int, bool) {
 func (g *Generator) conversionScore(dst CType, src CType) (int, bool) {
 	if dst.SealName == src.SealName {
 		return 0, true
+	}
+
+	if dst.SealName == "any" {
+		return 20, true
 	}
 
 	if src.SealName == "int" && (dst.SealName == "f32" || dst.SealName == "f64") {
@@ -1630,6 +1741,12 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			return CBool
 		case "int":
 			return CInt
+		case "usize":
+			return CUsize
+		case "rawptr":
+			return CRawptr
+		case "any":
+			return CAny
 		case "f32":
 			return CF32
 		case "f64":
@@ -1673,21 +1790,6 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 	case *ast.GenericType:
 		g.error(typ.Span(), "generic type instantiation is not supported by C codegen yet")
 		return g.cTypeFromAst(typ.Base)
-	}
-
-	return CInvalid
-}
-
-func (g *Generator) lookupStructFieldType(structName string, fieldName string) CType {
-	d := g.structs[structName]
-	if d == nil {
-		return CInvalid
-	}
-
-	for _, field := range d.Fields {
-		if field.Name.Name == fieldName {
-			return g.cTypeFromAst(field.Type)
-		}
 	}
 
 	return CInvalid
@@ -1766,6 +1868,21 @@ func (g *Generator) cBinaryOp(op token.Kind) string {
 	default:
 		return "/*op*/"
 	}
+}
+
+func (g *Generator) lookupStructFieldType(structName string, fieldName string) CType {
+	d := g.structs[structName]
+	if d == nil {
+		return CInvalid
+	}
+
+	for _, field := range d.Fields {
+		if field.Name.Name == fieldName {
+			return g.cTypeFromAst(field.Type)
+		}
+	}
+
+	return CInvalid
 }
 
 func (g *Generator) line(s string) {

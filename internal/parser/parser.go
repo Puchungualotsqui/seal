@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strings"
 
 	"seal/internal/ast"
 	"seal/internal/diag"
@@ -68,6 +69,11 @@ func (p *Parser) parseDecl() ast.Decl {
 		}
 
 		return p.parseDirectiveDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, dir, start)
+	}
+
+	if p.at(token.Ident) && p.peek().Lexeme == "extern" {
+		p.advance()
+		return p.parseExternTaskDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
 	}
 
 	if p.match(token.KeywordTest) {
@@ -352,6 +358,40 @@ func (p *Parser) parseOverloadDecl(name string, start int) ast.Decl {
 	}
 }
 
+func (p *Parser) parseExternTaskDecl(name ast.Ident, start int) ast.Decl {
+	if !p.expect(token.LParen, "expected '(' after extern") {
+		return nil
+	}
+
+	cNameTok := p.expectToken(token.StringLit, "expected C symbol name string in extern")
+	if cNameTok.Kind != token.StringLit {
+		return nil
+	}
+
+	if !p.expect(token.RParen, "expected ')' after extern name") {
+		return nil
+	}
+
+	if !p.expect(token.KeywordTask, "expected 'task' after extern(...)") {
+		return nil
+	}
+
+	params := p.parseParamList()
+	results := p.parseExternResultTypes()
+
+	end := p.previous().Span.End
+
+	return &ast.TaskDecl{
+		Name:       name,
+		IsExtern:   true,
+		ExternName: strings.Trim(cNameTok.Lexeme, `"`),
+		Params:     params,
+		Results:    results,
+		Body:       nil,
+		Loc:        p.span(start, end),
+	}
+}
+
 func (p *Parser) parseTaskDecl(name ast.Ident, start int, isPure bool, isTest bool) ast.Decl {
 	params := p.parseParamList()
 	results := p.parseResultTypesUntilBodyOrDeclEnd()
@@ -440,6 +480,11 @@ func (p *Parser) parseParamList() []ast.Param {
 			names = append(names, nextName)
 		}
 
+		isVariadic := false
+		if p.match(token.Ellipsis) {
+			isVariadic = true
+		}
+
 		paramType := p.parseType()
 		if paramType == nil {
 			p.errorHere("expected parameter type")
@@ -460,6 +505,7 @@ func (p *Parser) parseParamList() []ast.Param {
 			params = append(params, ast.Param{
 				Name:       name,
 				Type:       paramType,
+				IsVariadic: isVariadic,
 				HasDefault: hasDefault,
 				Default:    defaultValue,
 			})
@@ -478,6 +524,30 @@ func (p *Parser) parseResultTypesUntilBodyOrDeclEnd() []ast.Type {
 	for !p.at(token.LBrace) &&
 		!p.at(token.RBrace) &&
 		!p.at(token.EOF) {
+		t := p.parseType()
+		if t == nil {
+			break
+		}
+
+		results = append(results, t)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return results
+}
+
+func (p *Parser) parseExternResultTypes() []ast.Type {
+	var results []ast.Type
+
+	for !p.at(token.RBrace) &&
+		!p.at(token.EOF) {
+		if p.at(token.Ident) && p.peekNext().Kind == token.ColonColon {
+			break
+		}
+
 		t := p.parseType()
 		if t == nil {
 			break

@@ -204,6 +204,8 @@ func (r *Resolver) declareBuiltins() {
 		"f32",
 		"f64",
 		"string",
+		"rawptr",
+		"any",
 		"uintptr",
 		"voidptr",
 	}

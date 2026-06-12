@@ -1,0 +1,14 @@
+c :: @c_import {
+    include "stdio.h"
+    include "stdlib.h"
+}
+
+malloc :: extern("malloc") task(size usize) rawptr
+free :: extern("free") task(ptr rawptr)
+printf :: extern("printf") task(format string, args ...any) int
+
+Main :: task() {
+    ptr := malloc(64)
+    printf("%s %d\n", "allocated", 64)
+    free(ptr)
+}

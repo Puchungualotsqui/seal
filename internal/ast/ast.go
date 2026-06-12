@@ -100,18 +100,21 @@ type Field struct {
 type Param struct {
 	Name       Ident
 	Type       Type
+	IsVariadic bool
 	HasDefault bool
 	Default    Expr
 }
 
 type TaskDecl struct {
-	Name    Ident
-	IsPure  bool
-	IsTest  bool
-	Params  []Param
-	Results []Type
-	Body    *BlockStmt
-	Loc     source.Span
+	Name       Ident
+	IsPure     bool
+	IsTest     bool
+	IsExtern   bool
+	ExternName string
+	Params     []Param
+	Results    []Type
+	Body       *BlockStmt
+	Loc        source.Span
 }
 
 func (*TaskDecl) declNode() {}

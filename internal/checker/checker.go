@@ -20,6 +20,9 @@ const (
 	TypeF32
 	TypeF64
 	TypeString
+	TypeUsize
+	TypeRawptr
+	TypeAny
 	TypeNil
 	TypeEnumLiteral
 
@@ -56,6 +59,10 @@ type Type struct {
 	RequiredParams  int
 	ParamDefaults   []ast.Expr
 	ParamHasDefault []bool
+	ParamIsVariadic []bool
+	IsVariadic      bool
+	IsExtern        bool
+	ExternName      string
 }
 
 type EnumVariantInfo struct {
@@ -95,6 +102,12 @@ func (t *Type) String() string {
 		return "untyped float"
 	case TypePointer:
 		return "*" + t.Elem.String()
+	case TypeUsize:
+		return "usize"
+	case TypeRawptr:
+		return "rawptr"
+	case TypeAny:
+		return "any"
 	case TypeArray:
 		if t.Inferred {
 			return "[?]" + t.Elem.String()
@@ -105,8 +118,12 @@ func (t *Type) String() string {
 		return t.Name
 	case TypeTask:
 		var params []string
-		for _, p := range t.Params {
-			params = append(params, p.String())
+		for i, p := range t.Params {
+			if i < len(t.ParamIsVariadic) && t.ParamIsVariadic[i] {
+				params = append(params, "..."+p.String())
+			} else {
+				params = append(params, p.String())
+			}
 		}
 
 		var results []string
@@ -138,6 +155,9 @@ var (
 	F32Type          = &Type{Kind: TypeF32, Name: "f32"}
 	F64Type          = &Type{Kind: TypeF64, Name: "f64"}
 	StringType       = &Type{Kind: TypeString, Name: "string"}
+	UsizeType        = &Type{Kind: TypeUsize, Name: "usize"}
+	RawptrType       = &Type{Kind: TypeRawptr, Name: "rawptr"}
+	AnyType          = &Type{Kind: TypeAny, Name: "any"}
 	NilType          = &Type{Kind: TypeNil, Name: "nil"}
 	UntypedIntType   = &Type{Kind: TypeUntypedInt, Name: "untyped int"}
 	UntypedFloatType = &Type{Kind: TypeUntypedFloat, Name: "untyped float"}
@@ -312,6 +332,31 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 	required := taskType.RequiredParams
 	total := len(taskType.Params)
 
+	if taskType.IsVariadic {
+		fixedCount := total - 1
+		if len(argTypes) < required {
+			return 0, false
+		}
+
+		score := 0
+		count := len(argTypes)
+		if count > fixedCount {
+			count = fixedCount
+		}
+
+		for i := 0; i < count; i++ {
+			itemScore, ok := c.conversionScore(taskType.Params[i], argTypes[i])
+			if !ok {
+				return 0, false
+			}
+
+			score += itemScore
+		}
+
+		score += (len(argTypes) - count) * 20
+		return score, true
+	}
+
 	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 {
 		required = total
 	}
@@ -351,6 +396,10 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		return 0, true
 	}
 
+	if dst.Kind == TypeAny {
+		return 20, true
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		if c.enumHasVariant(dst, src.Name) {
 			return 1, true
@@ -377,7 +426,7 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 
 	if src.Kind == TypeUntypedInt {
 		switch dst.Kind {
-		case TypeInt:
+		case TypeInt, TypeUsize:
 			return 1, true
 		case TypeF32, TypeF64:
 			return 2, true
@@ -449,6 +498,9 @@ func (c *Checker) declareBuiltins(scope *Scope) {
 		"void":   VoidType,
 		"bool":   BoolType,
 		"int":    IntType,
+		"usize":  UsizeType,
+		"rawptr": RawptrType,
+		"any":    AnyType,
 		"f32":    F32Type,
 		"f64":    F64Type,
 		"string": StringType,
@@ -877,6 +929,13 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 
 	c.checkTaskDefaultParameters(parent, d, taskType)
 
+	if d.IsExtern {
+		if d.Body != nil {
+			c.diags.Add(d.Body.Span(), fmt.Sprintf("extern task %q cannot have a body", d.Name.Name))
+		}
+		return
+	}
+
 	taskScope := NewScope(parent)
 
 	for i, param := range d.Params {
@@ -906,13 +965,23 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	var params []*Type
 	var paramDefaults []ast.Expr
 	var paramHasDefault []bool
+	var paramIsVariadic []bool
 
 	requiredParams := len(d.Params)
+	isVariadic := false
 
 	for i, param := range d.Params {
 		params = append(params, c.typeFromAst(scope, param.Type))
 		paramDefaults = append(paramDefaults, param.Default)
 		paramHasDefault = append(paramHasDefault, param.HasDefault)
+		paramIsVariadic = append(paramIsVariadic, param.IsVariadic)
+
+		if param.IsVariadic {
+			isVariadic = true
+			if requiredParams == len(d.Params) {
+				requiredParams = i
+			}
+		}
 
 		if param.HasDefault && requiredParams == len(d.Params) {
 			requiredParams = i
@@ -932,6 +1001,10 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 		RequiredParams:  requiredParams,
 		ParamDefaults:   paramDefaults,
 		ParamHasDefault: paramHasDefault,
+		ParamIsVariadic: paramIsVariadic,
+		IsVariadic:      isVariadic,
+		IsExtern:        d.IsExtern,
+		ExternName:      d.ExternName,
 	}
 }
 
@@ -1013,8 +1086,41 @@ func (c *Checker) checkStmt(scope *Scope, stmt ast.Stmt) {
 
 func (c *Checker) checkTaskDefaultParameters(parent *Scope, d *ast.TaskDecl, taskType *Type) {
 	seenDefault := false
+	seenVariadic := false
 
 	for i, param := range d.Params {
+		if param.IsVariadic {
+			if seenVariadic {
+				c.diags.Add(param.Name.Span(), "task can have only one variadic parameter")
+			}
+
+			seenVariadic = true
+
+			if i != len(d.Params)-1 {
+				c.diags.Add(param.Name.Span(), "variadic parameter must be the last parameter")
+			}
+
+			if param.HasDefault {
+				c.diags.Add(param.Name.Span(), "variadic parameter cannot have a default value")
+			}
+
+			if i < len(taskType.Params) && !c.sameType(taskType.Params[i], AnyType) {
+				c.diags.Add(param.Name.Span(), fmt.Sprintf("variadic parameter %q must have type any", param.Name.Name))
+			}
+
+			if d.IsExtern {
+				if i == 0 {
+					c.diags.Add(param.Name.Span(), "extern variadic task must have at least one fixed parameter before ...any")
+				}
+			} else {
+				c.diags.Add(param.Name.Span(), "Seal variadic tasks require runtime any support; only extern variadic tasks are supported for now")
+			}
+		}
+
+		if d.IsExtern && param.HasDefault {
+			c.diags.Add(param.Name.Span(), fmt.Sprintf("extern task parameter %q cannot have a default value", param.Name.Name))
+		}
+
 		if param.HasDefault {
 			seenDefault = true
 
@@ -1027,7 +1133,7 @@ func (c *Checker) checkTaskDefaultParameters(parent *Scope, d *ast.TaskDecl, tas
 			continue
 		}
 
-		if seenDefault {
+		if seenDefault && !param.IsVariadic {
 			c.diags.Add(
 				param.Name.Span(),
 				fmt.Sprintf("parameter %q must have a default value because a previous parameter has a default", param.Name.Name),
@@ -1493,8 +1599,34 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 	required := taskType.RequiredParams
 	total := len(taskType.Params)
 
-	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 {
+	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 && !taskType.IsVariadic {
 		required = total
+	}
+
+	if taskType.IsVariadic {
+		fixedCount := total - 1
+
+		if len(argTypes) < required {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected at least %d, got %d", required, len(argTypes)),
+			)
+		}
+
+		count := len(argTypes)
+		if count > fixedCount {
+			count = fixedCount
+		}
+
+		for i := 0; i < count; i++ {
+			c.checkAssignable(taskType.Params[i], argTypes[i], args[i].Span())
+		}
+
+		for i := fixedCount; i < len(argTypes); i++ {
+			c.checkAssignable(AnyType, argTypes[i], args[i].Span())
+		}
+
+		return c.resultTypeFromCall(taskType, span)
 	}
 
 	if len(argTypes) < required || len(argTypes) > total {
@@ -1807,6 +1939,10 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 		return
 	}
 
+	if dst.Kind == TypeAny {
+		return
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		if !c.enumHasVariant(dst, src.Name) {
 			c.diags.Add(span, fmt.Sprintf("enum %s has no variant .%s", dst.String(), src.Name))
@@ -1859,6 +1995,10 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return true
 	}
 
+	if dst.Kind == TypeAny {
+		return true
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		return c.enumHasVariant(dst, src.Name)
 	}
@@ -1872,7 +2012,10 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if src.Kind == TypeUntypedInt {
-		return dst.Kind == TypeInt || dst.Kind == TypeF32 || dst.Kind == TypeF64
+		return dst.Kind == TypeInt ||
+			dst.Kind == TypeUsize ||
+			dst.Kind == TypeF32 ||
+			dst.Kind == TypeF64
 	}
 
 	if src.Kind == TypeUntypedFloat {
@@ -2288,7 +2431,7 @@ func DebugSummary(scope *Scope) string {
 
 	for _, sym := range scope.Symbols {
 		switch sym.Name {
-		case "void", "bool", "int", "f32", "f64", "string", "Assert", "Print":
+		case "void", "bool", "int", "usize", "rawptr", "any", "f32", "f64", "string", "Assert", "Print":
 			continue
 		}
 
