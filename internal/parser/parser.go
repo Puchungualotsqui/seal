@@ -796,7 +796,7 @@ func (p *Parser) parseForStmt(start int) ast.Stmt {
 }
 
 func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
-	first := p.parseExpr(0)
+	first := p.parseSwitchHeadExpr()
 	if first == nil {
 		p.errorHere("expected expression after switch")
 		return nil
@@ -813,7 +813,7 @@ func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
 			isUnionSwitch = true
 			bindName = id.Name
 
-			target = p.parseExpr(0)
+			target = p.parseSwitchHeadExpr()
 			if target == nil {
 				p.errorHere("expected union expression after 'in'")
 				return nil
@@ -1524,6 +1524,51 @@ func (p *Parser) synchronizeUntil(kinds ...token.Kind) {
 
 		p.advance()
 	}
+}
+
+func (p *Parser) parseSwitchHeadExpr() ast.Expr {
+	start := p.peek().Span.Start
+
+	// Special case:
+	//
+	//     switch err {
+	//
+	// The normal expression parser sees `err { ... }` and thinks this is a
+	// compound literal. In a switch head, `{` starts the switch body, not a
+	// literal.
+	if p.at(token.Ident) {
+		id := ast.Ident{
+			Name: p.peek().Lexeme,
+			Loc:  p.peek().Span,
+		}
+		p.advance()
+
+		var expr ast.Expr = &ast.IdentExpr{Name: id}
+
+		for {
+			switch p.peek().Kind {
+			case token.LParen, token.Dot, token.LBracket:
+				expr = p.parsePostfix(expr)
+
+			default:
+				return expr
+			}
+		}
+	}
+
+	// Non-ident expressions can use the normal parser.
+	// This supports things like:
+	//
+	//     switch GetError() { ... }
+	//     switch 1 + 2 { ... }
+	//
+	// The important ambiguous case is bare Ident followed by `{`.
+	expr := p.parseExpr(0)
+	if expr == nil {
+		p.diags.Add(source.NewSpan(p.peek().Span.File, start, p.peek().Span.End), "expected switch expression")
+	}
+
+	return expr
 }
 
 func DebugSummary(file *ast.File) string {

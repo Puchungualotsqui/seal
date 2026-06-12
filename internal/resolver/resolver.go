@@ -633,11 +633,19 @@ func (r *Resolver) resolveSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
 		case ast.SwitchCaseUnionMember:
 			r.resolveType(scope, swCase.UnionMember)
 
+			if s.IsUnionSwitch && s.BindName.Name != "" {
+				r.declareSymbol(caseScope, s.BindName.Name, SymbolVar, s.BindName.Span(), s)
+			}
+
+		case ast.SwitchCaseNil:
+			if s.IsUnionSwitch && s.BindName.Name != "" {
+				r.declareSymbol(caseScope, s.BindName.Name, SymbolVar, s.BindName.Span(), s)
+			}
+
 		case ast.SwitchCaseExpr:
 			r.resolveExpr(scope, swCase.Expr)
 
 		case ast.SwitchCaseEnumVariant,
-			ast.SwitchCaseNil,
 			ast.SwitchCaseDefault:
 			// Resolved by type checker.
 		}

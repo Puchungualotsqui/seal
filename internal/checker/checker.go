@@ -360,6 +360,12 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 	case *ast.StructDecl:
 		c.prepareStructDecl(scope, d)
 
+	case *ast.EnumDecl:
+		c.prepareEnumDecl(scope, d)
+
+	case *ast.UnionDecl:
+		c.prepareUnionDecl(scope, d)
+
 	case *ast.TaskDecl:
 		sym := scope.LookupLocal(d.Name.Name)
 		if sym != nil {
@@ -368,11 +374,6 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 
 	case *ast.InterfaceDecl:
 		c.prepareInterfaceDecl(scope, d)
-
-	case *ast.UnionDecl:
-		for _, member := range d.Members {
-			c.typeFromAst(scope, member)
-		}
 	}
 }
 
@@ -1353,7 +1354,7 @@ func (c *Checker) checkBoolCondition(t *Type, span source.Span, message string) 
 
 func (c *Checker) prepareEnumDecl(parent *Scope, d *ast.EnumDecl) {
 	sym := parent.LookupLocal(d.Name.Name)
-	if sym == nil {
+	if sym == nil || sym.Type == nil {
 		return
 	}
 
@@ -1371,7 +1372,7 @@ func (c *Checker) prepareEnumDecl(parent *Scope, d *ast.EnumDecl) {
 
 func (c *Checker) prepareUnionDecl(parent *Scope, d *ast.UnionDecl) {
 	sym := parent.LookupLocal(d.Name.Name)
-	if sym == nil {
+	if sym == nil || sym.Type == nil {
 		return
 	}
 
@@ -1386,7 +1387,11 @@ func (c *Checker) prepareUnionDecl(parent *Scope, d *ast.UnionDecl) {
 }
 
 func (c *Checker) enumHasVariant(enumType *Type, name string) bool {
-	if enumType == nil || enumType.Kind != TypeEnum {
+	if enumType == nil {
+		return false
+	}
+
+	if enumType.Kind != TypeEnum {
 		return false
 	}
 
@@ -1400,12 +1405,22 @@ func (c *Checker) enumHasVariant(enumType *Type, name string) bool {
 }
 
 func (c *Checker) unionHasMember(unionType *Type, memberType *Type) bool {
-	if unionType == nil || unionType.Kind != TypeUnion {
+	if unionType == nil || memberType == nil {
+		return false
+	}
+
+	if unionType.Kind != TypeUnion {
 		return false
 	}
 
 	for _, member := range unionType.Members {
 		if c.sameType(member, memberType) {
+			return true
+		}
+
+		if member != nil &&
+			member.Name != "" &&
+			member.Name == memberType.Name {
 			return true
 		}
 	}
