@@ -10,6 +10,8 @@ const (
 	IntLit
 	FloatLit
 	StringLit
+	CStringLit
+	CharLit
 
 	// Keywords
 	KeywordTask
@@ -132,6 +134,10 @@ func (k Kind) String() string {
 		return "FloatLit"
 	case StringLit:
 		return "StringLit"
+	case CStringLit:
+		return "CStringLit"
+	case CharLit:
+		return "CharLit"
 
 	case KeywordTask:
 		return "task"

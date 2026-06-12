@@ -3,6 +3,7 @@ package cgen
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"seal/internal/ast"
@@ -42,17 +43,20 @@ func (t CType) Decl(name string) string {
 }
 
 var (
-	CInvalid = CType{Name: "/*invalid*/ int", SealName: "<invalid>"}
-	CVoid    = CType{Name: "void", SealName: "void"}
-	CBool    = CType{Name: "bool", SealName: "bool"}
-	CInt     = CType{Name: "int", SealName: "int"}
-	CF32     = CType{Name: "float", SealName: "f32"}
-	CF64     = CType{Name: "double", SealName: "f64"}
-	CUsize   = CType{Name: "size_t", SealName: "usize"}
-	CRawptr  = CType{Name: "void *", SealName: "rawptr"}
-	CAny     = CType{Name: "sealAny", SealName: "any"}
-	CString  = CType{Name: "const char *", SealName: "string"}
-	CNil     = CType{Name: "void *", SealName: "nil"}
+	CInvalid    = CType{Name: "/*invalid*/ int", SealName: "<invalid>"}
+	CVoid       = CType{Name: "void", SealName: "void"}
+	CBool       = CType{Name: "bool", SealName: "bool"}
+	CInt        = CType{Name: "int", SealName: "int"}
+	CF32        = CType{Name: "float", SealName: "f32"}
+	CF64        = CType{Name: "double", SealName: "f64"}
+	CU8         = CType{Name: "unsigned char", SealName: "u8"}
+	CUsize      = CType{Name: "size_t", SealName: "usize"}
+	CChar       = CType{Name: "uint32_t", SealName: "char"}
+	CRawptr     = CType{Name: "void *", SealName: "rawptr"}
+	CAny        = CType{Name: "sealAny", SealName: "any"}
+	CSealString = CType{Name: "sealString", SealName: "string"}
+	CCString    = CType{Name: "const char *", SealName: "cstring"}
+	CNil        = CType{Name: "void *", SealName: "nil"}
 )
 
 type valueInfo struct {
@@ -1047,7 +1051,13 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return e.Value
 
 	case *ast.StringLitExpr:
-		return e.Value
+		return g.emitStringLiteral(e)
+
+	case *ast.CStringLitExpr:
+		return g.emitCStringLiteral(e)
+
+	case *ast.CharLitExpr:
+		return g.emitCharLiteral(e)
 
 	case *ast.GenericExpr:
 		g.error(e.Span(), "generic expression cannot be emitted as a value")
@@ -1164,6 +1174,48 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	return "0"
 }
 
+func (g *Generator) emitStringLiteral(e *ast.StringLitExpr) string {
+	value, err := strconv.Unquote(e.Value)
+	if err != nil {
+		g.error(e.Span(), fmt.Sprintf("invalid string literal: %v", err))
+		return "(sealString){.data = NULL, .len = 0}"
+	}
+
+	return fmt.Sprintf(
+		"(sealString){.data = (const unsigned char *)%s, .len = %d}",
+		strconv.Quote(value),
+		len([]byte(value)),
+	)
+}
+
+func (g *Generator) emitCStringLiteral(e *ast.CStringLitExpr) string {
+	raw := strings.TrimPrefix(e.Value, "c")
+
+	value, err := strconv.Unquote(raw)
+	if err != nil {
+		g.error(e.Span(), fmt.Sprintf("invalid cstring literal: %v", err))
+		return "\"\""
+	}
+
+	return strconv.Quote(value)
+}
+
+func (g *Generator) emitCharLiteral(e *ast.CharLitExpr) string {
+	value, err := strconv.Unquote(e.Value)
+	if err != nil {
+		g.error(e.Span(), fmt.Sprintf("invalid char literal: %v", err))
+		return "0"
+	}
+
+	runes := []rune(value)
+	if len(runes) != 1 {
+		g.error(e.Span(), "char literal must contain exactly one Unicode scalar value")
+		return "0"
+	}
+
+	return fmt.Sprintf("%d", runes[0])
+}
+
 func (g *Generator) emitAnyExpr(expr ast.Expr) string {
 	srcType := g.inferExprType(expr, nil)
 
@@ -1178,14 +1230,20 @@ func (g *Generator) emitAnyExpr(expr ast.Expr) string {
 		return fmt.Sprintf("sealAny_bool(%s)", value)
 	case "int":
 		return fmt.Sprintf("sealAny_int(%s)", value)
+	case "u8":
+		return fmt.Sprintf("sealAny_u8(%s)", value)
 	case "usize":
 		return fmt.Sprintf("sealAny_usize(%s)", value)
+	case "char":
+		return fmt.Sprintf("sealAny_char(%s)", value)
 	case "f32":
 		return fmt.Sprintf("sealAny_f32(%s)", value)
 	case "f64":
 		return fmt.Sprintf("sealAny_f64(%s)", value)
 	case "string":
 		return fmt.Sprintf("sealAny_string(%s)", value)
+	case "cstring":
+		return fmt.Sprintf("sealAny_cstring(%s)", value)
 	case "rawptr":
 		return fmt.Sprintf("sealAny_rawptr(%s)", value)
 	default:
@@ -1305,14 +1363,20 @@ func (g *Generator) sealTypeKindFor(t CType) (string, bool) {
 		return "sealType_bool", true
 	case "int":
 		return "sealType_int", true
+	case "u8":
+		return "sealType_u8", true
 	case "usize":
 		return "sealType_usize", true
+	case "char":
+		return "sealType_char", true
 	case "f32":
 		return "sealType_f32", true
 	case "f64":
 		return "sealType_f64", true
 	case "string":
 		return "sealType_string", true
+	case "cstring":
+		return "sealType_cstring", true
 	case "rawptr":
 		return "sealType_rawptr", true
 	case "any":
@@ -1328,14 +1392,20 @@ func (g *Generator) sealAnyFieldFor(t CType) (string, bool) {
 		return "as_bool", true
 	case "int":
 		return "as_int", true
+	case "u8":
+		return "as_u8", true
 	case "usize":
 		return "as_usize", true
+	case "char":
+		return "as_char", true
 	case "f32":
 		return "as_f32", true
 	case "f64":
 		return "as_f64", true
 	case "string":
 		return "as_string", true
+	case "cstring":
+		return "as_cstring", true
 	case "rawptr":
 		return "as_rawptr", true
 	case "any":
@@ -1360,6 +1430,10 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 
 	if argType.IsArray {
 		return argType.ArrayLen
+	}
+
+	if argType.SealName == "string" {
+		return fmt.Sprintf("(int)((%s).len)", arg)
 	}
 
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
@@ -1505,9 +1579,18 @@ func (g *Generator) emitBuiltinPrintWithArgs(e *ast.CallExpr, preparedArgs []str
 			format.WriteString("%s")
 			args = append(args, fmt.Sprintf("(%s ? \"true\" : \"false\")", rendered))
 
-		case "string":
+		case "char":
+			format.WriteString("%u")
+			args = append(args, rendered)
+
+		case "cstring":
 			format.WriteString("%s")
 			args = append(args, rendered)
+
+		case "string":
+			format.WriteString("%.*s")
+			args = append(args, fmt.Sprintf("(int)((%s).len)", rendered))
+			args = append(args, fmt.Sprintf("(const char *)((%s).data)", rendered))
 
 		default:
 			g.error(arg.Span(), fmt.Sprintf("Print does not support %s in C codegen yet", argType.String()))
@@ -1662,15 +1745,26 @@ func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) s
 }
 
 func (g *Generator) emitRuntimeSupport() {
+	g.line("typedef struct sealString {")
+	g.indent++
+	g.line("const unsigned char *data;")
+	g.line("size_t len;")
+	g.indent--
+	g.line("} sealString;")
+	g.line("")
+
 	g.line("typedef enum sealTypeKind {")
 	g.indent++
 	g.line("sealType_invalid = 0,")
 	g.line("sealType_bool,")
 	g.line("sealType_int,")
+	g.line("sealType_u8,")
 	g.line("sealType_usize,")
+	g.line("sealType_char,")
 	g.line("sealType_f32,")
 	g.line("sealType_f64,")
 	g.line("sealType_string,")
+	g.line("sealType_cstring,")
 	g.line("sealType_rawptr,")
 	g.line("sealType_any")
 	g.indent--
@@ -1684,10 +1778,13 @@ func (g *Generator) emitRuntimeSupport() {
 	g.indent++
 	g.line("bool as_bool;")
 	g.line("int as_int;")
+	g.line("unsigned char as_u8;")
 	g.line("size_t as_usize;")
+	g.line("uint32_t as_char;")
 	g.line("float as_f32;")
 	g.line("double as_f64;")
-	g.line("const char *as_string;")
+	g.line("sealString as_string;")
+	g.line("const char *as_cstring;")
 	g.line("void *as_rawptr;")
 	g.indent--
 	g.line("} value;")
@@ -1697,20 +1794,26 @@ func (g *Generator) emitRuntimeSupport() {
 
 	g.line("static inline sealAny sealAny_bool(bool value) { sealAny out; out.type = sealType_bool; out.value.as_bool = value; return out; }")
 	g.line("static inline sealAny sealAny_int(int value) { sealAny out; out.type = sealType_int; out.value.as_int = value; return out; }")
+	g.line("static inline sealAny sealAny_u8(unsigned char value) { sealAny out; out.type = sealType_u8; out.value.as_u8 = value; return out; }")
 	g.line("static inline sealAny sealAny_usize(size_t value) { sealAny out; out.type = sealType_usize; out.value.as_usize = value; return out; }")
+	g.line("static inline sealAny sealAny_char(uint32_t value) { sealAny out; out.type = sealType_char; out.value.as_char = value; return out; }")
 	g.line("static inline sealAny sealAny_f32(float value) { sealAny out; out.type = sealType_f32; out.value.as_f32 = value; return out; }")
 	g.line("static inline sealAny sealAny_f64(double value) { sealAny out; out.type = sealType_f64; out.value.as_f64 = value; return out; }")
-	g.line("static inline sealAny sealAny_string(const char *value) { sealAny out; out.type = sealType_string; out.value.as_string = value; return out; }")
+	g.line("static inline sealAny sealAny_string(sealString value) { sealAny out; out.type = sealType_string; out.value.as_string = value; return out; }")
+	g.line("static inline sealAny sealAny_cstring(const char *value) { sealAny out; out.type = sealType_cstring; out.value.as_cstring = value; return out; }")
 	g.line("static inline sealAny sealAny_rawptr(void *value) { sealAny out; out.type = sealType_rawptr; out.value.as_rawptr = value; return out; }")
 	g.line("static inline sealAny sealAny_any(sealAny value) { return value; }")
 	g.line("")
 
 	g.emitVariadicRuntimeType(CBool)
 	g.emitVariadicRuntimeType(CInt)
+	g.emitVariadicRuntimeType(CU8)
 	g.emitVariadicRuntimeType(CUsize)
+	g.emitVariadicRuntimeType(CChar)
 	g.emitVariadicRuntimeType(CF32)
 	g.emitVariadicRuntimeType(CF64)
-	g.emitVariadicRuntimeType(CString)
+	g.emitVariadicRuntimeType(CSealString)
+	g.emitVariadicRuntimeType(CCString)
 	g.emitVariadicRuntimeType(CRawptr)
 	g.emitVariadicRuntimeType(CAny)
 	g.line("")
@@ -1822,7 +1925,13 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return CF64
 
 	case *ast.StringLitExpr:
-		return CString
+		return CSealString
+
+	case *ast.CStringLitExpr:
+		return CCString
+
+	case *ast.CharLitExpr:
+		return CChar
 
 	case *ast.BoolLitExpr:
 		return CBool
@@ -1961,6 +2070,20 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		}
 
 		leftType := g.inferExprType(e.Left, nil)
+
+		if leftType.SealName == "string" {
+			switch e.Name.Name {
+			case "len":
+				return CUsize
+
+			case "data":
+				return CType{
+					Name:     "const unsigned char *",
+					SealName: "*u8",
+				}
+			}
+		}
+
 		sealName := strings.TrimPrefix(leftType.SealName, "*")
 		return g.lookupStructFieldType(sealName, e.Name.Name)
 
@@ -2171,18 +2294,24 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			return CBool
 		case "int":
 			return CInt
+		case "u8":
+			return CU8
 		case "usize":
 			return CUsize
+		case "char":
+			return CChar
 		case "rawptr":
 			return CRawptr
 		case "any":
 			return CAny
+		case "cstring":
+			return CCString
 		case "f32":
 			return CF32
 		case "f64":
 			return CF64
 		case "string":
-			return CString
+			return CSealString
 		default:
 			return CType{Name: name, SealName: name}
 		}

@@ -203,6 +203,8 @@ func (r *Resolver) declareBuiltins() {
 		"isize",
 		"f32",
 		"f64",
+		"char",
+		"cstring",
 		"string",
 		"rawptr",
 		"any",
@@ -612,12 +614,14 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		r.resolveSymbolUse(scope, e.Name.Name, e.Name.Span())
 
 	case *ast.DotIdentExpr:
-		// .None / .ErrorReading need type context.
-		// The type checker resolves these later.
+	// .None / .ErrorReading need type context.
+	// The type checker resolves these later.
 
 	case *ast.IntLitExpr,
 		*ast.FloatLitExpr,
 		*ast.StringLitExpr,
+		*ast.CStringLitExpr,
+		*ast.CharLitExpr,
 		*ast.BoolLitExpr,
 		*ast.NilLitExpr:
 		return

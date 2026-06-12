@@ -1404,3 +1404,52 @@ Main :: task() {
 		t.Fatalf("expected duplicate default case diagnostic")
 	}
 }
+
+func TestStringCStringAndCharTypes(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    c: char = 'ñ'
+    s: string = "hello"
+    cs: cstring = c"hello"
+
+    n: usize = s.len
+    data: *u8 = s.data
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCStringRequiresCStringLiteral(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    cs: cstring = "hello"
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to cstring") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestStringRequiresStringLiteral(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s: string = c"hello"
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign cstring to string") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

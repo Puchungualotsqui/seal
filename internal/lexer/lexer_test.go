@@ -1,6 +1,7 @@
 package lexer
 
 import (
+	"reflect"
 	"testing"
 
 	"seal/internal/diag"
@@ -342,4 +343,51 @@ func assertKinds(t *testing.T, got []token.Kind, want []token.Kind) {
 			t.Fatalf("token %d: expected %s, got %s", i, want[i], got[i])
 		}
 	}
+}
+
+func TestStringCStringAndCharLiterals(t *testing.T) {
+	tokens, reporter := lex(t, `
+s := "hello"
+cs := c"hello"
+ch := 'ñ'
+nl := '\n'
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	kinds := tokenKinds(tokens)
+
+	want := []token.Kind{
+		token.Ident, token.ColonEq, token.StringLit,
+		token.Ident, token.ColonEq, token.CStringLit,
+		token.Ident, token.ColonEq, token.CharLit,
+		token.Ident, token.ColonEq, token.CharLit,
+		token.EOF,
+	}
+
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("unexpected token kinds:\nwant=%v\ngot=%v", want, kinds)
+	}
+}
+
+func lex(t *testing.T, input string) ([]token.Token, *diag.Reporter) {
+	t.Helper()
+
+	file := source.NewFile("test.seal", input)
+	reporter := diag.NewReporter()
+
+	l := New(file, reporter)
+	tokens := l.LexAll()
+
+	return tokens, reporter
+}
+
+func tokenKinds(tokens []token.Token) []token.Kind {
+	kinds := make([]token.Kind, 0, len(tokens))
+	for _, tok := range tokens {
+		kinds = append(kinds, tok.Kind)
+	}
+	return kinds
 }

@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"seal/internal/ast"
@@ -19,7 +20,10 @@ const (
 	TypeInt
 	TypeF32
 	TypeF64
+	TypeChar
 	TypeString
+	TypeCstring
+	TypeU8
 	TypeUsize
 	TypeRawptr
 	TypeAny
@@ -95,8 +99,14 @@ func (t *Type) String() string {
 		return "f32"
 	case TypeF64:
 		return "f64"
+	case TypeChar:
+		return "char"
 	case TypeString:
 		return "string"
+	case TypeCstring:
+		return "cstring"
+	case TypeU8:
+		return "u8"
 	case TypeUntypedInt:
 		return "untyped int"
 	case TypeUntypedFloat:
@@ -161,7 +171,10 @@ var (
 	IntType          = &Type{Kind: TypeInt, Name: "int"}
 	F32Type          = &Type{Kind: TypeF32, Name: "f32"}
 	F64Type          = &Type{Kind: TypeF64, Name: "f64"}
+	CharType         = &Type{Kind: TypeChar, Name: "char"}
 	StringType       = &Type{Kind: TypeString, Name: "string"}
+	CstringType      = &Type{Kind: TypeCstring, Name: "cstring"}
+	U8Type           = &Type{Kind: TypeU8, Name: "u8"}
 	UsizeType        = &Type{Kind: TypeUsize, Name: "usize"}
 	RawptrType       = &Type{Kind: TypeRawptr, Name: "rawptr"}
 	AnyType          = &Type{Kind: TypeAny, Name: "any"}
@@ -515,15 +528,18 @@ func (c *Checker) resultTypeFromCall(taskType *Type, span source.Span) *Type {
 
 func (c *Checker) declareBuiltins(scope *Scope) {
 	builtinTypes := map[string]*Type{
-		"void":   VoidType,
-		"bool":   BoolType,
-		"int":    IntType,
-		"usize":  UsizeType,
-		"rawptr": RawptrType,
-		"any":    AnyType,
-		"f32":    F32Type,
-		"f64":    F64Type,
-		"string": StringType,
+		"void":    VoidType,
+		"bool":    BoolType,
+		"int":     IntType,
+		"u8":      U8Type,
+		"usize":   UsizeType,
+		"rawptr":  RawptrType,
+		"any":     AnyType,
+		"f32":     F32Type,
+		"f64":     F64Type,
+		"char":    CharType,
+		"string":  StringType,
+		"cstring": CstringType,
 	}
 
 	for name, typ := range builtinTypes {
@@ -1303,6 +1319,22 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 	case *ast.StringLitExpr:
 		return StringType
 
+	case *ast.CStringLitExpr:
+		return CstringType
+
+	case *ast.CharLitExpr:
+		value, err := strconv.Unquote(e.Value)
+		if err != nil {
+			c.diags.Add(e.Span(), fmt.Sprintf("invalid char literal: %v", err))
+			return CharType
+		}
+
+		if len([]rune(value)) != 1 {
+			c.diags.Add(e.Span(), "char literal must contain exactly one Unicode scalar value")
+		}
+
+		return CharType
+
 	case *ast.BoolLitExpr:
 		return BoolType
 
@@ -1841,6 +1873,23 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 	}
 
 	leftType := c.checkExpr(scope, e.Left)
+
+	if leftType.Kind == TypeString {
+		switch e.Name.Name {
+		case "len":
+			return UsizeType
+
+		case "data":
+			return &Type{
+				Kind: TypePointer,
+				Elem: U8Type,
+			}
+
+		default:
+			c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q", e.Name.Name))
+			return InvalidType
+		}
+	}
 
 	if leftType.Kind == TypePointer {
 		leftType = leftType.Elem
@@ -2679,7 +2728,7 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 	}
 
 	switch t.Kind {
-	case TypeBool, TypeInt, TypeF32, TypeF64, TypeString:
+	case TypeBool, TypeInt, TypeU8, TypeUsize, TypeChar, TypeF32, TypeF64, TypeString, TypeCstring:
 		return true
 	default:
 		return false
@@ -2718,7 +2767,7 @@ func DebugSummary(scope *Scope) string {
 
 	for _, sym := range scope.Symbols {
 		switch sym.Name {
-		case "void", "bool", "int", "usize", "rawptr", "any", "f32", "f64", "string", "Assert", "Print":
+		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring", "Assert", "Print":
 			continue
 		}
 

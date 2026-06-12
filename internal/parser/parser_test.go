@@ -631,3 +631,31 @@ Main :: task() {
 		t.Fatalf("expected type switch")
 	}
 }
+
+func TestParseStringCStringAndCharLiterals(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    s := "hello"
+    cs := c"hello"
+    ch := 'ñ'
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	taskDecl := file.Decls[0].(*ast.TaskDecl)
+
+	if _, ok := taskDecl.Body.Stmts[0].(*ast.VarDeclStmt).Value.(*ast.StringLitExpr); !ok {
+		t.Fatalf("expected string literal")
+	}
+
+	if _, ok := taskDecl.Body.Stmts[1].(*ast.VarDeclStmt).Value.(*ast.CStringLitExpr); !ok {
+		t.Fatalf("expected cstring literal")
+	}
+
+	if _, ok := taskDecl.Body.Stmts[2].(*ast.VarDeclStmt).Value.(*ast.CharLitExpr); !ok {
+		t.Fatalf("expected char literal")
+	}
+}

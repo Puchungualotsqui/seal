@@ -50,6 +50,10 @@ func (l *Lexer) Next() token.Token {
 	ch := l.advance()
 
 	if isIdentStart(ch) {
+		if ch == 'c' && l.peek() == '"' {
+			return l.lexCString(start)
+		}
+
 		return l.lexIdentifier(start)
 	}
 
@@ -60,6 +64,9 @@ func (l *Lexer) Next() token.Token {
 	switch ch {
 	case '"':
 		return l.lexString(start)
+
+	case '\'':
+		return l.lexChar(start)
 
 	case '(':
 		return l.makeToken(token.LParen, start, l.pos)
@@ -262,6 +269,58 @@ func (l *Lexer) lexString(start int) token.Token {
 	}
 
 	l.errorAt(start, l.pos, "unterminated string literal")
+	return l.makeToken(token.Invalid, start, l.pos)
+}
+
+func (l *Lexer) lexCString(start int) token.Token {
+	// We already consumed the leading `c`.
+	// Current character must be the opening `"`.
+	if l.isAtEnd() || l.peek() != '"' {
+		return l.makeToken(token.Ident, start, l.pos)
+	}
+
+	l.advance()
+
+	for !l.isAtEnd() {
+		ch := l.advance()
+
+		if ch == '"' {
+			return l.makeToken(token.CStringLit, start, l.pos)
+		}
+
+		if ch == '\n' {
+			l.errorAt(start, l.pos, "unterminated cstring literal")
+			return l.makeToken(token.Invalid, start, l.pos)
+		}
+
+		if ch == '\\' && !l.isAtEnd() {
+			l.advance()
+		}
+	}
+
+	l.errorAt(start, l.pos, "unterminated cstring literal")
+	return l.makeToken(token.Invalid, start, l.pos)
+}
+
+func (l *Lexer) lexChar(start int) token.Token {
+	for !l.isAtEnd() {
+		ch := l.advance()
+
+		if ch == '\'' {
+			return l.makeToken(token.CharLit, start, l.pos)
+		}
+
+		if ch == '\n' {
+			l.errorAt(start, l.pos, "unterminated char literal")
+			return l.makeToken(token.Invalid, start, l.pos)
+		}
+
+		if ch == '\\' && !l.isAtEnd() {
+			l.advance()
+		}
+	}
+
+	l.errorAt(start, l.pos, "unterminated char literal")
 	return l.makeToken(token.Invalid, start, l.pos)
 }
 

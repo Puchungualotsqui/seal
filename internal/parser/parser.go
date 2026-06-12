@@ -1193,6 +1193,18 @@ func (p *Parser) parsePrefix() ast.Expr {
 			Loc:   p.previous().Span,
 		}
 
+	case p.match(token.CStringLit):
+		return &ast.CStringLitExpr{
+			Value: p.previous().Lexeme,
+			Loc:   p.previous().Span,
+		}
+
+	case p.match(token.CharLit):
+		return &ast.CharLitExpr{
+			Value: p.previous().Lexeme,
+			Loc:   p.previous().Span,
+		}
+
 	case p.match(token.KeywordTrue):
 		return &ast.BoolLitExpr{
 			Value: true,

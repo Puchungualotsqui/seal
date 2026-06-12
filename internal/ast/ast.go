@@ -452,6 +452,26 @@ func (e *StringLitExpr) Span() source.Span {
 	return e.Loc
 }
 
+type CStringLitExpr struct {
+	Value string
+	Loc   source.Span
+}
+
+func (*CStringLitExpr) exprNode() {}
+func (e *CStringLitExpr) Span() source.Span {
+	return e.Loc
+}
+
+type CharLitExpr struct {
+	Value string
+	Loc   source.Span
+}
+
+func (*CharLitExpr) exprNode() {}
+func (e *CharLitExpr) Span() source.Span {
+	return e.Loc
+}
+
 type BoolLitExpr struct {
 	Value bool
 	Loc   source.Span

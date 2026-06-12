@@ -448,10 +448,10 @@ c :: @c_import {
     include "stdio.h"
 }
 
-printf :: extern("printf") task(format string, args ...any) int
+printf :: extern("printf") task(format cstring, args ...any) int
 
 Main :: task() {
-    printf("%d %s", 10, "hello")
+    printf(c"%d %s", 10, c"hello")
 }
 `)
 
@@ -542,7 +542,7 @@ Main :: task() {
 		t.Fatalf("expected CountAny variadic any signature, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "sealAny_string(\"hello\")") {
+	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .len = 5})`) {
 		t.Fatalf("expected string boxing, got:\n%s", out)
 	}
 
@@ -571,7 +571,7 @@ Main :: task() {
 		t.Fatalf("expected int boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, `sealAny_string("hello")`) {
+	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .len = 5})`) {
 		t.Fatalf("expected string boxing, got:\n%s", out)
 	}
 
@@ -677,7 +677,7 @@ Main :: task() {
 		t.Fatalf("expected anyAs<int>, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "const char * s = ((value).value.as_string);") {
+	if !strings.Contains(out, "sealString s = ((value).value.as_string);") {
 		t.Fatalf("expected anyAs<string>, got:\n%s", out)
 	}
 }
@@ -704,5 +704,43 @@ Main :: task() {
 
 	if !strings.Contains(out, "default:") {
 		t.Fatalf("expected default case, got:\n%s", out)
+	}
+}
+
+func TestGenerateStringCStringAndChar(t *testing.T) {
+	out, reporter := generate(t, `
+printf :: extern("printf") task(format cstring, args ...any) int
+
+Main :: task() {
+    c: char = 'ñ'
+    s: string = "hello"
+    cs: cstring = c"world"
+
+    printf(c"%.*s %s %u", s.len, s.data, cs, c)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct sealString") {
+		t.Fatalf("expected sealString runtime, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `sealString s = (sealString){.data = (const unsigned char *)"hello", .len = 5};`) {
+		t.Fatalf("expected string literal lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `const char * cs = "world";`) {
+		t.Fatalf("expected cstring literal lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "uint32_t c = 241;") {
+		t.Fatalf("expected char lowering for ñ, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `printf("%.*s %s %u", (s).len, (s).data, cs, c)`) {
+		t.Fatalf("expected printf call, got:\n%s", out)
 	}
 }
