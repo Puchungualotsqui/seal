@@ -922,3 +922,123 @@ Vec2Less :: pure task(a Vec2, b Vec2) int {
 		t.Fatalf("expected bool return diagnostic, got:\n%s", reporter.String())
 	}
 }
+
+func TestDefaultParameterCall(t *testing.T) {
+	_, reporter := check(t, `
+Add :: task(a int, b int = 1) int {
+    return a + b
+}
+
+Main :: task() {
+    x := Add(10)
+    y := Add(10, 20)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectTooFewArgumentsWithDefaults(t *testing.T) {
+	_, reporter := check(t, `
+Add :: task(a int, b int = 1) int {
+    return a + b
+}
+
+Main :: task() {
+    x := Add()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "expected 1 to 2, got 0") {
+		t.Fatalf("expected default argument count diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectDefaultParameterTypeMismatch(t *testing.T) {
+	_, reporter := check(t, `
+Foo :: task(a int = true) int {
+    return a
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign bool to int") {
+		t.Fatalf("expected default parameter type diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectNonDefaultAfterDefault(t *testing.T) {
+	_, reporter := check(t, `
+Foo :: task(a int = 1, b int) int {
+    return a + b
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `parameter "b" must have a default value`) {
+		t.Fatalf("expected trailing default diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestOverloadResolutionWithDefaultParameter(t *testing.T) {
+	_, reporter := check(t, `
+UseOne :: task(a int) int {
+    return a
+}
+
+UseTwo :: task(a int, b int = 10) int {
+    return a + b
+}
+
+Use :: overload {
+    UseOne
+    UseTwo
+}
+
+Main :: task() {
+    a := Use(1)
+    b := Use(1, 2)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectOperatorOverloadWithDefaultParameter(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Vec2Add :: pure task(a Vec2, b Vec2 = Vec2{x = 0.0, y = 0.0}) Vec2 {
+    return Vec2{x = a.x + b.x, y = a.y + b.y}
+}
+
++ :: overload {
+    Vec2Add
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `operator overload "+" candidate "Vec2Add" cannot have default parameters`) {
+		t.Fatalf("expected operator default diagnostic, got:\n%s", reporter.String())
+	}
+}

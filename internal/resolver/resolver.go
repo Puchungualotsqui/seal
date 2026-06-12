@@ -374,7 +374,10 @@ func (r *Resolver) resolveInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 		for _, param := range req.Params {
 			r.resolveType(scope, param.Type)
 			if param.HasDefault {
-				r.resolveExpr(scope, param.Default)
+				r.diags.Add(
+					param.Name.Span(),
+					fmt.Sprintf("interface requirement parameter %q cannot have a default value", param.Name.Name),
+				)
 			}
 		}
 
@@ -413,7 +416,7 @@ func (r *Resolver) resolveTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		r.resolveType(taskScope, param.Type)
 
 		if param.HasDefault {
-			r.resolveExpr(taskScope, param.Default)
+			r.resolveExpr(parent, param.Default)
 		}
 
 		r.declareSymbol(taskScope, param.Name.Name, SymbolParam, param.Name.Span(), nil)

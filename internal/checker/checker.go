@@ -51,8 +51,11 @@ type Type struct {
 	Variants []EnumVariantInfo
 	Members  []*Type
 
-	Params  []*Type
-	Results []*Type
+	Params          []*Type
+	Results         []*Type
+	RequiredParams  int
+	ParamDefaults   []ast.Expr
+	ParamHasDefault []bool
 }
 
 type EnumVariantInfo struct {
@@ -292,22 +295,33 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 		return 0, false
 	}
 
-	if len(taskType.Params) != len(argTypes) {
+	required := taskType.RequiredParams
+	total := len(taskType.Params)
+
+	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 {
+		required = total
+	}
+
+	if len(argTypes) < required || len(argTypes) > total {
 		return 0, false
 	}
 
-	total := 0
+	score := 0
 
 	for i := range argTypes {
-		score, ok := c.conversionScore(taskType.Params[i], argTypes[i])
+		itemScore, ok := c.conversionScore(taskType.Params[i], argTypes[i])
 		if !ok {
 			return 0, false
 		}
 
-		total += score
+		score += itemScore
 	}
 
-	return total, true
+	// Prefer candidates that do not need defaults when both match.
+	missingDefaults := total - len(argTypes)
+	score += missingDefaults * 5
+
+	return score, true
 }
 
 func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
@@ -703,10 +717,10 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 		// Later phase.
 
 	case *ast.UnionDecl:
-		// Later phase.
+	// Later phase.
 
 	case *ast.InterfaceDecl:
-		// Later phase.
+		c.checkInterfaceDecl(scope, d)
 
 	case *ast.ImplDecl:
 	// Later phase.
@@ -741,6 +755,10 @@ func (c *Checker) checkOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
 		if info.IsOperator {
 			if taskDecl == nil || !taskDecl.IsPure {
 				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q requires pure task candidate %q", d.Name, candidate.Name))
+			}
+
+			if c.taskHasDefaultParameters(taskType) {
+				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q cannot have default parameters", d.Name, candidate.Name))
 			}
 
 			if len(taskType.Params) != 2 {
@@ -800,6 +818,19 @@ func sameParamSignature(c *Checker, a *Type, b *Type) bool {
 	return true
 }
 
+func (c *Checker) checkInterfaceDecl(scope *Scope, d *ast.InterfaceDecl) {
+	for _, req := range d.Requirements {
+		for _, param := range req.Params {
+			if param.HasDefault {
+				c.diags.Add(
+					param.Name.Span(),
+					fmt.Sprintf("interface requirement parameter %q cannot have a default value", param.Name.Name),
+				)
+			}
+		}
+	}
+}
+
 func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	taskSym := parent.LookupLocal(d.Name.Name)
 	if taskSym == nil {
@@ -811,6 +842,8 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		taskType = c.taskTypeFromDecl(parent, d)
 		taskSym.Type = taskType
 	}
+
+	c.checkTaskDefaultParameters(parent, d, taskType)
 
 	taskScope := NewScope(parent)
 
@@ -827,11 +860,6 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 			Span: param.Name.Span(),
 			Node: d,
 		})
-
-		if param.HasDefault {
-			defaultType := c.checkExpr(parent, param.Default)
-			c.checkAssignable(paramType, defaultType, param.Default.Span())
-		}
 	}
 
 	oldResults := c.currentResults
@@ -844,8 +872,19 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 
 func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	var params []*Type
-	for _, param := range d.Params {
+	var paramDefaults []ast.Expr
+	var paramHasDefault []bool
+
+	requiredParams := len(d.Params)
+
+	for i, param := range d.Params {
 		params = append(params, c.typeFromAst(scope, param.Type))
+		paramDefaults = append(paramDefaults, param.Default)
+		paramHasDefault = append(paramHasDefault, param.HasDefault)
+
+		if param.HasDefault && requiredParams == len(d.Params) {
+			requiredParams = i
+		}
 	}
 
 	var results []*Type
@@ -854,10 +893,13 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	}
 
 	return &Type{
-		Kind:    TypeTask,
-		Name:    d.Name.Name,
-		Params:  params,
-		Results: results,
+		Kind:            TypeTask,
+		Name:            d.Name.Name,
+		Params:          params,
+		Results:         results,
+		RequiredParams:  requiredParams,
+		ParamDefaults:   paramDefaults,
+		ParamHasDefault: paramHasDefault,
 	}
 }
 
@@ -935,6 +977,45 @@ func (c *Checker) checkStmt(scope *Scope, stmt ast.Stmt) {
 	case *ast.SwitchStmt:
 		c.checkSwitchStmt(scope, s)
 	}
+}
+
+func (c *Checker) checkTaskDefaultParameters(parent *Scope, d *ast.TaskDecl, taskType *Type) {
+	seenDefault := false
+
+	for i, param := range d.Params {
+		if param.HasDefault {
+			seenDefault = true
+
+			defaultType := c.checkExpr(parent, param.Default)
+
+			if i < len(taskType.Params) {
+				c.checkAssignable(taskType.Params[i], defaultType, param.Default.Span())
+			}
+
+			continue
+		}
+
+		if seenDefault {
+			c.diags.Add(
+				param.Name.Span(),
+				fmt.Sprintf("parameter %q must have a default value because a previous parameter has a default", param.Name.Name),
+			)
+		}
+	}
+}
+
+func (c *Checker) taskHasDefaultParameters(taskType *Type) bool {
+	if taskType == nil {
+		return false
+	}
+
+	for _, hasDefault := range taskType.ParamHasDefault {
+		if hasDefault {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (c *Checker) checkReturnStmt(scope *Scope, s *ast.ReturnStmt) {
@@ -1339,16 +1420,30 @@ func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, args []ast.
 }
 
 func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
-	if len(argTypes) != len(taskType.Params) {
-		c.diags.Add(
-			span,
-			fmt.Sprintf("task call argument count mismatch: expected %d, got %d", len(taskType.Params), len(argTypes)),
-		)
+	required := taskType.RequiredParams
+	total := len(taskType.Params)
+
+	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 {
+		required = total
+	}
+
+	if len(argTypes) < required || len(argTypes) > total {
+		if required == total {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected %d, got %d", total, len(argTypes)),
+			)
+		} else {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected %d to %d, got %d", required, total, len(argTypes)),
+			)
+		}
 	}
 
 	count := len(argTypes)
-	if len(taskType.Params) < count {
-		count = len(taskType.Params)
+	if total < count {
+		count = total
 	}
 
 	for i := 0; i < count; i++ {
