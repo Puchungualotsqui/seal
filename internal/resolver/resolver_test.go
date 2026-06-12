@@ -340,3 +340,40 @@ func TestResolverDebugSummary(t *testing.T) {
 		t.Fatalf("unexpected summary: %s", out)
 	}
 }
+
+func TestResolveSpreadCallArgument(t *testing.T) {
+	_, reporter := resolve(t, `
+Sum :: task(values ...int) int {
+    return 0
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    Sum(a...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestResolveSpreadReportsUndefinedInnerSymbol(t *testing.T) {
+	_, reporter := resolve(t, `
+Sum :: task(values ...int) int {
+    return 0
+}
+
+Main :: task() {
+    Sum(missing...)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `undefined symbol "missing"`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

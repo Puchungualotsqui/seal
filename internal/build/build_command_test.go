@@ -185,3 +185,62 @@ Double :: task(x int) int {
 		t.Fatalf("expected prefixed helper function definition, got:\n%s", helperC)
 	}
 }
+
+func TestBuildWorkspacePackageQualifiedVariadicSpreadEmitOnly(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), "")
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+name = "app"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    { name = "fmtlike", version = "0.1.0" },
+]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+Main :: task() {
+    PrintForward("x = %", 10)
+}
+`)
+
+	writeFile(t, filepath.Join(root, "app", "forward.seal"), `
+PrintForward :: task(format string, args ...any) {
+    fmtlike.Print(format, args...)
+}
+`)
+
+	writeFile(t, filepath.Join(root, "fmtlike", "seal.toml"), `
+name = "fmtlike"
+version = "0.1.0"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "fmtlike", "fmtlike.seal"), `
+Print :: task(format string, args ...any) {
+}
+`)
+
+	outDir := filepath.Join(root, "out")
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+		OutDir:   outDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appBytes, err := os.ReadFile(filepath.Join(outDir, "app.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appC := string(appBytes)
+
+	if !strings.Contains(appC, "fmtlike_Print(format, args)") {
+		t.Fatalf("expected package-qualified variadic forwarding, got:\n%s", appC)
+	}
+}

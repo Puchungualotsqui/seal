@@ -312,11 +312,6 @@ type overloadResolution struct {
 	Ambiguous bool
 }
 
-type checkedCallArg struct {
-	Type *Type
-	Span source.Span
-}
-
 func (c *Checker) checkCallArgumentTypes(scope *Scope, args []ast.Expr) ([]*Type, []source.Span) {
 	var types []*Type
 	var spans []source.Span
@@ -343,17 +338,12 @@ func (c *Checker) checkCallArgumentTypes(scope *Scope, args []ast.Expr) ([]*Type
 				continue
 			}
 
-			if spreadType.Len < 0 {
-				c.diags.Add(spread.Span(), "cannot spread array with unknown length")
-				types = append(types, InvalidType)
-				spans = append(spans, spread.Span())
-				continue
-			}
-
-			for j := 0; j < spreadType.Len; j++ {
-				types = append(types, spreadType.Elem)
-				spans = append(spans, spread.Span())
-			}
+			types = append(types, &Type{
+				Kind: TypeVariadic,
+				Elem: spreadType.Elem,
+				Name: "..." + spreadType.Elem.String(),
+			})
+			spans = append(spans, spread.Span())
 
 		case TypeVariadic:
 			if spreadType.Elem == nil {
@@ -1329,6 +1319,21 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 		if s.HasType {
 			valueType = c.checkExprWithExpected(scope, s.Value, varType)
 			c.checkAssignable(varType, valueType, s.Value.Span())
+
+			// Preserve inferred array length:
+			//
+			//     a: [?]int = [1, 2, 3]
+			//
+			// The declared type starts as [?]int, but after checking the literal
+			// we know its concrete length is 3. Keep that concrete type for later
+			// operations like a...
+			if varType != nil &&
+				valueType != nil &&
+				varType.Kind == TypeArray &&
+				varType.Inferred &&
+				valueType.Kind == TypeArray {
+				varType = valueType
+			}
 		} else {
 			valueType = c.checkExpr(scope, s.Value)
 

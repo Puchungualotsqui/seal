@@ -771,3 +771,138 @@ Main :: task() {
 		t.Fatalf("expected s[-1] lowering, got:\n%s", out)
 	}
 }
+
+func TestGenerateSpreadArrayIntoVariadicTask(t *testing.T) {
+	out, reporter := generate(t, `
+Sum :: task(values ...int) int {
+    total := 0
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    result := Sum(a...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "int a[3] = {1, 2, 3};") {
+		t.Fatalf("expected array declaration, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Sum((sealVariadic_int){.data = a, .len = 3})") {
+		t.Fatalf("expected array spread lowering, got:\n%s", out)
+	}
+}
+
+func TestGenerateForwardVariadicIntoVariadicTask(t *testing.T) {
+	out, reporter := generate(t, `
+Sum :: task(values ...int) int {
+    total := 0
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Forward :: task(values ...int) int {
+    return Sum(values...)
+}
+
+Main :: task() {
+    result := Forward(1, 2, 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "int Forward(sealVariadic_int values)") {
+		t.Fatalf("expected Forward variadic signature, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Sum(values)") {
+		t.Fatalf("expected variadic forwarding without repacking, got:\n%s", out)
+	}
+}
+
+func TestGenerateSpreadArrayIntoVariadicWithFixedParameter(t *testing.T) {
+	out, reporter := generate(t, `
+Example :: task(prefix int, values ...int) int {
+    total := prefix
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    result := Example(10, a...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "Example(10, (sealVariadic_int){.data = a, .len = 3})") {
+		t.Fatalf("expected spread after fixed argument, got:\n%s", out)
+	}
+}
+
+func TestGenerateSpreadArrayLiteralIntoVariadicTask(t *testing.T) {
+	out, reporter := generate(t, `
+Sum :: task(values ...int) usize {
+    return len(values)
+}
+
+Main :: task() {
+    result := Sum([1, 2, 3]...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (int[]){1, 2, 3}, .len = 3})") {
+		t.Fatalf("expected array literal spread lowering, got:\n%s", out)
+	}
+}
+
+func TestGeneratePackageQualifiedSpreadCall(t *testing.T) {
+	out, reporter := generate(t, `
+Forward :: task(values ...any) {
+    PrintLike("values = %", values...)
+}
+
+PrintLike :: task(format string, args ...any) {
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "PrintLike(") {
+		t.Fatalf("expected PrintLike call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "values)") {
+		t.Fatalf("expected variadic forwarding to pass values directly, got:\n%s", out)
+	}
+}

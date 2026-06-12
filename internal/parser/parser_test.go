@@ -659,3 +659,77 @@ Main :: task() {
 		t.Fatalf("expected char literal")
 	}
 }
+
+func TestParseSpreadCallArgument(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    Sum(a...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[0].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[1].(*ast.ExprStmt)
+	call := stmt.Expr.(*ast.CallExpr)
+
+	if len(call.Args) != 1 {
+		t.Fatalf("expected 1 call arg, got %d", len(call.Args))
+	}
+
+	if _, ok := call.Args[0].(*ast.SpreadExpr); !ok {
+		t.Fatalf("expected spread arg, got %T", call.Args[0])
+	}
+}
+
+func TestParsePackageQualifiedSpreadCallArgument(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    fmt.Print("x = %\n", args...)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[0].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[0].(*ast.ExprStmt)
+	call := stmt.Expr.(*ast.CallExpr)
+
+	if len(call.Args) != 2 {
+		t.Fatalf("expected 2 call args, got %d", len(call.Args))
+	}
+
+	if _, ok := call.Args[1].(*ast.SpreadExpr); !ok {
+		t.Fatalf("expected second arg to be spread, got %T", call.Args[1])
+	}
+}
+
+func TestParseGroupedVariadicParameterAppliesOnlyToLastName(t *testing.T) {
+	file, reporter := parse(t, `
+Example :: task(a, b ...int) {
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	decl := file.Decls[0].(*ast.TaskDecl)
+
+	if len(decl.Params) != 2 {
+		t.Fatalf("expected 2 params, got %d", len(decl.Params))
+	}
+
+	if decl.Params[0].IsVariadic {
+		t.Fatalf("expected first grouped param to not be variadic")
+	}
+
+	if !decl.Params[1].IsVariadic {
+		t.Fatalf("expected second grouped param to be variadic")
+	}
+}

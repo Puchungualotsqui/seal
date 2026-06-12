@@ -1541,3 +1541,186 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestSpreadArrayIntoVariadicTask(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(values ...int) int {
+    total := 0
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    result := Sum(a...)
+    Assert(result == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestForwardVariadicIntoVariadicTask(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(values ...int) int {
+    total := 0
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Forward :: task(values ...int) int {
+    return Sum(values...)
+}
+
+Main :: task() {
+    result := Forward(1, 2, 3)
+    Assert(result == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestSpreadArrayIntoVariadicWithFixedParameter(t *testing.T) {
+	_, reporter := check(t, `
+Example :: task(prefix int, values ...int) int {
+    total := prefix
+
+    for i := 0; i < len(values); i = i + 1 {
+        total = total + values[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    result := Example(10, a...)
+    Assert(result == 16)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGroupedVariadicParameterOnlyLastNameIsVariadic(t *testing.T) {
+	_, reporter := check(t, `
+Example :: task(a, b ...int) int {
+    total := a
+
+    for i := 0; i < len(b); i = i + 1 {
+        total = total + b[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    result := Example(10, 1, 2, 3)
+    Assert(result == 16)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestSpreadMustBeLastArgument(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(values ...int) int {
+    return 0
+}
+
+Main :: task() {
+    a: [?]int = [1, 2, 3]
+    Sum(a..., 4)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "spread argument must be the last argument") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectSpreadNonArrayNonVariadic(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(values ...int) int {
+    return 0
+}
+
+Main :: task() {
+    x := 10
+    Sum(x...)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot spread int; expected array or variadic value") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectSpreadIntoNonVariadicTask(t *testing.T) {
+	_, reporter := check(t, `
+Use :: task(a int, b int) int {
+    return a + b
+}
+
+Main :: task() {
+    values: [?]int = [1, 2]
+    result := Use(values...)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot spread variadic argument into non-variadic task") &&
+		!strings.Contains(reporter.String(), "task call argument count mismatch") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectSpreadMismatchedElementType(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(values ...int) int {
+    return 0
+}
+
+Main :: task() {
+    values: [?]string = ["a", "b"]
+    result := Sum(values...)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
