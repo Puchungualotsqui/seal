@@ -95,9 +95,10 @@ func (s *scope) lookup(name string) (valueInfo, bool) {
 }
 
 type TaskInfo struct {
-	Decl       *ast.TaskDecl
-	ReturnType CType
-	ParamTypes []CType
+	Decl        *ast.TaskDecl
+	ReturnType  CType
+	ReturnTypes []CType
+	ParamTypes  []CType
 
 	RequiredParams  int
 	ParamDefaults   []ast.Expr
@@ -195,6 +196,8 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitStructs(file)
 	g.emitUnions(file)
 	g.emitConstants(file)
+	g.emitImportedResultStructs()
+	g.emitResultStructs(file)
 	g.emitImportedTaskPrototypes()
 	g.emitTaskPrototypes(file)
 	g.emitTasks(file)
@@ -231,6 +234,10 @@ func (g *Generator) collect(file *ast.File) {
 				ExternName:     d.ExternName,
 			}
 
+			for _, result := range d.Results {
+				info.ReturnTypes = append(info.ReturnTypes, g.cTypeFromAst(result))
+			}
+
 			if len(d.Results) == 0 {
 				if d.Name.Name == "Main" {
 					info.ReturnType = CInt
@@ -238,10 +245,13 @@ func (g *Generator) collect(file *ast.File) {
 					info.ReturnType = CVoid
 				}
 			} else if len(d.Results) == 1 {
-				info.ReturnType = g.cTypeFromAst(d.Results[0])
+				info.ReturnType = info.ReturnTypes[0]
 			} else {
-				g.error(d.Span(), fmt.Sprintf("task %q has multiple returns; C codegen does not support this yet", d.Name.Name))
-				info.ReturnType = CInvalid
+				resultName := g.taskResultStructName(d.Name.Name)
+				info.ReturnType = CType{
+					Name:     resultName,
+					SealName: resultName,
+				}
 			}
 
 			for i, param := range d.Params {
@@ -334,6 +344,98 @@ func (g *Generator) emitConstants(file *ast.File) {
 	}
 
 	if len(g.consts) > 0 {
+		g.line("")
+	}
+}
+
+func (g *Generator) emitImportedResultStructs() {
+	if len(g.packages) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(g.packages))
+	for name := range g.packages {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	emitted := false
+	seen := map[string]bool{}
+
+	for _, pkgName := range names {
+		pkg := g.packages[pkgName]
+		if pkg == nil {
+			continue
+		}
+
+		taskNames := make([]string, 0, len(pkg.Tasks))
+		for taskName := range pkg.Tasks {
+			taskNames = append(taskNames, taskName)
+		}
+		sort.Strings(taskNames)
+
+		for _, taskName := range taskNames {
+			info := pkg.Tasks[taskName]
+			if len(info.ReturnTypes) <= 1 {
+				continue
+			}
+
+			name := info.ReturnType.Name
+			if name == "" {
+				name = packageTaskResultStructName(pkgName, taskName)
+			}
+
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+
+			g.linef("typedef struct %s {", name)
+			g.indent++
+
+			for i, resultType := range info.ReturnTypes {
+				g.linef("%s;", resultType.Decl(fmt.Sprintf("_%d", i)))
+			}
+
+			g.indent--
+			g.linef("} %s;", name)
+			g.line("")
+
+			emitted = true
+		}
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
+func (g *Generator) emitResultStructs(file *ast.File) {
+	emitted := false
+
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.TaskDecl)
+		if !ok || d.IsTest || len(d.Results) <= 1 {
+			continue
+		}
+
+		info := g.tasks[d.Name.Name]
+
+		g.linef("typedef struct %s {", info.ReturnType.Name)
+		g.indent++
+
+		for i, resultType := range info.ReturnTypes {
+			g.linef("%s;", resultType.Decl(fmt.Sprintf("_%d", i)))
+		}
+
+		g.indent--
+		g.linef("} %s;", info.ReturnType.Name)
+		g.line("")
+
+		emitted = true
+	}
+
+	if emitted {
 		g.line("")
 	}
 }
@@ -439,8 +541,8 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 	g.currentTask = d
 	g.currentResults = nil
 
-	if len(d.Results) == 1 {
-		g.currentResults = append(g.currentResults, g.cTypeFromAst(d.Results[0]))
+	for _, result := range d.Results {
+		g.currentResults = append(g.currentResults, g.cTypeFromAst(result))
 	}
 
 	g.linef("%s {", g.taskSignature(d, true))
@@ -536,6 +638,20 @@ func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
 	return fmt.Sprintf("%s %s(%s)", ret, name, strings.Join(params, ", "))
 }
 
+func (g *Generator) taskResultStructName(taskName string) string {
+	name := sanitizeCName(taskName)
+
+	if g.packageName != "" {
+		name = sanitizeCName(g.packageName) + "_" + name
+	}
+
+	return name + "_Result"
+}
+
+func packageTaskResultStructName(packageName string, taskName string) string {
+	return sanitizeCName(packageName) + "_" + sanitizeCName(taskName) + "_Result"
+}
+
 func (g *Generator) cTaskName(name string) string {
 	if name == "Main" {
 		return "main"
@@ -625,6 +741,9 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 	case *ast.VarDeclStmt:
 		g.emitVarDeclStmt(s)
 
+	case *ast.MultiVarDeclStmt:
+		g.emitMultiVarDeclStmt(s)
+
 	case *ast.IfStmt:
 		cond := g.emitExpr(s.Cond, &CBool)
 		g.linef("if (%s) {", cond)
@@ -675,6 +794,32 @@ func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 		return
 	}
 
+	if len(g.currentResults) > 1 {
+		if g.currentTask == nil {
+			g.error(s.Span(), "multi-result return outside task")
+			return
+		}
+
+		info := g.tasks[g.currentTask.Name.Name]
+		resultTemp := g.newTemp("return_value")
+
+		g.linef("%s = {0};", info.ReturnType.Decl(resultTemp))
+
+		count := len(s.Values)
+		if len(g.currentResults) < count {
+			count = len(g.currentResults)
+		}
+
+		for i := 0; i < count; i++ {
+			expected := g.currentResults[i]
+			g.linef("%s._%d = %s;", resultTemp, i, g.emitExpr(s.Values[i], &expected))
+		}
+
+		g.emitActiveDefers()
+		g.linef("return %s;", resultTemp)
+		return
+	}
+
 	expected := (*CType)(nil)
 	if len(g.currentResults) == 1 {
 		expected = &g.currentResults[0]
@@ -708,6 +853,13 @@ func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
 		typ = g.inferExprType(s.Value, nil)
 	} else {
 		typ = CInvalid
+	}
+
+	if s.Name.Name == "_" {
+		if s.HasValue {
+			g.linef("(void)(%s);", g.emitExpr(s.Value, &typ))
+		}
+		return
 	}
 
 	g.scope.declare(s.Name.Name, typ)
@@ -1541,6 +1693,44 @@ func (g *Generator) emitSealVariadicTaskCall(name string, info TaskInfo, args []
 	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
 }
 
+func (g *Generator) emitMultiVarDeclStmt(s *ast.MultiVarDeclStmt) {
+	call, ok := s.Value.(*ast.CallExpr)
+	if !ok {
+		g.error(s.Value.Span(), "multi-value declaration requires a task call")
+		return
+	}
+
+	resultTypes := g.callReturnTypes(call)
+
+	if len(resultTypes) != len(s.Names) {
+		g.error(
+			s.Span(),
+			fmt.Sprintf("multi-value declaration mismatch: expected %d name(s), got %d result value(s)", len(s.Names), len(resultTypes)),
+		)
+	}
+
+	resultType := g.inferExprType(call, nil)
+	resultTemp := g.newTemp("multi_result")
+
+	g.linef("%s = %s;", resultType.Decl(resultTemp), g.emitExpr(call, &resultType))
+
+	count := len(s.Names)
+	if len(resultTypes) < count {
+		count = len(resultTypes)
+	}
+
+	for i := 0; i < count; i++ {
+		name := s.Names[i]
+		if name.Name == "_" {
+			continue
+		}
+
+		itemType := resultTypes[i]
+		g.scope.declare(name.Name, itemType)
+		g.linef("%s = %s._%d;", itemType.Decl(name.Name), resultTemp, i)
+	}
+}
+
 func (g *Generator) emitSpreadAsVariadic(elem CType, spread *ast.SpreadExpr) string {
 	variadicType := g.variadicCType(elem)
 	srcType := g.inferExprType(spread.Expr, nil)
@@ -2014,6 +2204,49 @@ func argsSpan(args []ast.Expr) source.Span {
 	}
 
 	return args[0].Span()
+}
+
+func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return []CType{g.inferExprType(expr, nil)}
+	}
+
+	if id, ok := call.Callee.(*ast.IdentExpr); ok {
+		if id.Name.Name == "len" {
+			return []CType{CUsize}
+		}
+
+		if info, ok := g.tasks[id.Name.Name]; ok {
+			return info.ReturnTypes
+		}
+
+		if _, ok := g.overloads[id.Name.Name]; ok {
+			argTypes := make([]CType, 0, len(call.Args))
+			for _, arg := range call.Args {
+				argTypes = append(argTypes, g.inferExprType(arg, nil))
+			}
+
+			candidate, ok := g.resolveOverload(id.Name.Name, argTypes)
+			if !ok {
+				return []CType{CInvalid}
+			}
+
+			return g.tasks[candidate].ReturnTypes
+		}
+	}
+
+	if selector, ok := call.Callee.(*ast.SelectorExpr); ok {
+		if id, ok := selector.Left.(*ast.IdentExpr); ok {
+			if pkg := g.packages[id.Name.Name]; pkg != nil {
+				if info, ok := pkg.Tasks[selector.Name.Name]; ok {
+					return info.ReturnTypes
+				}
+			}
+		}
+	}
+
+	return []CType{g.inferExprType(expr, nil)}
 }
 
 func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {

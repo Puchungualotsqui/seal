@@ -1034,8 +1034,60 @@ func (p *Parser) synchronizeSwitchCase() {
 	}
 }
 
+func (p *Parser) looksLikeMultiVarDeclStmt() bool {
+	if !p.at(token.Ident) {
+		return false
+	}
+
+	i := p.pos + 1
+	seenComma := false
+
+	for i < len(p.tokens) && p.tokens[i].Kind == token.Comma {
+		seenComma = true
+		i++
+
+		if i >= len(p.tokens) || p.tokens[i].Kind != token.Ident {
+			return false
+		}
+
+		i++
+	}
+
+	return seenComma && i < len(p.tokens) && p.tokens[i].Kind == token.ColonEq
+}
+
 func (p *Parser) parseSimpleStmt() ast.Stmt {
 	start := p.peek().Span.Start
+
+	if p.looksLikeMultiVarDeclStmt() {
+		var names []ast.Ident
+
+		first := p.expectIdent("expected variable name")
+		names = append(names, first)
+
+		for p.match(token.Comma) {
+			name := p.expectIdent("expected variable name after ','")
+			if name.Name == "" {
+				return nil
+			}
+
+			names = append(names, name)
+		}
+
+		p.expect(token.ColonEq, "expected ':='")
+
+		value := p.parseExpr(0)
+		if value == nil {
+			p.errorHere("expected value after ':='")
+			return nil
+		}
+
+		return &ast.MultiVarDeclStmt{
+			Names: names,
+			Value: value,
+			Loc:   p.span(start, value.Span().End),
+		}
+	}
 
 	if p.at(token.Ident) && p.peekNext().Kind == token.ColonEq {
 		name := p.expectIdent("expected variable name")

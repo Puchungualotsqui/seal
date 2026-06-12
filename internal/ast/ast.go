@@ -324,6 +324,18 @@ func (s *VarDeclStmt) Span() source.Span {
 	return s.Loc
 }
 
+type MultiVarDeclStmt struct {
+	Names []Ident
+	Value Expr
+	Loc   source.Span
+}
+
+func (*MultiVarDeclStmt) stmtNode() {}
+
+func (s *MultiVarDeclStmt) Span() source.Span {
+	return s.Loc
+}
+
 type IfStmt struct {
 	Cond Expr
 	Then *BlockStmt

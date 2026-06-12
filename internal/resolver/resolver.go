@@ -493,6 +493,17 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 	case *ast.ExprStmt:
 		r.resolveExpr(scope, s.Expr)
 
+	case *ast.MultiVarDeclStmt:
+		r.resolveExpr(scope, s.Value)
+
+		for _, name := range s.Names {
+			if name.Name == "_" {
+				continue
+			}
+
+			r.declareSymbol(scope, name.Name, SymbolVar, name.Span(), s)
+		}
+
 	case *ast.AssignStmt:
 		r.resolveExpr(scope, s.Left)
 		r.resolveExpr(scope, s.Right)

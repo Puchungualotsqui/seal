@@ -906,3 +906,63 @@ PrintLike :: task(format string, args ...any) {
 		t.Fatalf("expected variadic forwarding to pass values directly, got:\n%s", out)
 	}
 }
+
+func TestGenerateMultipleReturnTask(t *testing.T) {
+	out, reporter := generate(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    a, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Foo_Result") {
+		t.Fatalf("expected Foo_Result struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Foo_Result Foo(void)") {
+		t.Fatalf("expected Foo result signature, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Foo_Result __seal_multi_result") {
+		t.Fatalf("expected multi-result temporary, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void * a = __seal_multi_result") {
+		t.Fatalf("expected first result extraction, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void * b = __seal_multi_result") {
+		t.Fatalf("expected second result extraction, got:\n%s", out)
+	}
+}
+
+func TestGenerateMultipleReturnWithBlankIdentifier(t *testing.T) {
+	out, reporter := generate(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    _, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if strings.Contains(out, "void * _ =") {
+		t.Fatalf("blank identifier should not emit a variable, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "void * b = __seal_multi_result") {
+		t.Fatalf("expected second result extraction, got:\n%s", out)
+	}
+}

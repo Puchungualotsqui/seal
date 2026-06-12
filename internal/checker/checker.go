@@ -519,7 +519,7 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 	}
 
 	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer || dst.Kind == TypeUnion {
+		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion {
 			return 1, true
 		}
 
@@ -591,7 +591,7 @@ func (c *Checker) resultTypeFromCall(taskType *Type, span source.Span) *Type {
 		return taskType.Results[0]
 	}
 
-	c.diags.Add(span, "multi-result task call cannot be used as a single expression yet")
+	c.diags.Add(span, "multi-result task call cannot be used as a single expression; destructure it with a, b :=")
 	return InvalidType
 }
 
@@ -1136,6 +1136,9 @@ func (c *Checker) checkStmt(scope *Scope, stmt ast.Stmt) {
 	case *ast.SealStmt:
 		c.checkExpr(scope, s.Target)
 
+	case *ast.MultiVarDeclStmt:
+		c.checkMultiVarDeclStmt(scope, s)
+
 	case *ast.ExprStmt:
 		c.checkExpr(scope, s.Expr)
 
@@ -1351,6 +1354,10 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 
 	if varType == nil {
 		varType = InvalidType
+	}
+
+	if s.Name.Name == "_" {
+		return
 	}
 
 	scope.Declare(&Symbol{
@@ -1734,7 +1741,68 @@ func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
 		return true
 	}
 
+	if a.Kind == TypeRawptr && b.Kind == TypeNil {
+		return true
+	}
+
+	if b.Kind == TypeRawptr && a.Kind == TypeNil {
+		return true
+	}
+
 	return false
+}
+
+func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
+	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
+
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		result := c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
+		return []*Type{result}
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+		result := c.checkLenCall(e.Args, argTypes, e.Span())
+		return []*Type{result}
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		sym := scope.Lookup(id.Name.Name)
+		if sym == nil {
+			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
+			return []*Type{InvalidType}
+		}
+
+		switch sym.Kind {
+		case SymbolTask:
+			return c.checkDirectTaskCallResultTypes(sym, argTypes, argSpans, e.Span())
+
+		case SymbolOverload:
+			return c.checkOverloadCallResultTypes(sym, argTypes, argSpans, e.Span())
+
+		default:
+			c.diags.Add(id.Span(), fmt.Sprintf("cannot call non-task symbol %q", id.Name.Name))
+			return []*Type{InvalidType}
+		}
+	}
+
+	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok := selector.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
+			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
+				return c.checkPackageCallResultTypes(pkgSym, selector, argTypes, argSpans, e.Span())
+			}
+		}
+	}
+
+	calleeType := c.checkExpr(scope, e.Callee)
+
+	if calleeType.Kind != TypeTask {
+		c.diags.Add(e.Callee.Span(), fmt.Sprintf("cannot call non-task type %s", calleeType.String()))
+		return []*Type{InvalidType}
+	}
+
+	c.checkTaskTypeCallArguments(calleeType, argTypes, argSpans, e.Span())
+	return calleeType.Results
 }
 
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
@@ -1822,6 +1890,11 @@ func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, argSpans []
 }
 
 func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+	c.checkTaskTypeCallArguments(taskType, argTypes, argSpans, span)
+	return c.resultTypeFromCall(taskType, span)
+}
+
+func (c *Checker) checkTaskTypeCallArguments(taskType *Type, argTypes []*Type, argSpans []source.Span, span source.Span) {
 	required := taskType.RequiredParams
 	total := len(taskType.Params)
 
@@ -1866,7 +1939,7 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, argSpans [
 			c.checkAssignable(variadicElem, got, argSpans[i])
 		}
 
-		return c.resultTypeFromCall(taskType, span)
+		return
 	}
 
 	if len(argTypes) < required || len(argTypes) > total {
@@ -1896,8 +1969,6 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, argSpans [
 
 		c.checkAssignable(taskType.Params[i], argTypes[i], argSpans[i])
 	}
-
-	return c.resultTypeFromCall(taskType, span)
 }
 
 func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
@@ -2251,6 +2322,55 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 	return InvalidType
 }
 
+func (c *Checker) checkMultiVarDeclStmt(scope *Scope, s *ast.MultiVarDeclStmt) {
+	call, ok := s.Value.(*ast.CallExpr)
+	if !ok {
+		c.diags.Add(s.Value.Span(), "multi-value declaration requires a task call")
+		c.checkExpr(scope, s.Value)
+		return
+	}
+
+	resultTypes := c.checkCallResultTypes(scope, call)
+
+	if len(resultTypes) != len(s.Names) {
+		c.diags.Add(
+			s.Span(),
+			fmt.Sprintf("multi-value declaration mismatch: expected %d name(s), got %d result value(s)", len(s.Names), len(resultTypes)),
+		)
+	}
+
+	count := len(s.Names)
+	if len(resultTypes) < count {
+		count = len(resultTypes)
+	}
+
+	for i := 0; i < count; i++ {
+		name := s.Names[i]
+		if name.Name == "_" {
+			continue
+		}
+
+		varType := c.defaultType(resultTypes[i])
+		if varType.Kind == TypeEnumLiteral {
+			c.diags.Add(name.Span(), fmt.Sprintf("enum literal .%s needs explicit type", varType.Name))
+			varType = InvalidType
+		}
+
+		if varType.Kind == TypeNil {
+			c.diags.Add(name.Span(), "nil needs explicit type")
+			varType = InvalidType
+		}
+
+		scope.Declare(&Symbol{
+			Name: name.Name,
+			Kind: SymbolVar,
+			Type: varType,
+			Span: name.Span(),
+			Node: s,
+		})
+	}
+}
+
 func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	if dst == nil || src == nil {
 		return
@@ -2294,7 +2414,7 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 
 	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer {
+		if dst.Kind == TypePointer || dst.Kind == TypeRawptr {
 			return
 		}
 
@@ -2333,7 +2453,7 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if src.Kind == TypeNil {
-		return dst.Kind == TypePointer || dst.Kind == TypeUnion
+		return dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion
 	}
 
 	if src.Kind == TypeUntypedInt {
@@ -2716,6 +2836,70 @@ func (c *Checker) checkTypeSwitch(scope *Scope, s *ast.SwitchStmt, targetType *T
 	if !s.IsPartial && !hasDefault {
 		c.diags.Add(s.Span(), "non-partial any type switch requires default")
 	}
+}
+
+func (c *Checker) checkDirectTaskCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+	if sym.Type == nil || sym.Type.Kind != TypeTask {
+		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
+		return []*Type{InvalidType}
+	}
+
+	c.checkTaskTypeCallArguments(sym.Type, argTypes, argSpans, span)
+	return sym.Type.Results
+}
+
+func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+	if pkgSym.Package == nil {
+		c.diags.Add(selector.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
+		return []*Type{InvalidType}
+	}
+
+	member := pkgSym.Package.Symbols[selector.Name.Name]
+	if member == nil {
+		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package %s has no symbol %q", pkgSym.Name, selector.Name.Name))
+		return []*Type{InvalidType}
+	}
+
+	switch member.Kind {
+	case SymbolTask:
+		return c.checkDirectTaskCallResultTypes(member, argTypes, argSpans, span)
+
+	case SymbolOverload:
+		return c.checkOverloadCallResultTypes(member, argTypes, argSpans, span)
+
+	default:
+		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package symbol %s.%s is not callable", pkgSym.Name, selector.Name.Name))
+		return []*Type{InvalidType}
+	}
+}
+
+func (c *Checker) checkOverloadCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+	info := sym.Overload
+	if info == nil {
+		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
+		return []*Type{InvalidType}
+	}
+
+	result := c.resolveOverload(info, argTypes)
+
+	if !result.Matched {
+		c.diags.Add(
+			span,
+			fmt.Sprintf("no overload of %q matches argument types (%s)", info.Name, c.formatTypes(argTypes)),
+		)
+		return []*Type{InvalidType}
+	}
+
+	if result.Ambiguous {
+		c.diags.Add(
+			span,
+			fmt.Sprintf("ambiguous overload call %q with argument types (%s)", info.Name, c.formatTypes(argTypes)),
+		)
+		return []*Type{InvalidType}
+	}
+
+	c.checkTaskTypeCallArguments(result.Candidate.Type, argTypes, argSpans, span)
+	return result.Candidate.Type.Results
 }
 
 func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {

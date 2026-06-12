@@ -766,3 +766,53 @@ Main :: task() {
 		t.Fatalf("expected int element type, got %q", elem.Parts[0].Name)
 	}
 }
+
+func TestParseMultiVarDeclStmt(t *testing.T) {
+	file, reporter := parse(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    a, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[1].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[0].(*ast.MultiVarDeclStmt)
+
+	if len(stmt.Names) != 2 {
+		t.Fatalf("expected 2 names, got %d", len(stmt.Names))
+	}
+
+	if stmt.Names[0].Name != "a" || stmt.Names[1].Name != "b" {
+		t.Fatalf("unexpected names: %#v", stmt.Names)
+	}
+}
+
+func TestParseMultiVarDeclWithBlankIdentifier(t *testing.T) {
+	file, reporter := parse(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    _, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[1].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[0].(*ast.MultiVarDeclStmt)
+
+	if stmt.Names[0].Name != "_" || stmt.Names[1].Name != "b" {
+		t.Fatalf("unexpected names: %#v", stmt.Names)
+	}
+}

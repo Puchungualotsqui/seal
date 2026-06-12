@@ -1724,3 +1724,79 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestMultiReturnDeclaration(t *testing.T) {
+	_, reporter := check(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    a, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestMultiReturnDeclarationWithBlankIdentifier(t *testing.T) {
+	scope, reporter := check(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    _, b := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if scope.Lookup("_") != nil {
+		t.Fatalf("blank identifier should not be declared")
+	}
+}
+
+func TestRejectMultiReturnAsSingleVarDecl(t *testing.T) {
+	_, reporter := check(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    b := Foo()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "multi-result task call cannot be used as a single expression") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectMultiReturnDeclarationWrongNameCount(t *testing.T) {
+	_, reporter := check(t, `
+Foo :: task() rawptr, rawptr {
+    return nil, nil
+}
+
+Main :: task() {
+    a, b, c := Foo()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "multi-value declaration mismatch") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
