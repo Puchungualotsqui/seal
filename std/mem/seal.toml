@@ -1,0 +1,3 @@
+name = "mem"
+version = "0.1.0"
+kind = "library"

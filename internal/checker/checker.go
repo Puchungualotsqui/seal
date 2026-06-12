@@ -1290,6 +1290,10 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 			Name: e.Name.Name,
 		}
 
+	case *ast.GenericExpr:
+		c.diags.Add(e.Span(), "generic expression cannot be used as a value")
+		return InvalidType
+
 	case *ast.IntLitExpr:
 		return UntypedIntType
 
@@ -1585,6 +1589,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		argTypes = append(argTypes, c.checkExpr(scope, arg))
 	}
 
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
+	}
+
 	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
 		return c.checkLenCall(e.Args, argTypes, e.Span())
 	}
@@ -1728,6 +1736,47 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 	}
 
 	return c.resultTypeFromCall(taskType, span)
+}
+
+func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+	id, ok := gen.Base.(*ast.IdentExpr)
+	if !ok {
+		c.diags.Add(gen.Base.Span(), "only intrinsic generic calls are supported here")
+		return InvalidType
+	}
+
+	name := id.Name.Name
+
+	if name != "anyAs" && name != "anyIs" {
+		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
+		return InvalidType
+	}
+
+	if len(gen.Args) != 1 {
+		c.diags.Add(gen.Span(), fmt.Sprintf("%s expects exactly 1 type argument", name))
+		return InvalidType
+	}
+
+	targetType := c.typeFromAst(scope, gen.Args[0])
+
+	if len(argTypes) != 1 {
+		c.diags.Add(span, fmt.Sprintf("%s expects exactly 1 value argument", name))
+		return InvalidType
+	}
+
+	if !c.sameType(argTypes[0], AnyType) {
+		c.diags.Add(args[0].Span(), fmt.Sprintf("%s expects any, got %s", name, argTypes[0].String()))
+	}
+
+	switch name {
+	case "anyAs":
+		return targetType
+
+	case "anyIs":
+		return BoolType
+	}
+
+	return InvalidType
 }
 
 func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
@@ -2368,8 +2417,28 @@ func (c *Checker) unionMemberByName(unionType *Type, name string) *Type {
 	return nil
 }
 
+func (c *Checker) addDuplicateCaseDiagnostic(current source.Span, previous source.Span, label string) {
+	c.diags.Add(
+		current,
+		fmt.Sprintf("duplicate switch case %s, previous case at %s", label, previous.String()),
+	)
+}
+
+func switchCaseTypeKey(t *Type) string {
+	if t == nil {
+		return "<nil>"
+	}
+
+	return t.String()
+}
+
 func (c *Checker) checkSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
 	targetType := c.checkExpr(scope, s.Target)
+
+	if s.IsTypeSwitch {
+		c.checkTypeSwitch(scope, s, targetType)
+		return
+	}
 
 	if s.IsUnionSwitch {
 		c.checkUnionSwitch(scope, s, targetType)
@@ -2379,16 +2448,83 @@ func (c *Checker) checkSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
 	c.checkNormalSwitch(scope, s, targetType)
 }
 
+func (c *Checker) checkTypeSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
+	if !c.sameType(targetType, AnyType) {
+		c.diags.Add(s.Target.Span(), fmt.Sprintf("type switch target must be any, got %s", targetType.String()))
+	}
+
+	hasDefault := false
+	var previousDefault source.Span
+	seenTypes := map[string]source.Span{}
+
+	for _, swCase := range s.Cases {
+		caseScope := NewScope(scope)
+
+		switch swCase.Kind {
+		case ast.SwitchCaseUnionMember:
+			caseType := c.typeFromAst(scope, swCase.UnionMember)
+			key := caseType.String()
+
+			if prev, ok := seenTypes[key]; ok {
+				c.diags.Add(
+					swCase.UnionMember.Span(),
+					fmt.Sprintf("duplicate type switch case %s, previous case at %s", key, prev.String()),
+				)
+			} else {
+				seenTypes[key] = swCase.UnionMember.Span()
+			}
+
+		case ast.SwitchCaseDefault:
+			if hasDefault {
+				c.addDuplicateCaseDiagnostic(swCase.Loc, previousDefault, "default")
+			} else {
+				hasDefault = true
+				previousDefault = swCase.Loc
+			}
+
+		case ast.SwitchCaseNil:
+			c.diags.Add(swCase.Loc, "nil case is not valid in any type switch")
+
+		case ast.SwitchCaseEnumVariant:
+			c.diags.Add(swCase.EnumVariant.Span(), "enum case is not valid in any type switch")
+
+		case ast.SwitchCaseExpr:
+			c.diags.Add(swCase.Expr.Span(), "expression case is not valid in any type switch")
+		}
+
+		for _, stmt := range swCase.Body {
+			c.checkStmt(caseScope, stmt)
+		}
+	}
+
+	if !s.IsPartial && !hasDefault {
+		c.diags.Add(s.Span(), "non-partial any type switch requires default")
+	}
+}
+
 func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
 	if targetType.Kind != TypeEnum {
 		c.diags.Add(s.Target.Span(), fmt.Sprintf("switch target must be enum for now, got %s", targetType.String()))
 	}
+
+	seenEnumVariants := map[string]source.Span{}
+	seenExprCases := map[string]source.Span{}
+	seenDefault := false
+	var previousDefault source.Span
 
 	for _, swCase := range s.Cases {
 		caseScope := NewScope(scope)
 
 		switch swCase.Kind {
 		case ast.SwitchCaseEnumVariant:
+			key := swCase.EnumVariant.Name
+
+			if prev, ok := seenEnumVariants[key]; ok {
+				c.addDuplicateCaseDiagnostic(swCase.EnumVariant.Span(), prev, "."+key)
+			} else {
+				seenEnumVariants[key] = swCase.EnumVariant.Span()
+			}
+
 			if targetType.Kind == TypeEnum && !c.enumHasVariant(targetType, swCase.EnumVariant.Name) {
 				c.diags.Add(
 					swCase.EnumVariant.Span(),
@@ -2397,11 +2533,33 @@ func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType 
 			}
 
 		case ast.SwitchCaseDefault:
-			// ok
+			if seenDefault {
+				c.addDuplicateCaseDiagnostic(swCase.Loc, previousDefault, "default")
+			} else {
+				seenDefault = true
+				previousDefault = swCase.Loc
+			}
 
 		case ast.SwitchCaseExpr:
 			caseType := c.checkExpr(scope, swCase.Expr)
 			c.checkAssignable(targetType, caseType, swCase.Expr.Span())
+
+			key := switchCaseTypeKey(caseType) + ":" + swCase.Expr.Span().String()
+			if lit, ok := swCase.Expr.(*ast.IntLitExpr); ok {
+				key = "int:" + lit.Value
+			} else if lit, ok := swCase.Expr.(*ast.StringLitExpr); ok {
+				key = "string:" + lit.Value
+			} else if lit, ok := swCase.Expr.(*ast.BoolLitExpr); ok {
+				key = "bool:" + fmt.Sprintf("%v", lit.Value)
+			} else if dot, ok := swCase.Expr.(*ast.DotIdentExpr); ok {
+				key = "enum:" + dot.Name.Name
+			}
+
+			if prev, ok := seenExprCases[key]; ok {
+				c.addDuplicateCaseDiagnostic(swCase.Expr.Span(), prev, key)
+			} else {
+				seenExprCases[key] = swCase.Expr.Span()
+			}
 
 		case ast.SwitchCaseNil:
 			c.diags.Add(swCase.Loc, "nil case is only valid in union switch")
@@ -2421,12 +2579,25 @@ func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *
 		c.diags.Add(s.Target.Span(), fmt.Sprintf("union switch target must be union, got %s", targetType.String()))
 	}
 
+	seenMembers := map[string]source.Span{}
+	seenNil := false
+	var previousNil source.Span
+	seenDefault := false
+	var previousDefault source.Span
+
 	for _, swCase := range s.Cases {
 		caseScope := NewScope(scope)
 
 		switch swCase.Kind {
 		case ast.SwitchCaseUnionMember:
 			memberType := c.typeFromAst(scope, swCase.UnionMember)
+			key := switchCaseTypeKey(memberType)
+
+			if prev, ok := seenMembers[key]; ok {
+				c.addDuplicateCaseDiagnostic(swCase.UnionMember.Span(), prev, key)
+			} else {
+				seenMembers[key] = swCase.UnionMember.Span()
+			}
 
 			if targetType.Kind == TypeUnion && !c.unionHasMember(targetType, memberType) {
 				c.diags.Add(
@@ -2446,6 +2617,13 @@ func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *
 			}
 
 		case ast.SwitchCaseNil:
+			if seenNil {
+				c.addDuplicateCaseDiagnostic(swCase.Loc, previousNil, "nil")
+			} else {
+				seenNil = true
+				previousNil = swCase.Loc
+			}
+
 			if s.BindName.Name != "" {
 				caseScope.Declare(&Symbol{
 					Name: s.BindName.Name,
@@ -2457,7 +2635,12 @@ func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *
 			}
 
 		case ast.SwitchCaseDefault:
-			// No narrowing.
+			if seenDefault {
+				c.addDuplicateCaseDiagnostic(swCase.Loc, previousDefault, "default")
+			} else {
+				seenDefault = true
+				previousDefault = swCase.Loc
+			}
 
 		case ast.SwitchCaseEnumVariant:
 			c.diags.Add(swCase.EnumVariant.Span(), "enum case is not valid in union switch")

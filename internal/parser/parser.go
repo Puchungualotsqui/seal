@@ -801,8 +801,21 @@ func (p *Parser) parseStmt() ast.Stmt {
 	case p.match(token.KeywordFor):
 		return p.parseForStmt(start)
 
+	case p.match(token.At):
+		dir := p.expectIdent("expected directive name after '@'")
+		if dir.Name != "partial" {
+			p.errorHere("expected 'partial' directive before switch")
+			return nil
+		}
+
+		if !p.expect(token.KeywordSwitch, "expected 'switch' after @partial") {
+			return nil
+		}
+
+		return p.parseSwitchStmt(start, true)
+
 	case p.match(token.KeywordSwitch):
-		return p.parseSwitchStmt(start)
+		return p.parseSwitchStmt(start, false)
 	}
 
 	return p.parseSimpleStmt()
@@ -865,7 +878,7 @@ func (p *Parser) parseForStmt(start int) ast.Stmt {
 	}
 }
 
-func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
+func (p *Parser) parseSwitchStmt(start int, isPartial bool) ast.Stmt {
 	first := p.parseSwitchHeadExpr()
 	if first == nil {
 		p.errorHere("expected expression after switch")
@@ -873,6 +886,7 @@ func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
 	}
 
 	isUnionSwitch := false
+	isTypeSwitch := false
 	var bindName ast.Ident
 	target := first
 
@@ -891,6 +905,11 @@ func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
 		}
 	}
 
+	if !isUnionSwitch && p.at(token.Ident) && p.peek().Lexeme == "type" {
+		p.advance()
+		isTypeSwitch = true
+	}
+
 	if !p.expect(token.LBrace, "expected '{' after switch expression") {
 		return nil
 	}
@@ -899,7 +918,7 @@ func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
 
 	for !p.at(token.RBrace) && !p.at(token.EOF) {
 		if p.match(token.KeywordCase) {
-			cases = append(cases, p.parseSwitchCase(isUnionSwitch))
+			cases = append(cases, p.parseSwitchCase(isUnionSwitch, isTypeSwitch))
 			continue
 		}
 
@@ -918,12 +937,14 @@ func (p *Parser) parseSwitchStmt(start int) ast.Stmt {
 		BindName:      bindName,
 		Target:        target,
 		IsUnionSwitch: isUnionSwitch,
+		IsTypeSwitch:  isTypeSwitch,
+		IsPartial:     isPartial,
 		Cases:         cases,
 		Loc:           p.span(start, endTok.Span.End),
 	}
 }
 
-func (p *Parser) parseSwitchCase(isUnionSwitch bool) ast.SwitchCase {
+func (p *Parser) parseSwitchCase(isUnionSwitch bool, isTypeSwitch bool) ast.SwitchCase {
 	start := p.previous().Span.Start
 
 	var c ast.SwitchCase
@@ -934,10 +955,10 @@ func (p *Parser) parseSwitchCase(isUnionSwitch bool) ast.SwitchCase {
 		name := p.expectIdent("expected enum variant after '.'")
 		c.Kind = ast.SwitchCaseEnumVariant
 		c.EnumVariant = name
-	} else if isUnionSwitch {
+	} else if isUnionSwitch || isTypeSwitch {
 		member := p.parseType()
 		if member == nil {
-			p.errorHere("expected union member type")
+			p.errorHere("expected type in switch case")
 		}
 
 		c.Kind = ast.SwitchCaseUnionMember
@@ -1100,6 +1121,11 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 	}
 
 	for {
+		if p.at(token.Lt) && p.looksLikeGenericExpr(left) {
+			left = p.parseGenericExpr(left)
+			continue
+		}
+
 		if p.isPostfixStart(p.peek().Kind) {
 			left = p.parsePostfix(left)
 			continue
@@ -1216,6 +1242,72 @@ func (p *Parser) parsePrefix() ast.Expr {
 
 	p.errorHere("expected expression")
 	return nil
+}
+
+func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
+	switch left.(type) {
+	case *ast.IdentExpr, *ast.SelectorExpr:
+	default:
+		return false
+	}
+
+	if !p.at(token.Lt) {
+		return false
+	}
+
+	depth := 0
+
+	for i := p.pos; i < len(p.tokens); i++ {
+		switch p.tokens[i].Kind {
+		case token.Lt:
+			depth++
+
+		case token.Gt:
+			depth--
+			if depth == 0 {
+				if i+1 < len(p.tokens) && p.tokens[i+1].Kind == token.LParen {
+					return true
+				}
+
+				return false
+			}
+
+		case token.EOF:
+			return false
+		}
+	}
+
+	return false
+}
+
+func (p *Parser) parseGenericExpr(base ast.Expr) ast.Expr {
+	start := base.Span().Start
+
+	p.expect(token.Lt, "expected '<' before generic arguments")
+
+	var args []ast.Type
+
+	for !p.at(token.Gt) && !p.at(token.EOF) {
+		arg := p.parseType()
+		if arg == nil {
+			p.errorHere("expected type argument")
+			break
+		}
+
+		args = append(args, arg)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	gt := p.expectToken(token.Gt, "expected '>' after generic arguments")
+
+	return &ast.GenericExpr{
+		Base: base,
+		Args: args,
+		Loc:  p.span(start, gt.Span.End),
+	}
 }
 
 func (p *Parser) parsePostfix(left ast.Expr) ast.Expr {

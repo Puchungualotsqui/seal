@@ -610,3 +610,99 @@ Main :: task() {
 		t.Fatalf("expected packed variadic length 2, got:\n%s", out)
 	}
 }
+
+func TestGenerateAnyAsAnyIsIntrinsics(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    value: any = 10
+
+    if anyIs<int>(value) {
+        x := anyAs<int>(value)
+        Print(x)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "sealAny value = sealAny_int(10);") {
+		t.Fatalf("expected any boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "if (((value).type == sealType_int))") {
+		t.Fatalf("expected anyIs<int> lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "int x = ((value).value.as_int);") {
+		t.Fatalf("expected anyAs<int> lowering, got:\n%s", out)
+	}
+}
+
+func TestGeneratePartialAnyTypeSwitch(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    value: any = 10
+
+    @partial switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+
+    case string:
+        s := anyAs<string>(value)
+        Print(s)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "switch ((value).type)") {
+		t.Fatalf("expected any type switch, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "case sealType_int:") {
+		t.Fatalf("expected int case, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "case sealType_string:") {
+		t.Fatalf("expected string case, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "int x = ((value).value.as_int);") {
+		t.Fatalf("expected anyAs<int>, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "const char * s = ((value).value.as_string);") {
+		t.Fatalf("expected anyAs<string>, got:\n%s", out)
+	}
+}
+
+func TestGenerateNonPartialAnyTypeSwitchWithDefault(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    value: any = "hello"
+
+    switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+
+    default:
+        Print(0)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "default:") {
+		t.Fatalf("expected default case, got:\n%s", out)
+	}
+}

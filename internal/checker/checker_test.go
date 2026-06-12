@@ -1206,3 +1206,201 @@ Main :: task() {
 		t.Fatalf("expected diagnostics because interface values are not implemented yet")
 	}
 }
+
+func TestAnyAsAnyIsIntrinsics(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    value: any = 10
+
+    if anyIs<int>(value) {
+        x := anyAs<int>(value)
+        Print(x)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestAnyAsRejectsNonAny(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    x := anyAs<int>(10)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "anyAs expects any") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestPartialAnyTypeSwitch(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    value: any = 10
+
+    @partial switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+
+    case string:
+        s := anyAs<string>(value)
+        Print(s)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestNonPartialAnyTypeSwitchRequiresDefault(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    value: any = 10
+
+    switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+    }
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "non-partial any type switch requires default") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestNonPartialAnyTypeSwitchWithDefault(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    value: any = 10
+
+    switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+
+    default:
+        Print(0)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectDuplicateEnumSwitchCase(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None,
+    Bad,
+}
+
+Main :: task() {
+    e: Error = .None
+
+    switch e {
+    case .None:
+        Print(1)
+    case .None:
+        Print(2)
+    }
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected duplicate enum case diagnostic")
+	}
+}
+
+func TestRejectDuplicateUnionSwitchCase(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct { radius f32 }
+Rect :: struct { width f32 }
+
+Shape :: union {
+    Circle,
+    Rect,
+}
+
+Main :: task() {
+    s: Shape = Circle{radius = 1.0}
+
+    switch shape in s {
+    case Circle:
+        Print(1)
+    case Circle:
+        Print(2)
+    }
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected duplicate union case diagnostic")
+	}
+}
+
+func TestRejectDuplicateUnionNilSwitchCase(t *testing.T) {
+	_, reporter := check(t, `
+Circle :: struct { radius f32 }
+
+Shape :: union {
+    Circle,
+}
+
+Main :: task() {
+    s: Shape = nil
+
+    switch shape in s {
+    case nil:
+        Print(1)
+    case nil:
+        Print(2)
+    }
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected duplicate nil case diagnostic")
+	}
+}
+
+func TestRejectDuplicateSwitchDefaultCase(t *testing.T) {
+	_, reporter := check(t, `
+Error :: enum {
+    None,
+    Bad,
+}
+
+Main :: task() {
+    e: Error = .None
+
+    switch e {
+    default:
+        Print(1)
+    default:
+        Print(2)
+    }
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected duplicate default case diagnostic")
+	}
+}

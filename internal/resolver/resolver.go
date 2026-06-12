@@ -219,6 +219,8 @@ func (r *Resolver) declareBuiltins() {
 		"Print",
 		"len",
 		"Len",
+		"anyAs",
+		"anyIs",
 		"Trap",
 		"Panic",
 		"Unreachable",
@@ -631,6 +633,13 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		r.resolveExpr(scope, e.Callee)
 		for _, arg := range e.Args {
 			r.resolveExpr(scope, arg)
+		}
+
+	case *ast.GenericExpr:
+		r.resolveExpr(scope, e.Base)
+
+		for _, arg := range e.Args {
+			r.resolveType(scope, arg)
 		}
 
 	case *ast.SelectorExpr:

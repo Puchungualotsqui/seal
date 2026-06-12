@@ -1,0 +1,13 @@
+Main :: task() {
+    value: any = 10
+
+    @partial switch value type {
+    case int:
+        x := anyAs<int>(value)
+        Print(x)
+
+    case string:
+        s := anyAs<string>(value)
+        Print(s)
+    }
+}

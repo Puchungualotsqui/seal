@@ -1,0 +1,6 @@
+c :: @c_import {
+    include "stdlib.h"
+}
+
+Alloc :: extern("malloc") task(size usize) rawptr
+Free  :: extern("free") task(ptr rawptr)

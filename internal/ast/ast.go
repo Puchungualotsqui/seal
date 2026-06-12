@@ -342,9 +342,14 @@ type SwitchStmt struct {
 	//
 	// For union switch:
 	//     switch shape in s { ... }
+	//
+	// For any type switch:
+	//     switch value type { ... }
 	BindName      Ident
 	Target        Expr
 	IsUnionSwitch bool
+	IsTypeSwitch  bool
+	IsPartial     bool
 	Cases         []SwitchCase
 	Loc           source.Span
 }
@@ -508,6 +513,17 @@ type SelectorExpr struct {
 
 func (*SelectorExpr) exprNode() {}
 func (e *SelectorExpr) Span() source.Span {
+	return e.Loc
+}
+
+type GenericExpr struct {
+	Base Expr
+	Args []Type
+	Loc  source.Span
+}
+
+func (*GenericExpr) exprNode() {}
+func (e *GenericExpr) Span() source.Span {
 	return e.Loc
 }
 

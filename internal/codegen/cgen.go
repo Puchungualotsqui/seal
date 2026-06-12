@@ -799,6 +799,11 @@ func (g *Generator) emitForPart(stmt ast.Stmt) string {
 }
 
 func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
+	if s.IsTypeSwitch {
+		g.emitAnyTypeSwitchStmt(s)
+		return
+	}
+
 	if s.IsUnionSwitch {
 		g.emitUnionSwitchStmt(s)
 		return
@@ -823,6 +828,59 @@ func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 
 		default:
 			g.error(swCase.Loc, "unsupported switch case in C codegen")
+			continue
+		}
+
+		g.indent++
+
+		oldScope := g.scope
+		g.scope = newScope(oldScope)
+
+		for _, stmt := range swCase.Body {
+			g.emitStmt(stmt)
+		}
+
+		g.emitDefersInScope(g.scope)
+		g.line("break;")
+
+		g.scope = oldScope
+
+		g.indent--
+	}
+
+	g.indent--
+	g.line("}")
+}
+
+func (g *Generator) emitAnyTypeSwitchStmt(s *ast.SwitchStmt) {
+	targetType := g.inferExprType(s.Target, nil)
+	if targetType.SealName != "any" {
+		g.error(s.Target.Span(), fmt.Sprintf("type switch target is not any: %s", targetType.String()))
+		return
+	}
+
+	target := g.emitExpr(s.Target, nil)
+
+	g.linef("switch ((%s).type) {", target)
+	g.indent++
+
+	for _, swCase := range s.Cases {
+		switch swCase.Kind {
+		case ast.SwitchCaseUnionMember:
+			caseType := g.cTypeFromAst(swCase.UnionMember)
+			kind, ok := g.sealTypeKindFor(caseType)
+			if !ok {
+				g.error(swCase.UnionMember.Span(), fmt.Sprintf("unsupported any type switch case %s", caseType.String()))
+				continue
+			}
+
+			g.linef("case %s:", kind)
+
+		case ast.SwitchCaseDefault:
+			g.line("default:")
+
+		default:
+			g.error(swCase.Loc, "unsupported case in any type switch")
 			continue
 		}
 
@@ -980,6 +1038,10 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	case *ast.StringLitExpr:
 		return e.Value
 
+	case *ast.GenericExpr:
+		g.error(e.Span(), "generic expression cannot be emitted as a value")
+		return "0"
+
 	case *ast.BoolLitExpr:
 		if e.Value {
 			return "true"
@@ -1126,6 +1188,10 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 }
 
 func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return g.emitGenericIntrinsicCall(gen, e.Args)
+	}
+
 	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
 		return g.emitLenCall(e)
 	}
@@ -1171,6 +1237,101 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 	}
 
 	return fmt.Sprintf("%s(%s)", g.emitExpr(e.Callee, nil), strings.Join(args, ", "))
+}
+
+func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Expr) string {
+	id, ok := gen.Base.(*ast.IdentExpr)
+	if !ok {
+		g.error(gen.Base.Span(), "only intrinsic generic calls are supported here")
+		return "0"
+	}
+
+	if len(gen.Args) != 1 {
+		g.error(gen.Span(), fmt.Sprintf("%s expects exactly 1 type argument", id.Name.Name))
+		return "0"
+	}
+
+	if len(args) != 1 {
+		g.error(gen.Span(), fmt.Sprintf("%s expects exactly 1 value argument", id.Name.Name))
+		return "0"
+	}
+
+	target := g.cTypeFromAst(gen.Args[0])
+	value := g.emitExpr(args[0], nil)
+
+	switch id.Name.Name {
+	case "anyIs":
+		kind, ok := g.sealTypeKindFor(target)
+		if !ok {
+			g.error(gen.Args[0].Span(), fmt.Sprintf("anyIs does not support %s yet", target.String()))
+			return "false"
+		}
+
+		return fmt.Sprintf("((%s).type == %s)", value, kind)
+
+	case "anyAs":
+		field, ok := g.sealAnyFieldFor(target)
+		if !ok {
+			g.error(gen.Args[0].Span(), fmt.Sprintf("anyAs does not support %s yet", target.String()))
+			return "0"
+		}
+
+		if target.SealName == "any" {
+			return value
+		}
+
+		return fmt.Sprintf("((%s).value.%s)", value, field)
+
+	default:
+		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
+		return "0"
+	}
+}
+
+func (g *Generator) sealTypeKindFor(t CType) (string, bool) {
+	switch t.SealName {
+	case "bool":
+		return "sealType_bool", true
+	case "int":
+		return "sealType_int", true
+	case "usize":
+		return "sealType_usize", true
+	case "f32":
+		return "sealType_f32", true
+	case "f64":
+		return "sealType_f64", true
+	case "string":
+		return "sealType_string", true
+	case "rawptr":
+		return "sealType_rawptr", true
+	case "any":
+		return "sealType_any", true
+	default:
+		return "", false
+	}
+}
+
+func (g *Generator) sealAnyFieldFor(t CType) (string, bool) {
+	switch t.SealName {
+	case "bool":
+		return "as_bool", true
+	case "int":
+		return "as_int", true
+	case "usize":
+		return "as_usize", true
+	case "f32":
+		return "as_f32", true
+	case "f64":
+		return "as_f64", true
+	case "string":
+		return "as_string", true
+	case "rawptr":
+		return "as_rawptr", true
+	case "any":
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 func (g *Generator) emitLenCall(e *ast.CallExpr) string {
@@ -1630,6 +1791,9 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 	case *ast.IntLitExpr:
 		return CInt
 
+	case *ast.GenericExpr:
+		return CInvalid
+
 	case *ast.FloatLitExpr:
 		if expected != nil && expected.SealName == "f32" {
 			return CF32
@@ -1713,6 +1877,22 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
 			return CInt
+		}
+
+		if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+			if id, ok := gen.Base.(*ast.IdentExpr); ok {
+				switch id.Name.Name {
+				case "anyIs":
+					return CBool
+
+				case "anyAs":
+					if len(gen.Args) == 1 {
+						return g.cTypeFromAst(gen.Args[0])
+					}
+				}
+			}
+
+			return CInvalid
 		}
 
 		if id, ok := e.Callee.(*ast.IdentExpr); ok {

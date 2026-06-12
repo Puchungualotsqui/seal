@@ -583,3 +583,51 @@ TakeArrays :: task(args ...[10]any) {
 		t.Fatalf("expected array element type any, got %+v", namedType.Parts)
 	}
 }
+
+func TestParseGenericAnyIntrinsics(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    value: any = 10
+    isInt := anyIs<int>(value)
+    x := anyAs<int>(value)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf("expected 1 decl, got %d", len(file.Decls))
+	}
+}
+
+func TestParsePartialAnyTypeSwitch(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    value: any = 10
+
+    @partial switch value type {
+    case int:
+        x := anyAs<int>(value)
+    case string:
+        s := anyAs<string>(value)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	taskDecl := file.Decls[0].(*ast.TaskDecl)
+	switchStmt := taskDecl.Body.Stmts[1].(*ast.SwitchStmt)
+
+	if !switchStmt.IsPartial {
+		t.Fatalf("expected partial switch")
+	}
+
+	if !switchStmt.IsTypeSwitch {
+		t.Fatalf("expected type switch")
+	}
+}
