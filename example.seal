@@ -1,0 +1,14 @@
+MAX_COUNT :: 1024
+
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+LengthSq :: pure task(v Vec2) f32 {
+    return v.x * v.x + v.y * v.y
+}
+
+SwitchTest :: test task() {
+    Assert(true)
+}
