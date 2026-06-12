@@ -16,10 +16,11 @@ type CType struct {
 	Name     string
 	SealName string
 
-	IsArray    bool
-	IsVariadic bool
-	ArrayLen   string
-	Elem       *CType
+	IsArray     bool
+	IsVariadic  bool
+	IsInterface bool
+	ArrayLen    string
+	Elem        *CType
 }
 
 func (t CType) String() string {
@@ -125,9 +126,12 @@ type Generator struct {
 	packageName string
 	packages    map[string]*PackageInfo
 
-	structs   map[string]*ast.StructDecl
-	enums     map[string]*ast.EnumDecl
-	unions    map[string]*ast.UnionDecl
+	structs    map[string]*ast.StructDecl
+	enums      map[string]*ast.EnumDecl
+	unions     map[string]*ast.UnionDecl
+	interfaces map[string]*ast.InterfaceDecl
+	impls      map[string][]string
+
 	tasks     map[string]TaskInfo
 	overloads map[string][]string
 	consts    map[string]CType
@@ -153,6 +157,8 @@ func NewWithPackages(diags *diag.Reporter, packageName string, packages map[stri
 		structs:     map[string]*ast.StructDecl{},
 		enums:       map[string]*ast.EnumDecl{},
 		unions:      map[string]*ast.UnionDecl{},
+		interfaces:  map[string]*ast.InterfaceDecl{},
+		impls:       map[string][]string{},
 		tasks:       map[string]TaskInfo{},
 		overloads:   map[string][]string{},
 		consts:      map[string]CType{},
@@ -195,11 +201,13 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitEnums(file)
 	g.emitStructs(file)
 	g.emitUnions(file)
+	g.emitInterfaces()
 	g.emitConstants(file)
 	g.emitImportedResultStructs()
 	g.emitResultStructs(file)
 	g.emitImportedTaskPrototypes()
 	g.emitTaskPrototypes(file)
+	g.emitImplVTables()
 	g.emitTasks(file)
 
 	return g.out.String()
@@ -217,6 +225,23 @@ func (g *Generator) collect(file *ast.File) {
 		case *ast.UnionDecl:
 			g.unions[d.Name.Name] = d
 
+		case *ast.InterfaceDecl:
+			g.interfaces[d.Name.Name] = d
+
+		case *ast.ImplDecl:
+			for _, iface := range d.Interfaces {
+				name := typeNameFromAst(iface)
+				if name == "" {
+					continue
+				}
+
+				g.impls[d.TypeName.Name] = append(g.impls[d.TypeName.Name], name)
+			}
+		}
+	}
+
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
 		case *ast.OverloadDecl:
 			for _, name := range d.Names {
 				g.overloads[d.Name] = append(g.overloads[d.Name], name.Name)
@@ -278,6 +303,15 @@ func (g *Generator) collect(file *ast.File) {
 			g.consts[d.Name.Name] = g.inferExprType(d.Value, nil)
 		}
 	}
+}
+
+func typeNameFromAst(t ast.Type) string {
+	named, ok := t.(*ast.NamedType)
+	if !ok || len(named.Parts) == 0 {
+		return ""
+	}
+
+	return named.Parts[len(named.Parts)-1].Name
 }
 
 func (g *Generator) emitEnums(file *ast.File) {
@@ -688,6 +722,206 @@ func sanitizeCName(name string) string {
 	}
 
 	return b.String()
+}
+
+func (g *Generator) emitInterfaces() {
+	if len(g.interfaces) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(g.interfaces))
+	for name := range g.interfaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		d := g.interfaces[name]
+
+		g.linef("typedef struct %s_vtable {", d.Name.Name)
+		g.indent++
+
+		for _, req := range d.Requirements {
+			ret := g.interfaceRequirementReturnType(req)
+
+			var params []string
+			params = append(params, "void *data")
+
+			for i := 1; i < len(req.Params); i++ {
+				paramType := g.cTypeFromAst(req.Params[i].Type)
+				params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
+			}
+
+			g.linef("%s (*%s)(%s);", ret.Name, sanitizeCName(req.Name.Name), strings.Join(params, ", "))
+		}
+
+		g.indent--
+		g.linef("} %s_vtable;", d.Name.Name)
+		g.line("")
+
+		g.linef("typedef struct %s {", d.Name.Name)
+		g.indent++
+		g.line("void *data;")
+		g.linef("%s_vtable *vtable;", d.Name.Name)
+		g.indent--
+		g.linef("} %s;", d.Name.Name)
+		g.line("")
+	}
+}
+
+func (g *Generator) interfaceRequirementReturnType(req *ast.TaskSignature) CType {
+	if len(req.Results) == 0 {
+		return CVoid
+	}
+
+	if len(req.Results) == 1 {
+		return g.cTypeFromAst(req.Results[0])
+	}
+
+	g.error(req.Loc, fmt.Sprintf("interface requirement %q has multiple returns; interface dispatch does not support this yet", req.Name.Name))
+	return CInvalid
+}
+
+func (g *Generator) lookupInterfaceRequirement(iface string, name string) (*ast.TaskSignature, bool) {
+	d := g.interfaces[iface]
+	if d == nil {
+		return nil, false
+	}
+
+	for _, req := range d.Requirements {
+		if req.Name.Name == name {
+			return req, true
+		}
+	}
+
+	return nil, false
+}
+
+func (g *Generator) emitInterfaceDispatchCall(iface CType, taskName string, args []ast.Expr, preparedArgs []string) string {
+	req, ok := g.lookupInterfaceRequirement(iface.SealName, taskName)
+	if !ok {
+		g.error(argsSpan(args), fmt.Sprintf("interface %s has no requirement %q", iface.SealName, taskName))
+		return "0"
+	}
+
+	receiver := ""
+	if len(preparedArgs) > 0 {
+		receiver = preparedArgs[0]
+	} else {
+		receiver = g.emitExpr(args[0], nil)
+	}
+
+	var outArgs []string
+	outArgs = append(outArgs, fmt.Sprintf("(%s).data", receiver))
+
+	for i := 1; i < len(args); i++ {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := (*CType)(nil)
+		if i < len(req.Params) {
+			paramType := g.cTypeFromAst(req.Params[i].Type)
+			expected = &paramType
+		}
+
+		outArgs = append(outArgs, g.emitExpr(args[i], expected))
+	}
+
+	return fmt.Sprintf(
+		"(%s).vtable->%s(%s)",
+		receiver,
+		sanitizeCName(taskName),
+		strings.Join(outArgs, ", "),
+	)
+}
+
+func (g *Generator) emitImplVTables() {
+	if len(g.impls) == 0 {
+		return
+	}
+
+	concreteNames := make([]string, 0, len(g.impls))
+	for concrete := range g.impls {
+		concreteNames = append(concreteNames, concrete)
+	}
+	sort.Strings(concreteNames)
+
+	for _, concrete := range concreteNames {
+		ifaces := append([]string(nil), g.impls[concrete]...)
+		sort.Strings(ifaces)
+
+		for _, iface := range ifaces {
+			g.emitImplVTable(concrete, iface)
+		}
+	}
+}
+
+func (g *Generator) emitImplVTable(concrete string, iface string) {
+	ifaceDecl := g.interfaces[iface]
+	if ifaceDecl == nil {
+		return
+	}
+
+	for _, req := range ifaceDecl.Requirements {
+		g.emitInterfaceWrapper(concrete, iface, req)
+	}
+
+	vtableName := interfaceVTableName(iface, concrete)
+
+	g.linef("static %s_vtable %s = {", iface, vtableName)
+	g.indent++
+
+	for _, req := range ifaceDecl.Requirements {
+		g.linef(".%s = %s,", sanitizeCName(req.Name.Name), interfaceWrapperName(iface, concrete, req.Name.Name))
+	}
+
+	g.indent--
+	g.line("};")
+	g.line("")
+}
+
+func (g *Generator) emitInterfaceWrapper(concrete string, iface string, req *ast.TaskSignature) {
+	ret := g.interfaceRequirementReturnType(req)
+	wrapperName := interfaceWrapperName(iface, concrete, req.Name.Name)
+
+	var params []string
+	var callArgs []string
+
+	params = append(params, "void *data")
+	callArgs = append(callArgs, fmt.Sprintf("(%s *)data", concrete))
+
+	for i := 1; i < len(req.Params); i++ {
+		paramType := g.cTypeFromAst(req.Params[i].Type)
+		paramName := fmt.Sprintf("arg%d", i)
+
+		params = append(params, paramType.Decl(paramName))
+		callArgs = append(callArgs, paramName)
+	}
+
+	targetName := g.cTaskName(req.Name.Name)
+
+	g.linef("static %s %s(%s) {", ret.Name, wrapperName, strings.Join(params, ", "))
+	g.indent++
+
+	if ret.SealName == "void" {
+		g.linef("%s(%s);", targetName, strings.Join(callArgs, ", "))
+	} else {
+		g.linef("return %s(%s);", targetName, strings.Join(callArgs, ", "))
+	}
+
+	g.indent--
+	g.line("}")
+	g.line("")
+}
+
+func interfaceWrapperName(iface string, concrete string, task string) string {
+	return sanitizeCName(iface) + "_" + sanitizeCName(concrete) + "_" + sanitizeCName(task)
+}
+
+func interfaceVTableName(iface string, concrete string) string {
+	return sanitizeCName(iface) + "_" + sanitizeCName(concrete) + "_vtable"
 }
 
 func (g *Generator) emitBlockStatements(block *ast.BlockStmt) {
@@ -1178,6 +1412,12 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return g.emitAnyExpr(expr)
 	}
 
+	if expected != nil {
+		if value, ok := g.tryEmitInterfaceConversion(*expected, expr); ok {
+			return value
+		}
+	}
+
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if _, ok := g.scope.lookup(e.Name.Name); ok {
@@ -1225,6 +1465,10 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	case *ast.NilLitExpr:
 		if expected != nil && g.isUnion(*expected) {
 			return fmt.Sprintf("(%s){.tag = %s_Tag_nil}", expected.Name, expected.SealName)
+		}
+
+		if expected != nil && g.isInterfaceCType(*expected) {
+			return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name)
 		}
 
 		return "NULL"
@@ -1443,6 +1687,12 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		argTypes := make([]CType, 0, len(e.Args))
 		for _, arg := range e.Args {
 			argTypes = append(argTypes, g.inferExprType(arg, nil))
+		}
+
+		if len(argTypes) > 0 && g.isInterfaceCType(argTypes[0]) {
+			if _, ok := g.lookupInterfaceRequirement(argTypes[0].SealName, id.Name.Name); ok {
+				return g.emitInterfaceDispatchCall(argTypes[0], id.Name.Name, e.Args, preparedArgs)
+			}
 		}
 
 		if _, isOverload := g.overloads[id.Name.Name]; isOverload {
@@ -2389,6 +2639,16 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			return CInvalid
 		}
 
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && len(e.Args) > 0 {
+			firstType := g.inferExprType(e.Args[0], nil)
+
+			if g.isInterfaceCType(firstType) {
+				if req, ok := g.lookupInterfaceRequirement(firstType.SealName, id.Name.Name); ok {
+					return g.interfaceRequirementReturnType(req)
+				}
+			}
+		}
+
 		if id, ok := e.Callee.(*ast.IdentExpr); ok {
 			if info, ok := g.tasks[id.Name.Name]; ok {
 				return info.ReturnType
@@ -2605,6 +2865,61 @@ func (g *Generator) isUnion(t CType) bool {
 	return ok
 }
 
+func (g *Generator) isInterfaceCType(t CType) bool {
+	if t.IsInterface {
+		return true
+	}
+
+	_, ok := g.interfaces[t.SealName]
+	return ok
+}
+
+func (g *Generator) tryEmitInterfaceConversion(expected CType, expr ast.Expr) (string, bool) {
+	if !g.isInterfaceCType(expected) {
+		return "", false
+	}
+
+	src := g.inferExprType(expr, nil)
+
+	if src.SealName == expected.SealName {
+		return "", false
+	}
+
+	if src.SealName == "nil" {
+		return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+	}
+
+	if strings.HasPrefix(src.SealName, "*") {
+		concrete := strings.TrimPrefix(src.SealName, "*")
+
+		if !g.typeImplementsInterface(concrete, expected.SealName) {
+			g.error(expr.Span(), fmt.Sprintf("%s does not implement %s", concrete, expected.SealName))
+			return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+		}
+
+		value := g.emitExpr(expr, nil)
+
+		return fmt.Sprintf(
+			"(%s){.data = (void *)%s, .vtable = &%s}",
+			expected.Name,
+			value,
+			interfaceVTableName(expected.SealName, concrete),
+		), true
+	}
+
+	return "", false
+}
+
+func (g *Generator) typeImplementsInterface(concrete string, iface string) bool {
+	for _, implemented := range g.impls[concrete] {
+		if implemented == iface {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (g *Generator) unionHasMember(unionName string, memberName string) bool {
 	u := g.unions[unionName]
 	if u == nil {
@@ -2674,6 +2989,14 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 		case "string":
 			return CSealString
 		default:
+			if _, ok := g.interfaces[name]; ok {
+				return CType{
+					Name:        name,
+					SealName:    name,
+					IsInterface: true,
+				}
+			}
+
 			return CType{Name: name, SealName: name}
 		}
 

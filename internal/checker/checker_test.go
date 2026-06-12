@@ -1196,19 +1196,33 @@ Main :: task() {
 	}
 }
 
-func TestArrayOfInterfaceValuesRejectedForNow(t *testing.T) {
+func TestArrayOfInterfaceValuesIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Enemy :: interface {
     Health :: task(e *$T) int
 }
 
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Goblin :: impl {
+    Enemy,
+}
+
 Main :: task() {
-    enemies: [2]Enemy = []
+    g := Goblin{hp = 10}
+    e: Enemy = &g
+    enemies: [1]Enemy = [e]
 }
 `)
 
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics because interface values are not implemented yet")
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
 
@@ -1797,6 +1811,140 @@ Main :: task() {
 	}
 
 	if !strings.Contains(reporter.String(), "multi-value declaration mismatch") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestInterfaceAssignmentAndDispatch(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Goblin :: impl {
+    Enemy,
+}
+
+Main :: task() {
+    g := Goblin{hp = 10}
+    e: Enemy = &g
+    hp := Health(e)
+    Assert(hp == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestInterfaceCanBeNil(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Main :: task() {
+    e: Enemy = nil
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInterfaceAssignmentWithoutImpl(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Main :: task() {
+    g := Goblin{hp = 10}
+    e: Enemy = &g
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign *Goblin to interface Enemy") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectImplMissingRequirement(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Goblin :: impl {
+    Enemy,
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "does not implement Enemy") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectInterfaceMethodSyntax(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Goblin :: impl {
+    Enemy,
+}
+
+Main :: task() {
+    g := Goblin{hp = 10}
+    e: Enemy = &g
+    hp := e.Health()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "interface method syntax is invalid") {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }

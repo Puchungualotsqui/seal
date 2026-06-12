@@ -966,3 +966,53 @@ Main :: task() {
 		t.Fatalf("expected second result extraction, got:\n%s", out)
 	}
 }
+
+func TestGenerateInterfaceAssignmentAndDispatch(t *testing.T) {
+	out, reporter := generate(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Goblin :: impl {
+    Enemy,
+}
+
+Main :: task() {
+    g := Goblin{hp = 10}
+    e: Enemy = &g
+    hp := Health(e)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Enemy_vtable") {
+		t.Fatalf("expected Enemy_vtable, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "typedef struct Enemy") {
+		t.Fatalf("expected Enemy interface struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Enemy_Goblin_vtable") {
+		t.Fatalf("expected Goblin vtable, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(Enemy){.data = (void *)(&g), .vtable = &Enemy_Goblin_vtable}") {
+		t.Fatalf("expected interface boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(e).vtable->Health((e).data)") {
+		t.Fatalf("expected interface dispatch, got:\n%s", out)
+	}
+}

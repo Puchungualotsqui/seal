@@ -59,6 +59,9 @@ type Type struct {
 	Variants []EnumVariantInfo
 	Members  []*Type
 
+	InterfaceRequirements []InterfaceRequirementInfo
+	Implements            []*Type
+
 	Params          []*Type
 	Results         []*Type
 	RequiredParams  int
@@ -79,6 +82,13 @@ type FieldInfo struct {
 	Name string
 	Type *Type
 	Span source.Span
+}
+
+type InterfaceRequirementInfo struct {
+	Name    string
+	Params  []*Type
+	Results []*Type
+	Span    source.Span
 }
 
 func (t *Type) String() string {
@@ -518,8 +528,20 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		return 0, false
 	}
 
+	if dst.Kind == TypeInterface {
+		if src.Kind == TypeNil {
+			return 1, true
+		}
+
+		if src.Kind == TypePointer && c.typeImplementsInterface(src.Elem, dst) {
+			return 5, true
+		}
+
+		return 0, false
+	}
+
 	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion {
+		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion || dst.Kind == TypeInterface {
 			return 1, true
 		}
 
@@ -821,6 +843,11 @@ func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
 }
 
 func (c *Checker) prepareInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
+	sym := parent.LookupLocal(d.Name.Name)
+	if sym == nil || sym.Type == nil {
+		return
+	}
+
 	scope := NewScope(parent)
 
 	scope.Declare(&Symbol{
@@ -833,15 +860,29 @@ func (c *Checker) prepareInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 		Span: d.Name.Span(),
 	})
 
+	var requirements []InterfaceRequirementInfo
+
 	for _, req := range d.Requirements {
+		var params []*Type
+		var results []*Type
+
 		for _, param := range req.Params {
-			c.typeFromAst(scope, param.Type)
+			params = append(params, c.typeFromAst(scope, param.Type))
 		}
 
 		for _, result := range req.Results {
-			c.typeFromAst(scope, result)
+			results = append(results, c.typeFromAst(scope, result))
 		}
+
+		requirements = append(requirements, InterfaceRequirementInfo{
+			Name:    req.Name.Name,
+			Params:  params,
+			Results: results,
+			Span:    req.Loc,
+		})
 	}
+
+	sym.Type.InterfaceRequirements = requirements
 }
 
 func (c *Checker) declareGenericParams(scope *Scope, params []ast.GenericParam) {
@@ -893,7 +934,7 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 		c.checkInterfaceDecl(scope, d)
 
 	case *ast.ImplDecl:
-	// Later phase.
+		c.checkImplDecl(scope, d)
 
 	case *ast.OverloadDecl:
 		c.checkOverloadDecl(scope, d)
@@ -988,8 +1029,190 @@ func sameParamSignature(c *Checker, a *Type, b *Type) bool {
 	return true
 }
 
+func (c *Checker) checkImplDecl(scope *Scope, d *ast.ImplDecl) {
+	typeSym := scope.Lookup(d.TypeName.Name)
+	if typeSym == nil || typeSym.Kind != SymbolType {
+		c.diags.Add(d.TypeName.Span(), fmt.Sprintf("undefined implementation type %q", d.TypeName.Name))
+		return
+	}
+
+	concreteType := typeSym.Type
+	if concreteType == nil || concreteType.Kind == TypeInvalid {
+		return
+	}
+
+	for _, ifaceAst := range d.Interfaces {
+		ifaceType := c.typeFromAst(scope, ifaceAst)
+
+		if ifaceType.Kind != TypeInterface {
+			c.diags.Add(ifaceAst.Span(), fmt.Sprintf("%s is not an interface", ifaceType.String()))
+			continue
+		}
+
+		c.checkConcreteImplementsInterface(scope, concreteType, ifaceType, ifaceAst.Span())
+
+		if !c.typeImplementsInterface(concreteType, ifaceType) {
+			concreteType.Implements = append(concreteType.Implements, ifaceType)
+		}
+	}
+}
+
+func (c *Checker) checkConcreteImplementsInterface(scope *Scope, concreteType *Type, ifaceType *Type, span source.Span) {
+	for _, req := range ifaceType.InterfaceRequirements {
+		expectedParams := make([]*Type, 0, len(req.Params))
+
+		for _, param := range req.Params {
+			expectedParams = append(expectedParams, c.substituteInterfaceSelfType(param, concreteType))
+		}
+
+		task := c.findInterfaceImplementationTask(scope, req.Name, expectedParams, req.Results)
+		if task == nil {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("type %s does not implement %s: missing task %s",
+					concreteType.String(),
+					ifaceType.String(),
+					c.formatTaskSignature(req.Name, expectedParams, req.Results),
+				),
+			)
+		}
+	}
+}
+
+func (c *Checker) findInterfaceImplementationTask(scope *Scope, name string, expectedParams []*Type, expectedResults []*Type) *Symbol {
+	sym := scope.Lookup(name)
+	if sym == nil {
+		return nil
+	}
+
+	switch sym.Kind {
+	case SymbolTask:
+		if c.taskSignatureMatches(sym.Type, expectedParams, expectedResults) {
+			return sym
+		}
+
+	case SymbolOverload:
+		if sym.Overload == nil {
+			return nil
+		}
+
+		for _, candidate := range sym.Overload.Candidates {
+			if c.taskSignatureMatches(candidate.Type, expectedParams, expectedResults) {
+				return candidate
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Checker) taskSignatureMatches(taskType *Type, expectedParams []*Type, expectedResults []*Type) bool {
+	if taskType == nil || taskType.Kind != TypeTask {
+		return false
+	}
+
+	if len(taskType.Params) != len(expectedParams) || len(taskType.Results) != len(expectedResults) {
+		return false
+	}
+
+	for i := range expectedParams {
+		if !c.sameType(taskType.Params[i], expectedParams[i]) {
+			return false
+		}
+	}
+
+	for i := range expectedResults {
+		if !c.sameType(taskType.Results[i], expectedResults[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (c *Checker) substituteInterfaceSelfType(t *Type, concreteType *Type) *Type {
+	if t == nil {
+		return InvalidType
+	}
+
+	switch t.Kind {
+	case TypeTypeParam:
+		if t.Name == "T" {
+			return concreteType
+		}
+
+		return t
+
+	case TypePointer:
+		return &Type{
+			Kind: TypePointer,
+			Elem: c.substituteInterfaceSelfType(t.Elem, concreteType),
+		}
+
+	case TypeArray:
+		return &Type{
+			Kind:     TypeArray,
+			Name:     t.Name,
+			Elem:     c.substituteInterfaceSelfType(t.Elem, concreteType),
+			Len:      t.Len,
+			Inferred: t.Inferred,
+		}
+
+	case TypeVariadic:
+		return &Type{
+			Kind: TypeVariadic,
+			Name: t.Name,
+			Elem: c.substituteInterfaceSelfType(t.Elem, concreteType),
+		}
+
+	default:
+		return t
+	}
+}
+
+func (c *Checker) typeImplementsInterface(concreteType *Type, ifaceType *Type) bool {
+	if concreteType == nil || ifaceType == nil {
+		return false
+	}
+
+	for _, implemented := range concreteType.Implements {
+		if c.sameType(implemented, ifaceType) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Checker) formatTaskSignature(name string, params []*Type, results []*Type) string {
+	var paramParts []string
+	for _, param := range params {
+		paramParts = append(paramParts, param.String())
+	}
+
+	var resultParts []string
+	for _, result := range results {
+		resultParts = append(resultParts, result.String())
+	}
+
+	if len(resultParts) == 0 {
+		return fmt.Sprintf("%s :: task(%s)", name, strings.Join(paramParts, ", "))
+	}
+
+	return fmt.Sprintf("%s :: task(%s) %s", name, strings.Join(paramParts, ", "), strings.Join(resultParts, ", "))
+}
+
 func (c *Checker) checkInterfaceDecl(scope *Scope, d *ast.InterfaceDecl) {
 	for _, req := range d.Requirements {
+		if len(req.Params) == 0 {
+			c.diags.Add(req.Name.Span(), fmt.Sprintf("interface requirement %q must have a self parameter *$T", req.Name.Name))
+			continue
+		}
+
+		if !isInterfaceSelfParam(req.Params[0].Type) {
+			c.diags.Add(req.Params[0].Name.Span(), fmt.Sprintf("first parameter of interface requirement %q must be *$T", req.Name.Name))
+		}
+
 		for _, param := range req.Params {
 			if param.HasDefault {
 				c.diags.Add(
@@ -1752,8 +1975,78 @@ func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
 	return false
 }
 
+func (c *Checker) checkInterfaceDispatchCall(scope *Scope, e *ast.CallExpr, argTypes []*Type, argSpans []source.Span) (*Type, bool) {
+	results, ok := c.checkInterfaceDispatchCallResultTypes(scope, e, argTypes, argSpans)
+	if !ok {
+		return InvalidType, false
+	}
+
+	if len(results) == 0 {
+		return VoidType, true
+	}
+
+	if len(results) == 1 {
+		return results[0], true
+	}
+
+	c.diags.Add(e.Span(), "multi-result interface call cannot be used as a single expression yet")
+	return InvalidType, true
+}
+
+func (c *Checker) checkInterfaceDispatchCallResultTypes(scope *Scope, e *ast.CallExpr, argTypes []*Type, argSpans []source.Span) ([]*Type, bool) {
+	id, ok := e.Callee.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+
+	if len(argTypes) == 0 {
+		return nil, false
+	}
+
+	ifaceType := argTypes[0]
+	if ifaceType == nil || ifaceType.Kind != TypeInterface {
+		return nil, false
+	}
+
+	req := c.lookupInterfaceRequirement(ifaceType, id.Name.Name)
+	if req == nil {
+		return nil, false
+	}
+
+	if len(argTypes) != len(req.Params) {
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf("interface call argument count mismatch: expected %d, got %d", len(req.Params), len(argTypes)),
+		)
+	} else {
+		for i := 1; i < len(argTypes); i++ {
+			c.checkAssignable(req.Params[i], argTypes[i], argSpans[i])
+		}
+	}
+
+	return req.Results, true
+}
+
+func (c *Checker) lookupInterfaceRequirement(ifaceType *Type, name string) *InterfaceRequirementInfo {
+	if ifaceType == nil || ifaceType.Kind != TypeInterface {
+		return nil
+	}
+
+	for i := range ifaceType.InterfaceRequirements {
+		if ifaceType.InterfaceRequirements[i].Name == name {
+			return &ifaceType.InterfaceRequirements[i]
+		}
+	}
+
+	return nil
+}
+
 func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
+
+	if results, ok := c.checkInterfaceDispatchCallResultTypes(scope, e, argTypes, argSpans); ok {
+		return results
+	}
 
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		result := c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
@@ -1807,6 +2100,10 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
+
+	if result, ok := c.checkInterfaceDispatchCall(scope, e, argTypes, argSpans); ok {
+		return result
+	}
 
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
@@ -2078,6 +2375,11 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 
 	if leftType.Kind == TypeCstring {
 		c.diags.Add(e.Name.Span(), fmt.Sprintf("cstring has no field %q", e.Name.Name))
+		return InvalidType
+	}
+
+	if leftType.Kind == TypeInterface {
+		c.diags.Add(e.Span(), fmt.Sprintf("interface method syntax is invalid; use %s(value, ...) instead", e.Name.Name))
 		return InvalidType
 	}
 
@@ -2400,6 +2702,19 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 		return
 	}
 
+	if dst.Kind == TypeInterface {
+		if src.Kind == TypeNil {
+			return
+		}
+
+		if src.Kind == TypePointer && c.typeImplementsInterface(src.Elem, dst) {
+			return
+		}
+
+		c.diags.Add(span, fmt.Sprintf("cannot assign %s to interface %s", src.String(), dst.String()))
+		return
+	}
+
 	if dst.Kind == TypeUnion {
 		if src.Kind == TypeNil {
 			return
@@ -2414,7 +2729,7 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 
 	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer || dst.Kind == TypeRawptr {
+		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeInterface {
 			return
 		}
 
@@ -2448,12 +2763,17 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return c.enumHasVariant(dst, src.Name)
 	}
 
+	if dst.Kind == TypeInterface {
+		return src.Kind == TypeNil ||
+			(src.Kind == TypePointer && c.typeImplementsInterface(src.Elem, dst))
+	}
+
 	if dst.Kind == TypeUnion {
 		return src.Kind == TypeNil || c.unionHasMember(dst, src)
 	}
 
 	if src.Kind == TypeNil {
-		return dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion
+		return dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion || dst.Kind == TypeInterface
 	}
 
 	if src.Kind == TypeUntypedInt {
@@ -2580,6 +2900,20 @@ func (c *Checker) isIndexType(t *Type) bool {
 	default:
 		return false
 	}
+}
+
+func isInterfaceSelfParam(t ast.Type) bool {
+	ptr, ok := t.(*ast.PointerType)
+	if !ok {
+		return false
+	}
+
+	named, ok := ptr.Elem.(*ast.NamedType)
+	if !ok {
+		return false
+	}
+
+	return len(named.Parts) == 1 && named.Parts[0].Name == "T"
 }
 
 func (c *Checker) isIntegerLike(t *Type) bool {
