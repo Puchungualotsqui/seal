@@ -345,3 +345,59 @@ CValue :: @rawUnion union {
 		t.Fatalf("expected raw union")
 	}
 }
+
+func TestParseLocalConstAndTaskDecl(t *testing.T) {
+	file, reporter := parse(t, `
+Outer :: task() {
+    OUTER_CONST :: 10
+
+    Inner :: task() {
+        SomeThing(OUTER_CONST)
+    }
+
+    Inner()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+
+	if len(task.Body.Stmts) != 3 {
+		t.Fatalf("expected 3 statements, got %d", len(task.Body.Stmts))
+	}
+
+	if _, ok := task.Body.Stmts[0].(*ast.DeclStmt); !ok {
+		t.Fatalf("expected local const DeclStmt, got %T", task.Body.Stmts[0])
+	}
+
+	if _, ok := task.Body.Stmts[1].(*ast.DeclStmt); !ok {
+		t.Fatalf("expected local task DeclStmt, got %T", task.Body.Stmts[1])
+	}
+}
+
+func TestParseStandaloneBlock(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    {
+        x := 10
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf("expected 1 statement")
+	}
+
+	if _, ok := task.Body.Stmts[0].(*ast.BlockStmt); !ok {
+		t.Fatalf("expected BlockStmt, got %T", task.Body.Stmts[0])
+	}
+}

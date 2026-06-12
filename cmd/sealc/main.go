@@ -7,6 +7,7 @@ import (
 	"seal/internal/diag"
 	"seal/internal/lexer"
 	"seal/internal/parser"
+	"seal/internal/resolver"
 	"seal/internal/source"
 	"seal/internal/token"
 )
@@ -26,6 +27,9 @@ func main() {
 	case "parse":
 		runParse(os.Args[2])
 
+	case "resolve":
+		runResolve(os.Args[2])
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		printUsage()
@@ -37,6 +41,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sealc lex <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc parse <file.seal>")
+	fmt.Fprintln(os.Stderr, "  sealc resolve <file.seal>")
 }
 
 func readAndLex(path string) ([]token.Token, *diag.Reporter) {
@@ -85,6 +90,33 @@ func runParse(path string) {
 	}
 
 	fmt.Println(parser.DebugSummary(file))
+}
+
+func runResolve(path string) {
+	tokens, reporter := readAndLex(path)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	r := resolver.New(reporter)
+	scope := r.ResolveFile(file)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	fmt.Println(resolver.DebugSummary(scope))
 }
 
 func printToken(tok token.Token) {

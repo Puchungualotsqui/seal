@@ -498,7 +498,8 @@ func (p *Parser) parseType() ast.Type {
 
 	var t ast.Type
 
-	if p.match(token.Star) {
+	switch {
+	case p.match(token.Star):
 		elem := p.parseType()
 		if elem == nil {
 			p.errorHere("expected type after '*'")
@@ -509,7 +510,8 @@ func (p *Parser) parseType() ast.Type {
 			Elem: elem,
 			Loc:  p.span(start, elem.Span().End),
 		}
-	} else if p.match(token.LBracket) {
+
+	case p.match(token.LBracket):
 		inferred := false
 		var length ast.Expr
 
@@ -536,14 +538,19 @@ func (p *Parser) parseType() ast.Type {
 			Elem:     elem,
 			Loc:      p.span(start, elem.Span().End),
 		}
-	} else if p.at(token.Dollar) {
-		p.advance()
+
+	case p.match(token.Dollar):
 		name := p.expectIdent("expected type parameter name after '$'")
+		if name.Name == "" {
+			return nil
+		}
+
 		t = &ast.NamedType{
 			Parts: []ast.Ident{name},
 			Loc:   p.span(start, name.Span().End),
 		}
-	} else if p.at(token.Ident) {
+
+	case p.at(token.Ident):
 		parts := []ast.Ident{p.expectIdent("expected type name")}
 
 		for p.match(token.Dot) {
@@ -559,7 +566,8 @@ func (p *Parser) parseType() ast.Type {
 			Parts: parts,
 			Loc:   p.span(start, parts[len(parts)-1].Span().End),
 		}
-	} else {
+
+	default:
 		return nil
 	}
 
@@ -620,6 +628,22 @@ func (p *Parser) parseBlock() *ast.BlockStmt {
 
 func (p *Parser) parseStmt() ast.Stmt {
 	start := p.peek().Span.Start
+
+	if p.at(token.Ident) && p.peekNext().Kind == token.ColonColon {
+		decl := p.parseDecl()
+		if decl == nil {
+			return nil
+		}
+
+		return &ast.DeclStmt{
+			Decl: decl,
+			Loc:  decl.Span(),
+		}
+	}
+
+	if p.at(token.LBrace) {
+		return p.parseBlock()
+	}
 
 	switch {
 	case p.match(token.KeywordReturn):

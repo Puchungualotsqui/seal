@@ -76,6 +76,17 @@ type StructDecl struct {
 	Loc    source.Span
 }
 
+type DeclStmt struct {
+	Decl Decl
+	Loc  source.Span
+}
+
+func (*DeclStmt) stmtNode() {}
+
+func (s *DeclStmt) Span() source.Span {
+	return s.Loc
+}
+
 func (*StructDecl) declNode() {}
 func (d *StructDecl) Span() source.Span {
 	return d.Loc
