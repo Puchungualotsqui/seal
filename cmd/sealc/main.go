@@ -16,34 +16,47 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	command := os.Args[1]
-
-	switch command {
+	switch os.Args[1] {
 	case "lex":
+		requireArgs(3)
 		runLex(os.Args[2])
 
 	case "parse":
+		requireArgs(3)
 		runParse(os.Args[2])
 
 	case "resolve":
+		requireArgs(3)
 		runResolve(os.Args[2])
 
 	case "check":
+		requireArgs(3)
 		runCheck(os.Args[2])
 
 	case "emit-c":
+		requireArgs(3)
 		runEmitC(os.Args[2])
 
 	case "packages":
+		requireArgs(3)
 		runPackages(os.Args[2])
 
+	case "build":
+		runBuild(os.Args[2:])
+
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func requireArgs(count int) {
+	if len(os.Args) < count {
 		printUsage()
 		os.Exit(1)
 	}
@@ -57,6 +70,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  sealc check <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc emit-c <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc packages <path>")
+	fmt.Fprintln(os.Stderr, "  sealc build <path> [--emit-c] [-o output]")
 }
 
 func readAndLex(path string) ([]token.Token, *diag.Reporter) {
@@ -220,6 +234,40 @@ func runPackages(path string) {
 	}
 
 	fmt.Print(build.DebugGraph(graph))
+}
+
+func runBuild(args []string) {
+	path := "."
+	options := build.BuildOptions{}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch arg {
+		case "--emit-c":
+			options.EmitOnly = true
+
+		case "-o":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "missing output path after -o")
+				os.Exit(1)
+			}
+
+			i++
+			options.Output = args[i]
+
+		default:
+			path = arg
+		}
+	}
+
+	result, err := build.BuildWorkspace(path, options)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("built %s\n", result.Output)
 }
 
 func printToken(tok token.Token) {
