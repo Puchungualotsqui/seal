@@ -509,14 +509,14 @@ Main :: task() {
 		t.Fatalf("expected args index lowering, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "(int)((args).len)") {
+	if !strings.Contains(out, "((args).len)") {
 		t.Fatalf("expected len(args) lowering, got:\n%s", out)
 	}
 }
 
 func TestGenerateSealVariadicAny(t *testing.T) {
 	out, reporter := generate(t, `
-CountAny :: task(args ...any) int {
+CountAny :: task(args ...any) usize {
     return len(args)
 }
 
@@ -538,11 +538,11 @@ Main :: task() {
 		t.Fatalf("expected any boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int CountAny(sealVariadic_any args)") {
+	if !strings.Contains(out, "size_t CountAny(sealVariadic_any args)") {
 		t.Fatalf("expected CountAny variadic any signature, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .len = 5})`) {
+	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5})`) {
 		t.Fatalf("expected string boxing, got:\n%s", out)
 	}
 
@@ -571,7 +571,7 @@ Main :: task() {
 		t.Fatalf("expected int boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .len = 5})`) {
+	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5})`) {
 		t.Fatalf("expected string boxing, got:\n%s", out)
 	}
 
@@ -586,7 +586,7 @@ Main :: task() {
 
 func TestGenerateVariadicArrayOfAny(t *testing.T) {
 	out, reporter := generate(t, `
-TakeArrays :: task(args ...[10]any) int {
+TakeArrays :: task(args ...[10]any) usize {
     return len(args)
 }
 
@@ -608,6 +608,10 @@ Main :: task() {
 
 	if !strings.Contains(out, ".len = 2") {
 		t.Fatalf("expected packed variadic length 2, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "size_t TakeArrays(") {
+		t.Fatalf("expected TakeArrays usize return, got:\n%s", out)
 	}
 }
 
@@ -713,10 +717,15 @@ printf :: extern("printf") task(format cstring, args ...any) int
 
 Main :: task() {
     c: char = 'ñ'
-    s: string = "hello"
+    s: string = "hola"
     cs: cstring = c"world"
 
-    printf(c"%.*s %s %u", s.len, s.data, cs, c)
+    n: usize = len(s)
+    h: char = s[0]
+    o: char = s[1]
+    a: char = s[-1]
+
+    printf(c"%zu %u %u %u %u %s", n, c, h, o, a, cs)
 }
 `)
 
@@ -728,7 +737,15 @@ Main :: task() {
 		t.Fatalf("expected sealString runtime, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, `sealString s = (sealString){.data = (const unsigned char *)"hello", .len = 5};`) {
+	if !strings.Contains(out, "static inline size_t sealString_len(sealString s)") {
+		t.Fatalf("expected sealString_len runtime helper, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "static inline uint32_t sealString_at(sealString s, ptrdiff_t index)") {
+		t.Fatalf("expected sealString_at runtime helper, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `sealString s = (sealString){.data = (const unsigned char *)"hola", .byte_len = 4};`) {
 		t.Fatalf("expected string literal lowering, got:\n%s", out)
 	}
 
@@ -740,7 +757,19 @@ Main :: task() {
 		t.Fatalf("expected char lowering for ñ, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, `printf("%.*s %s %u", (s).len, (s).data, cs, c)`) {
-		t.Fatalf("expected printf call, got:\n%s", out)
+	if !strings.Contains(out, "size_t n = sealString_len(s);") {
+		t.Fatalf("expected len(s) lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "uint32_t h = sealString_at(s, (ptrdiff_t)(0));") {
+		t.Fatalf("expected s[0] lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "uint32_t o = sealString_at(s, (ptrdiff_t)(1));") {
+		t.Fatalf("expected s[1] lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "uint32_t a = sealString_at(s, (ptrdiff_t)((-1)));") {
+		t.Fatalf("expected s[-1] lowering, got:\n%s", out)
 	}
 }

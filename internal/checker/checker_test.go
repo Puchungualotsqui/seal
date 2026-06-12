@@ -1111,8 +1111,8 @@ Main :: task() {
 
 func TestSealVariadicAny(t *testing.T) {
 	_, reporter := check(t, `
-CountAny :: task(args ...any) int {
-    return len(args)
+CountAny :: task(args ...any) usize {
+	return len(args)
 }
 
 Main :: task() {
@@ -1148,7 +1148,7 @@ Main :: task() {
 
 func TestVariadicArrayOfAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
-TakeArrays :: task(args ...[10]any) int {
+TakeArrays :: task(args ...[10]any) usize {
     return len(args)
 }
 
@@ -1409,11 +1409,13 @@ func TestStringCStringAndCharTypes(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     c: char = 'ñ'
-    s: string = "hello"
-    cs: cstring = c"hello"
+    s: string = "hola"
+    cs: cstring = c"hola"
 
-    n: usize = s.len
-    data: *u8 = s.data
+    n: usize = len(s)
+    h: char = s[0]
+    o: char = s[1]
+    a: char = s[-1]
 }
 `)
 
@@ -1450,6 +1452,76 @@ Main :: task() {
 	}
 
 	if !strings.Contains(reporter.String(), "cannot assign cstring to string") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestStringLenAndIndexing(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    c: char = 'ñ'
+    s: string = "hola"
+    cs: cstring = c"hola"
+
+    n: usize = len(s)
+    h: char = s[0]
+    o: char = s[1]
+    a: char = s[-1]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestStringFieldsAreInvalid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hola"
+    n := s.len
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `string has no field "len"`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCStringIndexingIsInvalid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    cs := c"hola"
+    c := cs[0]
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cstring does not support character indexing") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestStringIndexAssignmentIsInvalid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hola"
+    s[0] = 'H'
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign to string index because strings are immutable") {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }

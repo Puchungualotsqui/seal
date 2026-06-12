@@ -1238,6 +1238,18 @@ func (c *Checker) checkAssignStmt(scope *Scope, s *ast.AssignStmt) {
 		}
 	}
 
+	if index, ok := s.Left.(*ast.IndexExpr); ok {
+		containerType := c.checkExpr(scope, index.Left)
+
+		if containerType.Kind == TypeString {
+			c.diags.Add(index.Span(), "cannot assign to string index because strings are immutable")
+		}
+
+		if containerType.Kind == TypeCstring {
+			c.diags.Add(index.Span(), "cannot assign to cstring index")
+		}
+	}
+
 	leftType := c.checkExpr(scope, s.Left)
 	rightType := c.checkExpr(scope, s.Right)
 
@@ -1510,13 +1522,12 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 
 	case token.Lt, token.Gt, token.LtEq, token.GtEq:
 		if c.isNumeric(left) && c.isNumeric(right) {
-			_, ok := c.numericResultType(left, right)
-			if !ok {
-				c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
-				return InvalidType
+			if c.numericComparable(left, right) {
+				return BoolType
 			}
 
-			return BoolType
+			c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
+			return InvalidType
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
@@ -1536,6 +1547,47 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) numericComparable(a *Type, b *Type) bool {
+	if a == nil || b == nil {
+		return false
+	}
+
+	if a.Kind == TypeInvalid || b.Kind == TypeInvalid {
+		return true
+	}
+
+	if c.sameType(a, b) {
+		return true
+	}
+
+	if a.Kind == TypeUntypedInt && c.isIntegerLike(b) {
+		return true
+	}
+
+	if b.Kind == TypeUntypedInt && c.isIntegerLike(a) {
+		return true
+	}
+
+	if a.Kind == TypeUntypedFloat && (b.Kind == TypeF32 || b.Kind == TypeF64) {
+		return true
+	}
+
+	if b.Kind == TypeUntypedFloat && (a.Kind == TypeF32 || a.Kind == TypeF64) {
+		return true
+	}
+
+	if c.isIntegerLike(a) && c.isIntegerLike(b) {
+		return true
+	}
+
+	if c.isNumeric(a) && c.isNumeric(b) {
+		_, ok := c.numericResultType(a, b)
+		return ok
+	}
+
+	return false
 }
 
 func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*Type, span source.Span, diagnoseMissing bool) (*Type, bool) {
@@ -1814,21 +1866,21 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
 	if len(argTypes) != 1 {
 		c.diags.Add(span, fmt.Sprintf("len expects 1 argument, got %d", len(argTypes)))
-		return IntType
+		return UsizeType
 	}
 
 	t := argTypes[0]
 	if t == nil || t.Kind == TypeInvalid {
-		return IntType
+		return UsizeType
 	}
 
 	switch t.Kind {
 	case TypeArray, TypeVariadic, TypeString:
-		return IntType
+		return UsizeType
 
 	default:
 		c.diags.Add(args[0].Span(), fmt.Sprintf("len does not support %s", t.String()))
-		return IntType
+		return UsizeType
 	}
 }
 
@@ -1875,20 +1927,13 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 	leftType := c.checkExpr(scope, e.Left)
 
 	if leftType.Kind == TypeString {
-		switch e.Name.Name {
-		case "len":
-			return UsizeType
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q; use len(s) or s[i]", e.Name.Name))
+		return InvalidType
+	}
 
-		case "data":
-			return &Type{
-				Kind: TypePointer,
-				Elem: U8Type,
-			}
-
-		default:
-			c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q", e.Name.Name))
-			return InvalidType
-		}
+	if leftType.Kind == TypeCstring {
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("cstring has no field %q", e.Name.Name))
+		return InvalidType
 	}
 
 	if leftType.Kind == TypePointer {
@@ -1914,8 +1959,8 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 	leftType := c.checkExpr(scope, e.Left)
 	indexType := c.checkExpr(scope, e.Index)
 
-	if !c.assignable(IntType, indexType) {
-		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be int, got %s", indexType.String()))
+	if !c.isIndexType(indexType) {
+		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be int or usize, got %s", indexType.String()))
 	}
 
 	switch leftType.Kind {
@@ -1924,6 +1969,13 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 
 	case TypeVariadic:
 		return leftType.Elem
+
+	case TypeString:
+		return CharType
+
+	case TypeCstring:
+		c.diags.Add(e.Left.Span(), "cstring does not support character indexing")
+		return InvalidType
 
 	default:
 		c.diags.Add(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
@@ -2315,8 +2367,22 @@ func (c *Checker) isNumeric(t *Type) bool {
 	}
 
 	switch t.Kind {
-	case TypeInt, TypeF32, TypeF64, TypeUntypedInt, TypeUntypedFloat:
+	case TypeInt, TypeU8, TypeUsize, TypeChar, TypeF32, TypeF64, TypeUntypedInt, TypeUntypedFloat:
 		return true
+	default:
+		return false
+	}
+}
+
+func (c *Checker) isIndexType(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeInt, TypeUsize, TypeUntypedInt:
+		return true
+
 	default:
 		return false
 	}
@@ -2327,7 +2393,12 @@ func (c *Checker) isIntegerLike(t *Type) bool {
 		return false
 	}
 
-	return t.Kind == TypeInt || t.Kind == TypeUntypedInt
+	switch t.Kind {
+	case TypeInt, TypeU8, TypeUsize, TypeChar, TypeUntypedInt:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Checker) numericResultType(a *Type, b *Type) (*Type, bool) {
@@ -2359,8 +2430,30 @@ func (c *Checker) numericResultType(a *Type, b *Type) (*Type, bool) {
 		return a, true
 	}
 
+	if a.Kind == TypeUntypedFloat || b.Kind == TypeUntypedFloat {
+		return InvalidType, false
+	}
+
+	if a.Kind == TypeF64 || b.Kind == TypeF64 {
+		if c.isNumeric(a) && c.isNumeric(b) {
+			return F64Type, true
+		}
+	}
+
+	if a.Kind == TypeF32 || b.Kind == TypeF32 {
+		if c.isNumeric(a) && c.isNumeric(b) {
+			return F32Type, true
+		}
+	}
+
 	if c.sameType(a, b) {
 		return a, true
+	}
+
+	// Allow comparisons between integer-like types, but avoid silently choosing
+	// a result type for arithmetic with mixed concrete integer types.
+	if c.isIntegerLike(a) && c.isIntegerLike(b) {
+		return InvalidType, false
 	}
 
 	return InvalidType, false

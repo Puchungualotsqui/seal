@@ -1118,6 +1118,16 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		left := g.emitExpr(e.Left, nil)
 		leftType := g.inferExprType(e.Left, nil)
 
+		if leftType.SealName == "string" {
+			g.error(e.Name.Span(), fmt.Sprintf("string has no field %q; use len(s) or s[i]", e.Name.Name))
+			return "0"
+		}
+
+		if leftType.SealName == "cstring" {
+			g.error(e.Name.Span(), fmt.Sprintf("cstring has no field %q", e.Name.Name))
+			return "0"
+		}
+
 		if strings.HasSuffix(leftType.SealName, "*") {
 			return fmt.Sprintf("(%s)->%s", left, e.Name.Name)
 		}
@@ -1132,6 +1142,15 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		leftType := g.inferExprType(e.Left, nil)
 		left := g.emitExpr(e.Left, nil)
 		index := g.emitExpr(e.Index, &CInt)
+
+		if leftType.SealName == "string" {
+			return fmt.Sprintf("sealString_at(%s, (ptrdiff_t)(%s))", left, index)
+		}
+
+		if leftType.SealName == "cstring" {
+			g.error(e.Left.Span(), "cstring does not support character indexing")
+			return "0"
+		}
 
 		if leftType.IsVariadic {
 			return fmt.Sprintf("(%s).data[%s]", left, index)
@@ -1178,11 +1197,11 @@ func (g *Generator) emitStringLiteral(e *ast.StringLitExpr) string {
 	value, err := strconv.Unquote(e.Value)
 	if err != nil {
 		g.error(e.Span(), fmt.Sprintf("invalid string literal: %v", err))
-		return "(sealString){.data = NULL, .len = 0}"
+		return "(sealString){.data = NULL, .byte_len = 0}"
 	}
 
 	return fmt.Sprintf(
-		"(sealString){.data = (const unsigned char *)%s, .len = %d}",
+		"(sealString){.data = (const unsigned char *)%s, .byte_len = %d}",
 		strconv.Quote(value),
 		len([]byte(value)),
 	)
@@ -1425,15 +1444,15 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 	arg := g.emitExpr(e.Args[0], nil)
 
 	if argType.IsVariadic {
-		return fmt.Sprintf("(int)((%s).len)", arg)
+		return fmt.Sprintf("((%s).len)", arg)
 	}
 
 	if argType.IsArray {
-		return argType.ArrayLen
+		return fmt.Sprintf("(size_t)%s", argType.ArrayLen)
 	}
 
 	if argType.SealName == "string" {
-		return fmt.Sprintf("(int)((%s).len)", arg)
+		return fmt.Sprintf("sealString_len(%s)", arg)
 	}
 
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
@@ -1571,6 +1590,14 @@ func (g *Generator) emitBuiltinPrintWithArgs(e *ast.CallExpr, preparedArgs []str
 			format.WriteString("%d")
 			args = append(args, rendered)
 
+		case "u8":
+			format.WriteString("%u")
+			args = append(args, rendered)
+
+		case "usize":
+			format.WriteString("%zu")
+			args = append(args, rendered)
+
 		case "f32", "f64":
 			format.WriteString("%f")
 			args = append(args, rendered)
@@ -1589,7 +1616,7 @@ func (g *Generator) emitBuiltinPrintWithArgs(e *ast.CallExpr, preparedArgs []str
 
 		case "string":
 			format.WriteString("%.*s")
-			args = append(args, fmt.Sprintf("(int)((%s).len)", rendered))
+			args = append(args, fmt.Sprintf("(int)((%s).byte_len)", rendered))
 			args = append(args, fmt.Sprintf("(const char *)((%s).data)", rendered))
 
 		default:
@@ -1748,9 +1775,76 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("typedef struct sealString {")
 	g.indent++
 	g.line("const unsigned char *data;")
-	g.line("size_t len;")
+	g.line("size_t byte_len;")
 	g.indent--
 	g.line("} sealString;")
+	g.line("")
+
+	g.line("static inline uint32_t sealUtf8DecodeAdvance(const unsigned char *data, size_t byte_len, size_t *offset) {")
+	g.indent++
+	g.line("if (*offset >= byte_len) return 0;")
+	g.line("unsigned char b0 = data[*offset];")
+	g.line("if (b0 < 0x80) { *offset += 1; return (uint32_t)b0; }")
+	g.line("if ((b0 & 0xE0) == 0xC0 && *offset + 1 < byte_len) {")
+	g.indent++
+	g.line("uint32_t cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(data[*offset + 1] & 0x3F);")
+	g.line("*offset += 2;")
+	g.line("return cp;")
+	g.indent--
+	g.line("}")
+	g.line("if ((b0 & 0xF0) == 0xE0 && *offset + 2 < byte_len) {")
+	g.indent++
+	g.line("uint32_t cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(data[*offset + 1] & 0x3F) << 6) | (uint32_t)(data[*offset + 2] & 0x3F);")
+	g.line("*offset += 3;")
+	g.line("return cp;")
+	g.indent--
+	g.line("}")
+	g.line("if ((b0 & 0xF8) == 0xF0 && *offset + 3 < byte_len) {")
+	g.indent++
+	g.line("uint32_t cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(data[*offset + 1] & 0x3F) << 12) | ((uint32_t)(data[*offset + 2] & 0x3F) << 6) | (uint32_t)(data[*offset + 3] & 0x3F);")
+	g.line("*offset += 4;")
+	g.line("return cp;")
+	g.indent--
+	g.line("}")
+	g.line("*offset += 1;")
+	g.line("return 0xFFFD;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline size_t sealString_len(sealString s) {")
+	g.indent++
+	g.line("size_t offset = 0;")
+	g.line("size_t count = 0;")
+	g.line("while (offset < s.byte_len) {")
+	g.indent++
+	g.line("(void)sealUtf8DecodeAdvance(s.data, s.byte_len, &offset);")
+	g.line("count += 1;")
+	g.indent--
+	g.line("}")
+	g.line("return count;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uint32_t sealString_at(sealString s, ptrdiff_t index) {")
+	g.indent++
+	g.line("size_t char_len = sealString_len(s);")
+	g.line("ptrdiff_t resolved = index;")
+	g.line("if (resolved < 0) resolved = (ptrdiff_t)char_len + resolved;")
+	g.line("if (resolved < 0 || (size_t)resolved >= char_len) return 0;")
+	g.line("size_t offset = 0;")
+	g.line("size_t current = 0;")
+	g.line("while (offset < s.byte_len) {")
+	g.indent++
+	g.line("uint32_t cp = sealUtf8DecodeAdvance(s.data, s.byte_len, &offset);")
+	g.line("if (current == (size_t)resolved) return cp;")
+	g.line("current += 1;")
+	g.indent--
+	g.line("}")
+	g.line("return 0;")
+	g.indent--
+	g.line("}")
 	g.line("")
 
 	g.line("typedef enum sealTypeKind {")
@@ -2005,7 +2099,7 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
-			return CInt
+			return CUsize
 		}
 
 		if gen, ok := e.Callee.(*ast.GenericExpr); ok {
@@ -2071,17 +2165,8 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 		leftType := g.inferExprType(e.Left, nil)
 
-		if leftType.SealName == "string" {
-			switch e.Name.Name {
-			case "len":
-				return CUsize
-
-			case "data":
-				return CType{
-					Name:     "const unsigned char *",
-					SealName: "*u8",
-				}
-			}
+		if leftType.SealName == "string" || leftType.SealName == "cstring" {
+			return CInvalid
 		}
 
 		sealName := strings.TrimPrefix(leftType.SealName, "*")
@@ -2089,6 +2174,15 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.IndexExpr:
 		leftType := g.inferExprType(e.Left, nil)
+
+		if leftType.SealName == "string" {
+			return CChar
+		}
+
+		if leftType.SealName == "cstring" {
+			return CInvalid
+		}
+
 		if (leftType.IsArray || leftType.IsVariadic) && leftType.Elem != nil {
 			return *leftType.Elem
 		}
