@@ -1,5 +1,4 @@
 Main :: task() {
-    x := 10
+    x := helper.Double(10)
     Print(x)
 }
-

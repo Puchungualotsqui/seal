@@ -86,6 +86,8 @@ type Symbol struct {
 	Scope   *Scope
 	TaskID  int
 	Builtin bool
+
+	Package *PackageInfo
 }
 
 type ScopeKind int
@@ -136,18 +138,36 @@ type Resolver struct {
 	diags      *diag.Reporter
 	global     *Scope
 	nextTaskID int
+	packages   map[string]*PackageInfo
 }
 
 func New(diags *diag.Reporter) *Resolver {
+	return NewWithPackages(diags, nil)
+}
+
+func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Resolver {
 	r := &Resolver{
 		diags:      diags,
 		global:     NewScope(ScopeGlobal, nil),
 		nextTaskID: 1,
+		packages:   packages,
 	}
 
 	r.declareBuiltins()
+	r.declarePackages()
 
 	return r
+}
+
+type PackageInfo struct {
+	Name    string
+	Symbols map[string]*PackageSymbol
+}
+
+type PackageSymbol struct {
+	Name string
+	Kind SymbolKind
+	Span source.Span
 }
 
 func (r *Resolver) GlobalScope() *Scope {
@@ -521,14 +541,41 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 
 		first := t.Parts[0]
 
-		// Package-qualified or normal named type.
 		sym := r.resolveSymbolUse(scope, first.Name, first.Span())
 		if sym == nil {
 			return
 		}
 
-		if sym.Kind.IsRuntime() {
-			r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+		if len(t.Parts) == 1 {
+			if sym.Kind.IsRuntime() {
+				r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+			}
+			return
+		}
+
+		if sym.Kind != SymbolPackage {
+			r.diags.Add(first.Span(), fmt.Sprintf("%q is not a package", first.Name))
+			return
+		}
+
+		if sym.Package == nil {
+			r.diags.Add(first.Span(), fmt.Sprintf("package %q has no symbol table", first.Name))
+			return
+		}
+
+		memberName := t.Parts[1].Name
+		member := sym.Package.Symbols[memberName]
+		if member == nil {
+			r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package %s has no type %q", first.Name, memberName))
+			return
+		}
+
+		switch member.Kind {
+		case SymbolStruct, SymbolEnum, SymbolUnion, SymbolInterface, SymbolBitSet:
+			return
+		default:
+			r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, memberName))
+			return
 		}
 
 	case *ast.PointerType:
@@ -584,6 +631,28 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		}
 
 	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			sym := r.resolveSymbolUse(scope, id.Name.Name, id.Name.Span())
+			if sym == nil {
+				return
+			}
+
+			if sym.Kind == SymbolPackage {
+				if sym.Package == nil {
+					r.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
+					return
+				}
+
+				member := sym.Package.Symbols[e.Name.Name]
+				if member == nil {
+					r.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
+					return
+				}
+
+				return
+			}
+		}
+
 		r.resolveExpr(scope, e.Left)
 
 	case *ast.IndexExpr:
@@ -657,6 +726,57 @@ func (r *Resolver) resolveSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
 			r.resolveStmt(caseScope, stmt)
 		}
 	}
+}
+
+func (r *Resolver) declarePackages() {
+	for name, pkg := range r.packages {
+		if name == "" || pkg == nil {
+			continue
+		}
+
+		r.global.Symbols[name] = &Symbol{
+			Name:    name,
+			Kind:    SymbolPackage,
+			Scope:   r.global,
+			Builtin: true,
+			Package: pkg,
+		}
+	}
+}
+
+func ExportPackage(name string, scope *Scope) *PackageInfo {
+	info := &PackageInfo{
+		Name:    name,
+		Symbols: map[string]*PackageSymbol{},
+	}
+
+	if scope == nil {
+		return info
+	}
+
+	for symbolName, sym := range scope.Symbols {
+		if sym == nil || sym.Builtin {
+			continue
+		}
+
+		switch sym.Kind {
+		case SymbolConst,
+			SymbolTask,
+			SymbolStruct,
+			SymbolEnum,
+			SymbolUnion,
+			SymbolInterface,
+			SymbolBitSet,
+			SymbolOverload:
+			info.Symbols[symbolName] = &PackageSymbol{
+				Name: symbolName,
+				Kind: sym.Kind,
+				Span: sym.Span,
+			}
+		}
+	}
+
+	return info
 }
 
 func DebugSummary(scope *Scope) string {

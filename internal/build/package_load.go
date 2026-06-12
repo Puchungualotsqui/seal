@@ -24,18 +24,30 @@ type LoadedPackage struct {
 	CPath   string
 }
 
-func LoadAndCheckPackage(pkg *Package, reporter *diag.Reporter) (*ast.File, error) {
+func LoadAndCheckPackage(
+	pkg *Package,
+	reporter *diag.Reporter,
+	resolverPackages map[string]*resolver.PackageInfo,
+	checkerPackages map[string]*checker.PackageInfo,
+) (*ast.File, *resolver.Scope, *checker.Scope, error) {
 	files, err := SealFiles(pkg.Config.RootDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	if len(files) == 0 {
 		if pkg.Config.Kind == KindLibrary {
-			return &ast.File{}, nil
+			empty := &ast.File{}
+			r := resolver.NewWithPackages(reporter, resolverPackages)
+			resolverScope := r.ResolveFile(empty)
+
+			c := checker.NewWithPackages(reporter, checkerPackages)
+			checkerScope := c.CheckFile(empty)
+
+			return empty, resolverScope, checkerScope, nil
 		}
 
-		return nil, fmt.Errorf("executable package %q has no .seal files", pkg.Config.Name)
+		return nil, nil, nil, fmt.Errorf("executable package %q has no .seal files", pkg.Config.Name)
 	}
 
 	combined := &ast.File{}
@@ -43,7 +55,7 @@ func LoadAndCheckPackage(pkg *Package, reporter *diag.Reporter) (*ast.File, erro
 	for _, path := range files {
 		srcBytes, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 
 		src := source.NewFile(path, string(srcBytes))
@@ -52,49 +64,62 @@ func LoadAndCheckPackage(pkg *Package, reporter *diag.Reporter) (*ast.File, erro
 		tokens := lex.LexAll()
 
 		if reporter.HasErrors() {
-			return nil, fmt.Errorf("lexing failed for package %q", pkg.Config.Name)
+			return nil, nil, nil, fmt.Errorf("lexing failed for package %q", pkg.Config.Name)
 		}
 
 		p := parser.New(tokens, reporter)
 		parsed := p.ParseFile()
 
 		if reporter.HasErrors() {
-			return nil, fmt.Errorf("parsing failed for package %q", pkg.Config.Name)
+			return nil, nil, nil, fmt.Errorf("parsing failed for package %q", pkg.Config.Name)
 		}
 
 		combined.Decls = append(combined.Decls, parsed.Decls...)
 	}
 
-	r := resolver.New(reporter)
-	r.ResolveFile(combined)
+	r := resolver.NewWithPackages(reporter, resolverPackages)
+	resolverScope := r.ResolveFile(combined)
 
 	if reporter.HasErrors() {
-		return nil, fmt.Errorf("resolving failed for package %q", pkg.Config.Name)
+		return nil, nil, nil, fmt.Errorf("resolving failed for package %q", pkg.Config.Name)
 	}
 
-	c := checker.New(reporter)
-	c.CheckFile(combined)
+	c := checker.NewWithPackages(reporter, checkerPackages)
+	checkerScope := c.CheckFile(combined)
 
 	if reporter.HasErrors() {
-		return nil, fmt.Errorf("checking failed for package %q", pkg.Config.Name)
+		return nil, nil, nil, fmt.Errorf("checking failed for package %q", pkg.Config.Name)
 	}
 
-	return combined, nil
+	return combined, resolverScope, checkerScope, nil
 }
 
-func GeneratePackageC(pkg *Package, file *ast.File, reporter *diag.Reporter) (string, error) {
+func GeneratePackageC(
+	pkg *Package,
+	file *ast.File,
+	reporter *diag.Reporter,
+	codegenPackages map[string]*cgen.PackageInfo,
+) (string, *cgen.PackageInfo, error) {
 	if file == nil || len(file.Decls) == 0 {
-		return fmt.Sprintf("/* empty package %s */\n", pkg.Config.Name), nil
+		info := &cgen.PackageInfo{
+			Name:      pkg.Config.Name,
+			Tasks:     map[string]cgen.TaskInfo{},
+			Overloads: map[string][]string{},
+		}
+
+		return fmt.Sprintf("/* empty package %s */\n", pkg.Config.Name), info, nil
 	}
 
-	g := cgen.New(reporter)
+	info := cgen.ExportPackageInfo(pkg.Config.Name, file, reporter)
+
+	g := cgen.NewWithPackages(reporter, pkg.Config.Name, codegenPackages)
 	out := g.Generate(file)
 
 	if reporter.HasErrors() {
-		return "", fmt.Errorf("C generation failed for package %q", pkg.Config.Name)
+		return "", nil, fmt.Errorf("C generation failed for package %q", pkg.Config.Name)
 	}
 
-	return out, nil
+	return out, info, nil
 }
 
 func SealFiles(root string) ([]string, error) {

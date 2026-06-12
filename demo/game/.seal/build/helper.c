@@ -8,13 +8,11 @@
 #define NULL ((void*)0)
 #endif
 
-int helper_Double(int arg0);
 
-int main(void);
+int helper_Double(int x);
 
-int main(void) {
-	int x = helper_Double(10);
-	printf("%d", x);
-	return 0;
+int helper_Double(int x) {
+	int __seal_return_value_0 = (x * 2);
+	return __seal_return_value_0;
 }
 

@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"seal/internal/checker"
+	cgen "seal/internal/codegen"
 	"seal/internal/diag"
+	"seal/internal/resolver"
 )
 
 type BuildOptions struct {
@@ -40,15 +43,29 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 
 	var loaded []*LoadedPackage
 
+	resolverPackages := map[string]*resolver.PackageInfo{}
+	checkerPackages := map[string]*checker.PackageInfo{}
+	codegenPackages := map[string]*cgen.PackageInfo{}
+
 	for _, pkg := range graph.Order {
 		reporter := diag.NewReporter()
 
-		file, err := LoadAndCheckPackage(pkg, reporter)
+		file, resolverScope, checkerScope, err := LoadAndCheckPackage(
+			pkg,
+			reporter,
+			resolverPackages,
+			checkerPackages,
+		)
 		if err != nil {
 			return nil, withDiagnostics(err, reporter)
 		}
 
-		cCode, err := GeneratePackageC(pkg, file, reporter)
+		cCode, codegenInfo, err := GeneratePackageC(
+			pkg,
+			file,
+			reporter,
+			codegenPackages,
+		)
 		if err != nil {
 			return nil, withDiagnostics(err, reporter)
 		}
@@ -58,6 +75,10 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 		if err := os.WriteFile(cPath, []byte(cCode), 0644); err != nil {
 			return nil, err
 		}
+
+		resolverPackages[pkg.Config.Name] = resolver.ExportPackage(pkg.Config.Name, resolverScope)
+		checkerPackages[pkg.Config.Name] = checker.ExportPackage(pkg.Config.Name, checkerScope)
+		codegenPackages[pkg.Config.Name] = codegenInfo
 
 		loaded = append(loaded, &LoadedPackage{
 			Package: pkg,

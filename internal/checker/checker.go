@@ -163,6 +163,13 @@ type Symbol struct {
 	Span     source.Span
 	Node     ast.Node
 	Overload *OverloadInfo
+
+	Package *PackageInfo
+}
+
+type PackageInfo struct {
+	Name    string
+	Symbols map[string]*Symbol
 }
 
 type OverloadInfo struct {
@@ -205,18 +212,25 @@ func (s *Scope) Declare(sym *Symbol) {
 type Checker struct {
 	diags *diag.Reporter
 
-	global *Scope
+	global   *Scope
+	packages map[string]*PackageInfo
 
 	currentResults []*Type
 }
 
 func New(diags *diag.Reporter) *Checker {
+	return NewWithPackages(diags, nil)
+}
+
+func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Checker {
 	c := &Checker{
-		diags: diags,
+		diags:    diags,
+		packages: packages,
 	}
 
 	c.global = NewScope(nil)
 	c.declareBuiltins(c.global)
+	c.declarePackages(c.global)
 
 	return c
 }
@@ -469,6 +483,24 @@ func (c *Checker) declareBuiltins(scope *Scope) {
 			Results: nil,
 		},
 	})
+}
+
+func (c *Checker) declarePackages(scope *Scope) {
+	for name, pkg := range c.packages {
+		if name == "" || pkg == nil {
+			continue
+		}
+
+		scope.Declare(&Symbol{
+			Name: name,
+			Kind: SymbolPackage,
+			Type: &Type{
+				Kind: TypePackage,
+				Name: name,
+			},
+			Package: pkg,
+		})
+	}
 }
 
 func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
@@ -1404,6 +1436,15 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		}
 	}
 
+	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok := selector.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
+			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
+				return c.checkPackageCall(pkgSym, selector, argTypes, e.Args, e.Span())
+			}
+		}
+	}
+
 	calleeType := c.checkExpr(scope, e.Callee)
 
 	if calleeType.Kind != TypeTask {
@@ -1412,6 +1453,31 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	return c.checkTaskTypeCall(calleeType, argTypes, e.Args, e.Span())
+}
+
+func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+	if pkgSym.Package == nil {
+		c.diags.Add(selector.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
+		return InvalidType
+	}
+
+	member := pkgSym.Package.Symbols[selector.Name.Name]
+	if member == nil {
+		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package %s has no symbol %q", pkgSym.Name, selector.Name.Name))
+		return InvalidType
+	}
+
+	switch member.Kind {
+	case SymbolTask:
+		return c.checkDirectTaskCall(member, argTypes, args, span)
+
+	case SymbolOverload:
+		return c.checkOverloadCall(member, argTypes, args, span)
+
+	default:
+		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package symbol %s.%s is not callable", pkgSym.Name, selector.Name.Name))
+		return InvalidType
+	}
 }
 
 func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
@@ -1490,6 +1556,13 @@ func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, args []ast.Ex
 }
 
 func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
+	if id, ok := e.Left.(*ast.IdentExpr); ok {
+		sym := scope.Lookup(id.Name.Name)
+		if sym != nil && sym.Kind == SymbolPackage {
+			return c.checkPackageSelectorExpr(sym, e)
+		}
+	}
+
 	leftType := c.checkExpr(scope, e.Left)
 
 	if leftType.Kind == TypePointer {
@@ -1525,6 +1598,21 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 	}
 
 	return leftType.Elem
+}
+
+func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) *Type {
+	if pkgSym.Package == nil {
+		c.diags.Add(e.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
+		return InvalidType
+	}
+
+	member := pkgSym.Package.Symbols[e.Name.Name]
+	if member == nil {
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", pkgSym.Name, e.Name.Name))
+		return InvalidType
+	}
+
+	return member.Type
 }
 
 func (c *Checker) checkArrayLiteralExpr(scope *Scope, e *ast.ArrayLiteralExpr) *Type {
@@ -1620,15 +1708,37 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 		}
 
 		if len(t.Parts) > 1 {
-			// Package-qualified types later.
 			first := t.Parts[0]
+			member := t.Parts[1]
+
 			sym := scope.Lookup(first.Name)
 			if sym == nil {
 				c.diags.Add(first.Span(), fmt.Sprintf("undefined type or package %q", first.Name))
 				return InvalidType
 			}
 
-			return InvalidType
+			if sym.Kind != SymbolPackage {
+				c.diags.Add(first.Span(), fmt.Sprintf("%q is not a package", first.Name))
+				return InvalidType
+			}
+
+			if sym.Package == nil {
+				c.diags.Add(first.Span(), fmt.Sprintf("package %q has no symbol table", first.Name))
+				return InvalidType
+			}
+
+			memberSym := sym.Package.Symbols[member.Name]
+			if memberSym == nil {
+				c.diags.Add(member.Span(), fmt.Sprintf("package %s has no type %q", first.Name, member.Name))
+				return InvalidType
+			}
+
+			if memberSym.Kind != SymbolType {
+				c.diags.Add(member.Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, member.Name))
+				return InvalidType
+			}
+
+			return memberSym.Type
 		}
 
 		name := t.Parts[0]
@@ -2144,6 +2254,33 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 	default:
 		return false
 	}
+}
+
+func ExportPackage(name string, scope *Scope) *PackageInfo {
+	info := &PackageInfo{
+		Name:    name,
+		Symbols: map[string]*Symbol{},
+	}
+
+	if scope == nil {
+		return info
+	}
+
+	for symbolName, sym := range scope.Symbols {
+		if sym == nil {
+			continue
+		}
+
+		switch sym.Kind {
+		case SymbolConst,
+			SymbolType,
+			SymbolTask,
+			SymbolOverload:
+			info.Symbols[symbolName] = sym
+		}
+	}
+
+	return info
 }
 
 func DebugSummary(scope *Scope) string {

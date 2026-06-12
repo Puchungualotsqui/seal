@@ -5,5 +5,6 @@ kind = "executable"
 dependencies = [
     { name = "fmt", version = "0.1.0" },
     { name = "mem", version = "0.1.0" },
+	{ name = "helper", version = "0.1.0" },
 ]
 

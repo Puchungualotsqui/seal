@@ -2,6 +2,7 @@ package cgen
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"seal/internal/ast"
@@ -81,7 +82,7 @@ func (s *scope) lookup(name string) (valueInfo, bool) {
 	return valueInfo{}, false
 }
 
-type taskInfo struct {
+type TaskInfo struct {
 	Decl       *ast.TaskDecl
 	ReturnType CType
 	ParamTypes []CType
@@ -91,16 +92,25 @@ type taskInfo struct {
 	ParamHasDefault []bool
 }
 
+type PackageInfo struct {
+	Name      string
+	Tasks     map[string]TaskInfo
+	Overloads map[string][]string
+}
+
 type Generator struct {
 	diags *diag.Reporter
 
 	out    strings.Builder
 	indent int
 
+	packageName string
+	packages    map[string]*PackageInfo
+
 	structs   map[string]*ast.StructDecl
 	enums     map[string]*ast.EnumDecl
 	unions    map[string]*ast.UnionDecl
-	tasks     map[string]taskInfo
+	tasks     map[string]TaskInfo
 	overloads map[string][]string
 	consts    map[string]CType
 
@@ -114,14 +124,31 @@ type Generator struct {
 }
 
 func New(diags *diag.Reporter) *Generator {
+	return NewWithPackages(diags, "", nil)
+}
+
+func NewWithPackages(diags *diag.Reporter, packageName string, packages map[string]*PackageInfo) *Generator {
 	return &Generator{
-		diags:     diags,
-		structs:   map[string]*ast.StructDecl{},
-		enums:     map[string]*ast.EnumDecl{},
-		unions:    map[string]*ast.UnionDecl{},
-		tasks:     map[string]taskInfo{},
-		overloads: map[string][]string{},
-		consts:    map[string]CType{},
+		diags:       diags,
+		packageName: packageName,
+		packages:    packages,
+		structs:     map[string]*ast.StructDecl{},
+		enums:       map[string]*ast.EnumDecl{},
+		unions:      map[string]*ast.UnionDecl{},
+		tasks:       map[string]TaskInfo{},
+		overloads:   map[string][]string{},
+		consts:      map[string]CType{},
+	}
+}
+
+func ExportPackageInfo(packageName string, file *ast.File, reporter *diag.Reporter) *PackageInfo {
+	g := NewWithPackages(reporter, packageName, nil)
+	g.collect(file)
+
+	return &PackageInfo{
+		Name:      packageName,
+		Tasks:     g.tasks,
+		Overloads: g.overloads,
 	}
 }
 
@@ -149,6 +176,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitStructs(file)
 	g.emitUnions(file)
 	g.emitConstants(file)
+	g.emitImportedTaskPrototypes()
 	g.emitTaskPrototypes(file)
 	g.emitTasks(file)
 
@@ -177,7 +205,7 @@ func (g *Generator) collect(file *ast.File) {
 				continue
 			}
 
-			info := taskInfo{
+			info := TaskInfo{
 				Decl:           d,
 				RequiredParams: len(d.Params),
 			}
@@ -279,6 +307,58 @@ func (g *Generator) emitConstants(file *ast.File) {
 	if len(g.consts) > 0 {
 		g.line("")
 	}
+}
+
+func (g *Generator) emitImportedTaskPrototypes() {
+	if len(g.packages) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(g.packages))
+	for name := range g.packages {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, pkgName := range names {
+		pkg := g.packages[pkgName]
+		if pkg == nil {
+			continue
+		}
+
+		taskNames := make([]string, 0, len(pkg.Tasks))
+		for taskName := range pkg.Tasks {
+			taskNames = append(taskNames, taskName)
+		}
+		sort.Strings(taskNames)
+
+		for _, taskName := range taskNames {
+			info := pkg.Tasks[taskName]
+			if taskName == "Main" {
+				continue
+			}
+
+			g.linef("%s;", g.packageTaskSignature(pkgName, taskName, info))
+		}
+	}
+
+	g.line("")
+}
+
+func (g *Generator) packageTaskSignature(packageName string, taskName string, info TaskInfo) string {
+	name := cPackageTaskName(packageName, taskName)
+	ret := info.ReturnType.Name
+
+	if len(info.ParamTypes) == 0 {
+		return fmt.Sprintf("%s %s(void)", ret, name)
+	}
+
+	var params []string
+	for i, paramType := range info.ParamTypes {
+		params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
+	}
+
+	return fmt.Sprintf("%s %s(%s)", ret, name, strings.Join(params, ", "))
 }
 
 func (g *Generator) emitTaskPrototypes(file *ast.File) {
@@ -396,7 +476,37 @@ func (g *Generator) cTaskName(name string) string {
 		return "main"
 	}
 
-	return name
+	if g.packageName != "" {
+		return sanitizeCName(g.packageName) + "_" + sanitizeCName(name)
+	}
+
+	return sanitizeCName(name)
+}
+
+func cPackageTaskName(packageName string, taskName string) string {
+	return sanitizeCName(packageName) + "_" + sanitizeCName(taskName)
+}
+
+func sanitizeCName(name string) string {
+	var b strings.Builder
+
+	for _, ch := range name {
+		if ch >= 'a' && ch <= 'z' ||
+			ch >= 'A' && ch <= 'Z' ||
+			ch >= '0' && ch <= '9' ||
+			ch == '_' {
+			b.WriteRune(ch)
+			continue
+		}
+
+		b.WriteByte('_')
+	}
+
+	if b.Len() == 0 {
+		return "_"
+	}
+
+	return b.String()
 }
 
 func (g *Generator) emitBlockStatements(block *ast.BlockStmt) {
@@ -861,6 +971,13 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return g.emitCallExpr(e)
 
 	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			if _, ok := g.packages[id.Name.Name]; ok {
+				// Package selector as value is only valid through calls for now.
+				return cPackageTaskName(id.Name.Name, e.Name.Name)
+			}
+		}
+
 		left := g.emitExpr(e.Left, nil)
 		leftType := g.inferExprType(e.Left, nil)
 
@@ -938,6 +1055,14 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		}
 
 		return g.emitTaskCall(id.Name.Name, e.Args, preparedArgs)
+	}
+
+	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok := selector.Left.(*ast.IdentExpr); ok {
+			if pkg := g.packages[id.Name.Name]; pkg != nil {
+				return g.emitPackageTaskCall(id.Name.Name, selector.Name.Name, e.Args, preparedArgs)
+			}
+		}
 	}
 
 	var args []string
@@ -1110,6 +1235,53 @@ func (g *Generator) emitUnions(file *ast.File) {
 	}
 }
 
+func (g *Generator) emitPackageTaskCall(packageName string, taskName string, args []ast.Expr, preparedArgs []string) string {
+	pkg := g.packages[packageName]
+	if pkg == nil {
+		g.error(argsSpan(args), fmt.Sprintf("unknown package %q", packageName))
+		return "0"
+	}
+
+	info, hasTask := pkg.Tasks[taskName]
+	if !hasTask {
+		g.error(argsSpan(args), fmt.Sprintf("package %s has no task %q", packageName, taskName))
+		return "0"
+	}
+
+	var outArgs []string
+
+	for i, arg := range args {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := (*CType)(nil)
+		if i < len(info.ParamTypes) {
+			expected = &info.ParamTypes[i]
+		}
+
+		outArgs = append(outArgs, g.emitExpr(arg, expected))
+	}
+
+	for i := len(args); i < len(info.ParamTypes); i++ {
+		if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
+			expected := info.ParamTypes[i]
+			outArgs = append(outArgs, g.emitExpr(info.ParamDefaults[i], &expected))
+		}
+	}
+
+	return fmt.Sprintf("%s(%s)", cPackageTaskName(packageName, taskName), strings.Join(outArgs, ", "))
+}
+
+func argsSpan(args []ast.Expr) source.Span {
+	if len(args) == 0 {
+		return source.Span{}
+	}
+
+	return args[0].Span()
+}
+
 func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
 	var values []string
 
@@ -1257,9 +1429,27 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			}
 		}
 
+		if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
+			if id, ok := selector.Left.(*ast.IdentExpr); ok {
+				if pkg := g.packages[id.Name.Name]; pkg != nil {
+					if info, ok := pkg.Tasks[selector.Name.Name]; ok {
+						return info.ReturnType
+					}
+				}
+			}
+		}
+
 		return CInvalid
 
 	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			if pkg := g.packages[id.Name.Name]; pkg != nil {
+				if info, ok := pkg.Tasks[e.Name.Name]; ok {
+					return info.ReturnType
+				}
+			}
+		}
+
 		leftType := g.inferExprType(e.Left, nil)
 		sealName := strings.TrimPrefix(leftType.SealName, "*")
 		return g.lookupStructFieldType(sealName, e.Name.Name)
@@ -1335,7 +1525,7 @@ func (g *Generator) resolveOverload(name string, argTypes []CType) (string, bool
 	return bestName, true
 }
 
-func (g *Generator) callScore(info taskInfo, argTypes []CType) (int, bool) {
+func (g *Generator) callScore(info TaskInfo, argTypes []CType) (int, bool) {
 	required := info.RequiredParams
 	total := len(info.ParamTypes)
 
