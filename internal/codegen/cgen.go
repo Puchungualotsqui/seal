@@ -371,7 +371,7 @@ func (g *Generator) emitImportedTaskPrototypes() {
 }
 
 func (g *Generator) packageTaskSignature(packageName string, taskName string, info TaskInfo) string {
-	name := cPackageTaskName(packageName, taskName)
+	name := cImportedTaskName(packageName, taskName, info)
 	ret := info.ReturnType.Name
 
 	if len(info.ParamTypes) == 0 {
@@ -379,7 +379,18 @@ func (g *Generator) packageTaskSignature(packageName string, taskName string, in
 	}
 
 	var params []string
+
 	for i, paramType := range info.ParamTypes {
+		if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+			if info.IsExtern {
+				params = append(params, "...")
+				break
+			}
+
+			params = append(params, g.variadicCType(paramType).Decl(fmt.Sprintf("arg%d", i)))
+			break
+		}
+
 		params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
 	}
 
@@ -1596,8 +1607,11 @@ func (g *Generator) emitPackageTaskCall(packageName string, taskName string, arg
 		g.error(argsSpan(args), fmt.Sprintf("package %s has no task %q", packageName, taskName))
 		return "0"
 	}
+
+	name := cImportedTaskName(packageName, taskName, info)
+
 	if info.IsVariadic && !info.IsExtern {
-		return g.emitSealVariadicTaskCall(cPackageTaskName(packageName, taskName), info, args, preparedArgs)
+		return g.emitSealVariadicTaskCall(name, info, args, preparedArgs)
 	}
 
 	var outArgs []string
@@ -1610,20 +1624,26 @@ func (g *Generator) emitPackageTaskCall(packageName string, taskName string, arg
 
 		expected := (*CType)(nil)
 		if i < len(info.ParamTypes) {
-			expected = &info.ParamTypes[i]
+			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+				expected = nil
+			} else {
+				expected = &info.ParamTypes[i]
+			}
 		}
 
 		outArgs = append(outArgs, g.emitExpr(arg, expected))
 	}
 
-	for i := len(args); i < len(info.ParamTypes); i++ {
-		if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
-			expected := info.ParamTypes[i]
-			outArgs = append(outArgs, g.emitExpr(info.ParamDefaults[i], &expected))
+	if !info.IsVariadic {
+		for i := len(args); i < len(info.ParamTypes); i++ {
+			if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
+				expected := info.ParamTypes[i]
+				outArgs = append(outArgs, g.emitExpr(info.ParamDefaults[i], &expected))
+			}
 		}
 	}
 
-	return fmt.Sprintf("%s(%s)", cPackageTaskName(packageName, taskName), strings.Join(outArgs, ", "))
+	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
 }
 
 func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
@@ -2203,6 +2223,14 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 	}
 
 	return CInvalid
+}
+
+func cImportedTaskName(packageName string, taskName string, info TaskInfo) string {
+	if info.IsExtern && info.ExternName != "" {
+		return info.ExternName
+	}
+
+	return cPackageTaskName(packageName, taskName)
 }
 
 func (g *Generator) cAssignOp(op token.Kind) string {

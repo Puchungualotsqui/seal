@@ -68,6 +68,10 @@ func DiscoverAndBuildGraph(startPath string) (*Graph, error) {
 		return nil, err
 	}
 
+	if err := DiscoverStdPackagesInto(packages, workspaceRoot); err != nil {
+		return nil, err
+	}
+
 	rootPkg, err := FindPackageContaining(startPath, packages)
 	if err != nil {
 		return nil, err
@@ -136,7 +140,174 @@ func FindWorkspaceRoot(startPath string) (string, error) {
 func DiscoverPackages(workspaceRoot string) (map[string]*Package, error) {
 	packages := map[string]*Package{}
 
-	err := filepath.WalkDir(workspaceRoot, func(path string, entry os.DirEntry, walkErr error) error {
+	if err := discoverPackagesInto(packages, workspaceRoot); err != nil {
+		return nil, err
+	}
+
+	return packages, nil
+}
+
+func DiscoverStdPackagesInto(packages map[string]*Package, workspaceRoot string) error {
+	seenPaths := map[string]bool{}
+
+	for _, pkg := range packages {
+		if pkg == nil {
+			continue
+		}
+
+		abs, err := filepath.Abs(pkg.Path)
+		if err != nil {
+			return err
+		}
+
+		seenPaths[abs] = true
+	}
+
+	for _, root := range StdPackageRoots(workspaceRoot) {
+		if root == "" {
+			continue
+		}
+
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+
+		if !dirExists(absRoot) {
+			continue
+		}
+
+		if err := discoverPackagesIntoWithSeenPaths(packages, absRoot, seenPaths); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func discoverPackagesIntoWithSeenPaths(packages map[string]*Package, root string, seenPaths map[string]bool) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if !entry.IsDir() {
+			return nil
+		}
+
+		base := filepath.Base(path)
+		if base == ".git" || base == "build" || base == ".seal" {
+			return filepath.SkipDir
+		}
+
+		configPath := filepath.Join(path, "seal.toml")
+		if !fileExists(configPath) {
+			return nil
+		}
+
+		absConfigPath, err := filepath.Abs(configPath)
+		if err != nil {
+			return err
+		}
+
+		if seenPaths[absConfigPath] {
+			return nil
+		}
+
+		cfg, err := ReadConfig(configPath)
+		if err != nil {
+			return err
+		}
+
+		cfg.RootDir = path
+
+		if cfg.Name == "" {
+			return fmt.Errorf("%s: package name is required", configPath)
+		}
+
+		if existing := packages[cfg.Name]; existing != nil {
+			return fmt.Errorf(
+				"duplicate package name %q:\n  %s\n  %s",
+				cfg.Name,
+				existing.Path,
+				configPath,
+			)
+		}
+
+		seenPaths[absConfigPath] = true
+
+		packages[cfg.Name] = &Package{
+			Config: cfg,
+			Path:   configPath,
+		}
+
+		return nil
+	})
+}
+
+func StdPackageRoots(workspaceRoot string) []string {
+	var roots []string
+	seen := map[string]bool{}
+
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+
+		if seen[abs] {
+			return
+		}
+
+		seen[abs] = true
+		roots = append(roots, abs)
+	}
+
+	if explicit := os.Getenv("SEAL_STD_PATH"); explicit != "" {
+		for _, part := range filepath.SplitList(explicit) {
+			add(part)
+		}
+
+		return roots
+	}
+
+	// If the workspace has its own std directory, prefer it.
+	workspaceStd := filepath.Join(workspaceRoot, "std")
+	if dirExists(workspaceStd) {
+		add(workspaceStd)
+		return roots
+	}
+
+	// Installed layout:
+	//   bin/sealc
+	//   std/mem
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		add(filepath.Join(exeDir, "std"))
+		add(filepath.Join(exeDir, "..", "std"))
+	}
+
+	// Development convenience when running from the compiler repository.
+	if cwd, err := os.Getwd(); err == nil {
+		for current := cwd; ; current = filepath.Dir(current) {
+			add(filepath.Join(current, "std"))
+
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+		}
+	}
+
+	return roots
+}
+
+func discoverPackagesInto(packages map[string]*Package, root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -182,12 +353,30 @@ func DiscoverPackages(workspaceRoot string) (map[string]*Package, error) {
 
 		return nil
 	})
+}
 
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func sameOrInside(parent string, child string) (bool, error) {
+	parentAbs, err := filepath.Abs(parent)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
-	return packages, nil
+	childAbs, err := filepath.Abs(child)
+	if err != nil {
+		return false, err
+	}
+
+	rel, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil {
+		return false, err
+	}
+
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)), nil
 }
 
 func FindPackageContaining(path string, packages map[string]*Package) (*Package, error) {
