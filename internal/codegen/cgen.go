@@ -15,12 +15,17 @@ type CType struct {
 	Name     string
 	SealName string
 
-	IsArray  bool
-	ArrayLen string
-	Elem     *CType
+	IsArray    bool
+	IsVariadic bool
+	ArrayLen   string
+	Elem       *CType
 }
 
 func (t CType) String() string {
+	if t.IsVariadic && t.Elem != nil {
+		return "..." + t.Elem.String()
+	}
+
 	if t.IsArray && t.Elem != nil {
 		return fmt.Sprintf("[%s]%s", t.ArrayLen, t.Elem.String())
 	}
@@ -181,6 +186,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.line("")
 
 	g.emitCImports(file)
+	g.emitRuntimeSupport()
 	g.emitEnums(file)
 	g.emitStructs(file)
 	g.emitUnions(file)
@@ -433,7 +439,13 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 
 	for i, param := range d.Params {
 		if i < len(info.ParamTypes) {
-			g.scope.declare(param.Name.Name, info.ParamTypes[i])
+			paramType := info.ParamTypes[i]
+
+			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+				paramType = g.variadicCType(paramType)
+			}
+
+			g.scope.declare(param.Name.Name, paramType)
 		}
 	}
 
@@ -488,14 +500,19 @@ func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
 	var params []string
 
 	for i, param := range d.Params {
-		if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
-			params = append(params, "...")
-			break
-		}
-
 		paramType := CInvalid
 		if i < len(info.ParamTypes) {
 			paramType = info.ParamTypes[i]
+		}
+
+		if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+			if info.IsExtern {
+				params = append(params, "...")
+				break
+			}
+
+			params = append(params, g.variadicCType(paramType).Decl(param.Name.Name))
+			break
 		}
 
 		params = append(params, paramType.Decl(param.Name.Name))
@@ -932,6 +949,10 @@ func (g *Generator) emitUnionSwitchStmt(s *ast.SwitchStmt) {
 }
 
 func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
+	if expected != nil && expected.SealName == "any" {
+		return g.emitAnyExpr(expr)
+	}
+
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if _, ok := g.scope.lookup(e.Name.Name); ok {
@@ -1025,7 +1046,15 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return fmt.Sprintf("(%s).%s", left, e.Name.Name)
 
 	case *ast.IndexExpr:
-		return fmt.Sprintf("%s[%s]", g.emitExpr(e.Left, nil), g.emitExpr(e.Index, &CInt))
+		leftType := g.inferExprType(e.Left, nil)
+		left := g.emitExpr(e.Left, nil)
+		index := g.emitExpr(e.Index, &CInt)
+
+		if leftType.IsVariadic {
+			return fmt.Sprintf("(%s).data[%s]", left, index)
+		}
+
+		return fmt.Sprintf("%s[%s]", left, index)
 
 	case *ast.ArrayLiteralExpr:
 		var values []string
@@ -1062,11 +1091,44 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	return "0"
 }
 
+func (g *Generator) emitAnyExpr(expr ast.Expr) string {
+	srcType := g.inferExprType(expr, nil)
+
+	if srcType.SealName == "any" {
+		return g.emitExpr(expr, nil)
+	}
+
+	value := g.emitExpr(expr, &srcType)
+
+	switch srcType.SealName {
+	case "bool":
+		return fmt.Sprintf("sealAny_bool(%s)", value)
+	case "int":
+		return fmt.Sprintf("sealAny_int(%s)", value)
+	case "usize":
+		return fmt.Sprintf("sealAny_usize(%s)", value)
+	case "f32":
+		return fmt.Sprintf("sealAny_f32(%s)", value)
+	case "f64":
+		return fmt.Sprintf("sealAny_f64(%s)", value)
+	case "string":
+		return fmt.Sprintf("sealAny_string(%s)", value)
+	case "rawptr":
+		return fmt.Sprintf("sealAny_rawptr(%s)", value)
+	default:
+		g.error(expr.Span(), fmt.Sprintf("cannot box %s as any yet", srcType.String()))
+		return "sealAny_any((sealAny){0})"
+	}
+}
+
 func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 	return g.emitCallExprWithArgs(e, nil)
 }
 
 func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+		return g.emitLenCall(e)
+	}
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if id.Name.Name == "Print" {
 			return g.emitBuiltinPrintWithArgs(e, preparedArgs)
@@ -1111,12 +1173,37 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 	return fmt.Sprintf("%s(%s)", g.emitExpr(e.Callee, nil), strings.Join(args, ", "))
 }
 
+func (g *Generator) emitLenCall(e *ast.CallExpr) string {
+	if len(e.Args) != 1 {
+		g.error(e.Span(), "len expects 1 argument")
+		return "0"
+	}
+
+	argType := g.inferExprType(e.Args[0], nil)
+	arg := g.emitExpr(e.Args[0], nil)
+
+	if argType.IsVariadic {
+		return fmt.Sprintf("(int)((%s).len)", arg)
+	}
+
+	if argType.IsArray {
+		return argType.ArrayLen
+	}
+
+	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
+	return "0"
+}
+
 func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs []string) string {
 	info, hasTask := g.tasks[taskName]
 
 	name := g.cTaskName(taskName)
 	if hasTask && info.IsExtern && info.ExternName != "" {
 		name = info.ExternName
+	}
+
+	if hasTask && info.IsVariadic && !info.IsExtern {
+		return g.emitSealVariadicTaskCall(name, info, args, preparedArgs)
 	}
 
 	var outArgs []string
@@ -1149,6 +1236,66 @@ func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs 
 	}
 
 	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+}
+
+func (g *Generator) emitSealVariadicTaskCall(name string, info TaskInfo, args []ast.Expr, preparedArgs []string) string {
+	total := len(info.ParamTypes)
+	fixedCount := total - 1
+
+	var outArgs []string
+
+	for i := 0; i < fixedCount && i < len(args); i++ {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := info.ParamTypes[i]
+		outArgs = append(outArgs, g.emitExpr(args[i], &expected))
+	}
+
+	elemType := CInvalid
+	if total > 0 {
+		elemType = info.ParamTypes[total-1]
+	}
+
+	var rest []ast.Expr
+	if len(args) > fixedCount {
+		rest = args[fixedCount:]
+	}
+
+	outArgs = append(outArgs, g.emitVariadicLiteral(elemType, rest, preparedArgs, fixedCount))
+
+	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+}
+
+func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArgs []string, preparedOffset int) string {
+	variadicType := g.variadicCType(elem)
+
+	if len(args) == 0 {
+		return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+	}
+
+	var values []string
+
+	for i, arg := range args {
+		globalIndex := preparedOffset + i
+
+		if preparedArgs != nil && globalIndex < len(preparedArgs) {
+			values = append(values, preparedArgs[globalIndex])
+			continue
+		}
+
+		values = append(values, g.emitExpr(arg, &elem))
+	}
+
+	return fmt.Sprintf(
+		"(%s){.data = (%s[]){%s}, .len = %d}",
+		variadicType.Name,
+		elem.Name,
+		strings.Join(values, ", "),
+		len(values),
+	)
 }
 
 func (g *Generator) emitBuiltinPrint(e *ast.CallExpr) string {
@@ -1288,6 +1435,9 @@ func (g *Generator) emitPackageTaskCall(packageName string, taskName string, arg
 		g.error(argsSpan(args), fmt.Sprintf("package %s has no task %q", packageName, taskName))
 		return "0"
 	}
+	if info.IsVariadic && !info.IsExtern {
+		return g.emitSealVariadicTaskCall(cPackageTaskName(packageName, taskName), info, args, preparedArgs)
+	}
 
 	var outArgs []string
 
@@ -1328,6 +1478,82 @@ func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) s
 	}
 
 	return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
+}
+
+func (g *Generator) emitRuntimeSupport() {
+	g.line("typedef enum sealTypeKind {")
+	g.indent++
+	g.line("sealType_invalid = 0,")
+	g.line("sealType_bool,")
+	g.line("sealType_int,")
+	g.line("sealType_usize,")
+	g.line("sealType_f32,")
+	g.line("sealType_f64,")
+	g.line("sealType_string,")
+	g.line("sealType_rawptr,")
+	g.line("sealType_any")
+	g.indent--
+	g.line("} sealTypeKind;")
+	g.line("")
+
+	g.line("typedef struct sealAny {")
+	g.indent++
+	g.line("sealTypeKind type;")
+	g.line("union {")
+	g.indent++
+	g.line("bool as_bool;")
+	g.line("int as_int;")
+	g.line("size_t as_usize;")
+	g.line("float as_f32;")
+	g.line("double as_f64;")
+	g.line("const char *as_string;")
+	g.line("void *as_rawptr;")
+	g.indent--
+	g.line("} value;")
+	g.indent--
+	g.line("} sealAny;")
+	g.line("")
+
+	g.line("static inline sealAny sealAny_bool(bool value) { sealAny out; out.type = sealType_bool; out.value.as_bool = value; return out; }")
+	g.line("static inline sealAny sealAny_int(int value) { sealAny out; out.type = sealType_int; out.value.as_int = value; return out; }")
+	g.line("static inline sealAny sealAny_usize(size_t value) { sealAny out; out.type = sealType_usize; out.value.as_usize = value; return out; }")
+	g.line("static inline sealAny sealAny_f32(float value) { sealAny out; out.type = sealType_f32; out.value.as_f32 = value; return out; }")
+	g.line("static inline sealAny sealAny_f64(double value) { sealAny out; out.type = sealType_f64; out.value.as_f64 = value; return out; }")
+	g.line("static inline sealAny sealAny_string(const char *value) { sealAny out; out.type = sealType_string; out.value.as_string = value; return out; }")
+	g.line("static inline sealAny sealAny_rawptr(void *value) { sealAny out; out.type = sealType_rawptr; out.value.as_rawptr = value; return out; }")
+	g.line("static inline sealAny sealAny_any(sealAny value) { return value; }")
+	g.line("")
+
+	g.emitVariadicRuntimeType(CBool)
+	g.emitVariadicRuntimeType(CInt)
+	g.emitVariadicRuntimeType(CUsize)
+	g.emitVariadicRuntimeType(CF32)
+	g.emitVariadicRuntimeType(CF64)
+	g.emitVariadicRuntimeType(CString)
+	g.emitVariadicRuntimeType(CRawptr)
+	g.emitVariadicRuntimeType(CAny)
+	g.line("")
+}
+
+func (g *Generator) emitVariadicRuntimeType(elem CType) {
+	name := g.variadicCType(elem).Name
+	g.linef("typedef struct %s {", name)
+	g.indent++
+	g.linef("%s *data;", elem.Name)
+	g.line("size_t len;")
+	g.indent--
+	g.linef("} %s;", name)
+}
+
+func (g *Generator) variadicCType(elem CType) CType {
+	name := "sealVariadic_" + sanitizeCName(elem.SealName)
+
+	return CType{
+		Name:       name,
+		SealName:   "..." + elem.SealName,
+		IsVariadic: true,
+		Elem:       &elem,
+	}
 }
 
 func (g *Generator) emitCImports(file *ast.File) {
@@ -1485,6 +1711,10 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return left
 
 	case *ast.CallExpr:
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+			return CInt
+		}
+
 		if id, ok := e.Callee.(*ast.IdentExpr); ok {
 			if id.Name.Name == "Print" {
 				return CVoid
@@ -1536,7 +1766,7 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.IndexExpr:
 		leftType := g.inferExprType(e.Left, nil)
-		if leftType.IsArray && leftType.Elem != nil {
+		if (leftType.IsArray || leftType.IsVariadic) && leftType.Elem != nil {
 			return *leftType.Elem
 		}
 

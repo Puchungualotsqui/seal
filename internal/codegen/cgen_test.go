@@ -471,3 +471,142 @@ Main :: task() {
 		t.Fatalf("expected printf call, got:\n%s", out)
 	}
 }
+
+func TestGenerateSealVariadicInt(t *testing.T) {
+	out, reporter := generate(t, `
+Sum :: task(args ...int) int {
+    total := 0
+
+    for i := 0; i < len(args); i = i + 1 {
+        total = total + args[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    Print(Sum(1, 2, 3))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct sealVariadic_int") {
+		t.Fatalf("expected variadic int runtime type, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "int Sum(sealVariadic_int args)") {
+		t.Fatalf("expected Sum variadic signature, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (int[]){1, 2, 3}, .len = 3})") {
+		t.Fatalf("expected packed Sum call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(args).data[i]") {
+		t.Fatalf("expected args index lowering, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(int)((args).len)") {
+		t.Fatalf("expected len(args) lowering, got:\n%s", out)
+	}
+}
+
+func TestGenerateSealVariadicAny(t *testing.T) {
+	out, reporter := generate(t, `
+CountAny :: task(args ...any) int {
+    return len(args)
+}
+
+Main :: task() {
+    x: any = 10
+    Print(CountAny(x, "hello", 3.14))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct sealAny") {
+		t.Fatalf("expected sealAny runtime, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny x = sealAny_int(10);") {
+		t.Fatalf("expected any boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "int CountAny(sealVariadic_any args)") {
+		t.Fatalf("expected CountAny variadic any signature, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny_string(\"hello\")") {
+		t.Fatalf("expected string boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny_f64(3.14)") {
+		t.Fatalf("expected f64 boxing, got:\n%s", out)
+	}
+}
+
+func TestGenerateInferredArrayOfAny(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    values: [?]any = [2, "hello", 3.14, true]
+    Print(len(values))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "sealAny values[4]") {
+		t.Fatalf("expected sealAny inferred array, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny_int(2)") {
+		t.Fatalf("expected int boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `sealAny_string("hello")`) {
+		t.Fatalf("expected string boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny_f64(3.14)") {
+		t.Fatalf("expected f64 boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealAny_bool(true)") {
+		t.Fatalf("expected bool boxing, got:\n%s", out)
+	}
+}
+
+func TestGenerateVariadicArrayOfAny(t *testing.T) {
+	out, reporter := generate(t, `
+TakeArrays :: task(args ...[10]any) int {
+    return len(args)
+}
+
+Main :: task() {
+    a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+
+    Print(TakeArrays(a, b))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "TakeArrays(") {
+		t.Fatalf("expected TakeArrays call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, ".len = 2") {
+		t.Fatalf("expected packed variadic length 2, got:\n%s", out)
+	}
+}

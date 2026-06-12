@@ -31,6 +31,7 @@ const (
 
 	TypePointer
 	TypeArray
+	TypeVariadic
 	TypeStruct
 	TypeEnum
 	TypeUnion
@@ -114,6 +115,12 @@ func (t *Type) String() string {
 		}
 
 		return fmt.Sprintf("[%d]%s", t.Len, t.Elem.String())
+	case TypeVariadic:
+		if t.Elem == nil {
+			return "...<invalid>"
+		}
+
+		return "..." + t.Elem.String()
 	case TypeStruct, TypeEnum, TypeUnion, TypeInterface, TypeTypeParam, TypeValueParam:
 		return t.Name
 	case TypeTask:
@@ -334,6 +341,11 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 
 	if taskType.IsVariadic {
 		fixedCount := total - 1
+		variadicElem := InvalidType
+		if total > 0 {
+			variadicElem = taskType.Params[total-1]
+		}
+
 		if len(argTypes) < required {
 			return 0, false
 		}
@@ -353,7 +365,15 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 			score += itemScore
 		}
 
-		score += (len(argTypes) - count) * 20
+		for i := fixedCount; i < len(argTypes); i++ {
+			itemScore, ok := c.conversionScore(variadicElem, argTypes[i])
+			if !ok {
+				return 0, false
+			}
+
+			score += itemScore + 10
+		}
+
 		return score, true
 	}
 
@@ -944,6 +964,14 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 			paramType = taskType.Params[i]
 		}
 
+		if param.IsVariadic {
+			paramType = &Type{
+				Kind: TypeVariadic,
+				Elem: paramType,
+				Name: "..." + paramType.String(),
+			}
+		}
+
 		taskScope.Declare(&Symbol{
 			Name: param.Name.Name,
 			Kind: SymbolParam,
@@ -1104,16 +1132,13 @@ func (c *Checker) checkTaskDefaultParameters(parent *Scope, d *ast.TaskDecl, tas
 				c.diags.Add(param.Name.Span(), "variadic parameter cannot have a default value")
 			}
 
-			if i < len(taskType.Params) && !c.sameType(taskType.Params[i], AnyType) {
-				c.diags.Add(param.Name.Span(), fmt.Sprintf("variadic parameter %q must have type any", param.Name.Name))
+			// C varargs are not typed, so Seal extern variadics use ...any.
+			if d.IsExtern && i < len(taskType.Params) && !c.sameType(taskType.Params[i], AnyType) {
+				c.diags.Add(param.Name.Span(), fmt.Sprintf("extern variadic parameter %q must have type any", param.Name.Name))
 			}
 
-			if d.IsExtern {
-				if i == 0 {
-					c.diags.Add(param.Name.Span(), "extern variadic task must have at least one fixed parameter before ...any")
-				}
-			} else {
-				c.diags.Add(param.Name.Span(), "Seal variadic tasks require runtime any support; only extern variadic tasks are supported for now")
+			if d.IsExtern && i == 0 {
+				c.diags.Add(param.Name.Span(), "extern variadic task must have at least one fixed parameter before ...any")
 			}
 		}
 
@@ -1211,11 +1236,14 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 	}
 
 	if s.HasValue {
-		valueType := c.checkExpr(scope, s.Value)
+		var valueType *Type
 
 		if s.HasType {
+			valueType = c.checkExprWithExpected(scope, s.Value, varType)
 			c.checkAssignable(varType, valueType, s.Value.Span())
 		} else {
+			valueType = c.checkExpr(scope, s.Value)
+
 			if valueType.Kind == TypeEnumLiteral {
 				c.diags.Add(s.Value.Span(), fmt.Sprintf("enum literal .%s needs explicit type", valueType.Name))
 				varType = InvalidType
@@ -1300,6 +1328,45 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) checkExprWithExpected(scope *Scope, expr ast.Expr, expected *Type) *Type {
+	if expected == nil || expected.Kind == TypeInvalid {
+		return c.checkExpr(scope, expr)
+	}
+
+	switch e := expr.(type) {
+	case *ast.ArrayLiteralExpr:
+		return c.checkArrayLiteralExprWithExpected(scope, e, expected)
+
+	default:
+		got := c.checkExpr(scope, expr)
+		c.checkAssignable(expected, got, expr.Span())
+		return expected
+	}
+}
+
+func (c *Checker) checkArrayLiteralExprWithExpected(scope *Scope, e *ast.ArrayLiteralExpr, expected *Type) *Type {
+	if expected == nil || expected.Kind != TypeArray || expected.Elem == nil {
+		return c.checkArrayLiteralExpr(scope, e)
+	}
+
+	for _, value := range e.Values {
+		valueType := c.checkExpr(scope, value)
+		c.checkAssignable(expected.Elem, valueType, value.Span())
+	}
+
+	length := len(e.Values)
+	if !expected.Inferred && expected.Len >= 0 && expected.Len != length {
+		c.diags.Add(e.Span(), fmt.Sprintf("array length mismatch: expected %d, got %d", expected.Len, length))
+	}
+
+	return &Type{
+		Kind:     TypeArray,
+		Len:      length,
+		Inferred: expected.Inferred,
+		Elem:     expected.Elem,
+	}
 }
 
 func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
@@ -1518,6 +1585,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		argTypes = append(argTypes, c.checkExpr(scope, arg))
 	}
 
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+		return c.checkLenCall(e.Args, argTypes, e.Span())
+	}
+
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if id.Name.Name == "Print" {
 			return VoidType
@@ -1605,6 +1676,10 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 
 	if taskType.IsVariadic {
 		fixedCount := total - 1
+		variadicElem := InvalidType
+		if total > 0 {
+			variadicElem = taskType.Params[total-1]
+		}
 
 		if len(argTypes) < required {
 			c.diags.Add(
@@ -1623,7 +1698,7 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 		}
 
 		for i := fixedCount; i < len(argTypes); i++ {
-			c.checkAssignable(AnyType, argTypes[i], args[i].Span())
+			c.checkAssignable(variadicElem, argTypes[i], args[i].Span())
 		}
 
 		return c.resultTypeFromCall(taskType, span)
@@ -1653,6 +1728,27 @@ func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast
 	}
 
 	return c.resultTypeFromCall(taskType, span)
+}
+
+func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+	if len(argTypes) != 1 {
+		c.diags.Add(span, fmt.Sprintf("len expects 1 argument, got %d", len(argTypes)))
+		return IntType
+	}
+
+	t := argTypes[0]
+	if t == nil || t.Kind == TypeInvalid {
+		return IntType
+	}
+
+	switch t.Kind {
+	case TypeArray, TypeVariadic, TypeString:
+		return IntType
+
+	default:
+		c.diags.Add(args[0].Span(), fmt.Sprintf("len does not support %s", t.String()))
+		return IntType
+	}
 }
 
 func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
@@ -1721,15 +1817,20 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 	indexType := c.checkExpr(scope, e.Index)
 
 	if !c.assignable(IntType, indexType) {
-		c.diags.Add(e.Index.Span(), fmt.Sprintf("array index must be int, got %s", indexType.String()))
+		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be int, got %s", indexType.String()))
 	}
 
-	if leftType.Kind != TypeArray {
-		c.diags.Add(e.Left.Span(), fmt.Sprintf("cannot index non-array type %s", leftType.String()))
+	switch leftType.Kind {
+	case TypeArray:
+		return leftType.Elem
+
+	case TypeVariadic:
+		return leftType.Elem
+
+	default:
+		c.diags.Add(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
 		return InvalidType
 	}
-
-	return leftType.Elem
 }
 
 func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) *Type {
@@ -2060,6 +2161,9 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 		}
 
 		return a.Len == b.Len && c.sameType(a.Elem, b.Elem)
+
+	case TypeVariadic:
+		return c.sameType(a.Elem, b.Elem)
 
 	case TypeStruct, TypeEnum, TypeUnion, TypeInterface, TypeTypeParam, TypeValueParam:
 		return a.Name == b.Name

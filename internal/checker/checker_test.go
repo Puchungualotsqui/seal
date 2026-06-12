@@ -1073,21 +1073,6 @@ Main :: task() {
 	}
 }
 
-func TestRejectNormalSealVariadicForNow(t *testing.T) {
-	_, reporter := check(t, `
-PrintAll :: task(args ...any) {
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "Seal variadic tasks require runtime any support") {
-		t.Fatalf("expected Seal variadic diagnostic, got:\n%s", reporter.String())
-	}
-}
-
 func TestRejectVariadicNonAny(t *testing.T) {
 	_, reporter := check(t, `
 Bad :: extern("bad") task(format string, args ...int) int
@@ -1099,5 +1084,125 @@ Bad :: extern("bad") task(format string, args ...int) int
 
 	if !strings.Contains(reporter.String(), `variadic parameter "args" must have type any`) {
 		t.Fatalf("expected variadic any diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestSealVariadicInt(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(args ...int) int {
+    total := 0
+
+    for i := 0; i < len(args); i = i + 1 {
+        total = total + args[i]
+    }
+
+    return total
+}
+
+Main :: task() {
+    Print(Sum(1, 2, 3))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestSealVariadicAny(t *testing.T) {
+	_, reporter := check(t, `
+CountAny :: task(args ...any) int {
+    return len(args)
+}
+
+Main :: task() {
+    x: any = 10
+    Print(CountAny(x, "hello", 3.14))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestVariadicRejectWrongType(t *testing.T) {
+	_, reporter := check(t, `
+Sum :: task(args ...int) int {
+    return len(args)
+}
+
+Main :: task() {
+    Sum(1, "bad")
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestVariadicArrayOfAnyIsValid(t *testing.T) {
+	_, reporter := check(t, `
+TakeArrays :: task(args ...[10]any) int {
+    return len(args)
+}
+
+Main :: task() {
+    a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+
+    Print(TakeArrays(a, b))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestInferredArrayOfAnyIsValid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    anyArr: [?]any = [2, 3, 4, 5, 6]
+    Print(len(anyArr))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    values: [?]any = [2, "hello", 3.14, true]
+    Print(len(values))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestArrayOfInterfaceValuesRejectedForNow(t *testing.T) {
+	_, reporter := check(t, `
+Enemy :: interface {
+    Health :: task(e *$T) int
+}
+
+Main :: task() {
+    enemies: [2]Enemy = []
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics because interface values are not implemented yet")
 	}
 }

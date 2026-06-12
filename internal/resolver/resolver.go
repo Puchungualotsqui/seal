@@ -217,6 +217,7 @@ func (r *Resolver) declareBuiltins() {
 	builtinTasks := []string{
 		"Assert",
 		"Print",
+		"len",
 		"Len",
 		"Trap",
 		"Panic",

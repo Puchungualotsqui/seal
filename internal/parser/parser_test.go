@@ -537,3 +537,49 @@ printf :: extern("printf") task(format string, args ...any) int
 		t.Fatalf("expected variadic args")
 	}
 }
+
+func TestParseVariadicArrayOfAny(t *testing.T) {
+	file, reporter := parse(t, `
+TakeArrays :: task(args ...[10]any) {
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf("expected 1 decl, got %d", len(file.Decls))
+	}
+
+	taskDecl, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf("expected TaskDecl")
+	}
+
+	if len(taskDecl.Params) != 1 {
+		t.Fatalf("expected 1 param, got %d", len(taskDecl.Params))
+	}
+
+	if !taskDecl.Params[0].IsVariadic {
+		t.Fatalf("expected variadic parameter")
+	}
+
+	arrayType, ok := taskDecl.Params[0].Type.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("expected variadic element type to be array, got %T", taskDecl.Params[0].Type)
+	}
+
+	if arrayType.Inferred {
+		t.Fatalf("expected fixed array length")
+	}
+
+	namedType, ok := arrayType.Elem.(*ast.NamedType)
+	if !ok {
+		t.Fatalf("expected array element type to be named type, got %T", arrayType.Elem)
+	}
+
+	if len(namedType.Parts) != 1 || namedType.Parts[0].Name != "any" {
+		t.Fatalf("expected array element type any, got %+v", namedType.Parts)
+	}
+}
