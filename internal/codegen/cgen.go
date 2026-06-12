@@ -2471,7 +2471,7 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			ArrayLen: length,
 			Elem:     &elem,
 			Name:     elem.Name,
-			SealName: "[" + length + "]" + elem.SealName,
+			SealName: "[]" + elem.SealName,
 		}
 
 	case *ast.GenericType:

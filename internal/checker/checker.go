@@ -121,7 +121,7 @@ func (t *Type) String() string {
 		return "any"
 	case TypeArray:
 		if t.Inferred {
-			return "[?]" + t.Elem.String()
+			return "[]" + t.Elem.String()
 		}
 
 		return fmt.Sprintf("[%d]%s", t.Len, t.Elem.String())
@@ -1322,9 +1322,9 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 
 			// Preserve inferred array length:
 			//
-			//     a: [?]int = [1, 2, 3]
+			//     a: []int = [1, 2, 3]
 			//
-			// The declared type starts as [?]int, but after checking the literal
+			// The declared type starts as []int, but after checking the literal
 			// we know its concrete length is 3. Keep that concrete type for later
 			// operations like a...
 			if varType != nil &&

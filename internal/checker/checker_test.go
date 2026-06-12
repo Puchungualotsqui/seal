@@ -289,7 +289,7 @@ Main :: task() {
 func TestArrayLiteralElementTypes(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
-    arr: [?]int = [1, 2, 3]
+    arr: []int = [1, 2, 3]
 }
 `)
 
@@ -301,7 +301,7 @@ Main :: task() {
 func TestRejectArrayLiteralElementTypes(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
-    arr: [?]int = [1, true, 3]
+    arr: []int = [1, true, 3]
 }
 `)
 
@@ -1171,7 +1171,7 @@ Main :: task() {
 func TestInferredArrayOfAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
-    anyArr: [?]any = [2, 3, 4, 5, 6]
+    anyArr: []any = [2, 3, 4, 5, 6]
     n: usize = len(anyArr)
     Assert(n == 5)
 }
@@ -1185,7 +1185,7 @@ Main :: task() {
 func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
-    values: [?]any = [2, "hello", 3.14, true]
+    values: []any = [2, "hello", 3.14, true]
     n: usize = len(values)
     Assert(n == 4)
 }
@@ -1555,7 +1555,7 @@ Sum :: task(values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     result := Sum(a...)
     Assert(result == 6)
 }
@@ -1606,7 +1606,7 @@ Example :: task(prefix int, values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     result := Example(10, a...)
     Assert(result == 16)
 }
@@ -1647,7 +1647,7 @@ Sum :: task(values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     Sum(a..., 4)
 }
 `)
@@ -1689,7 +1689,7 @@ Use :: task(a int, b int) int {
 }
 
 Main :: task() {
-    values: [?]int = [1, 2]
+    values: []int = [1, 2]
     result := Use(values...)
 }
 `)
@@ -1711,7 +1711,7 @@ Sum :: task(values ...int) int {
 }
 
 Main :: task() {
-    values: [?]string = ["a", "b"]
+    values: []string = ["a", "b"]
     result := Sum(values...)
 }
 `)

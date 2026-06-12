@@ -586,16 +586,16 @@ func (p *Parser) parseType() ast.Type {
 		inferred := false
 		var length ast.Expr
 
-		if p.match(token.Question) {
+		if p.match(token.RBracket) {
 			inferred = true
 		} else {
 			length = p.parseExpr(0)
 			if length == nil {
-				p.errorHere("expected array length")
+				p.errorHere("expected array length or ']'")
 			}
-		}
 
-		p.expect(token.RBracket, "expected ']' after array length")
+			p.expect(token.RBracket, "expected ']' after array length")
+		}
 
 		elem := p.parseType()
 		if elem == nil {

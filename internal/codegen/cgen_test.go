@@ -179,7 +179,7 @@ Read :: task() Error {
 func TestGenerateIfForAndArray(t *testing.T) {
 	out, reporter := generate(t, `
 Main :: task() {
-    values: [?]int = [1, 2, 3]
+    values: []int = [1, 2, 3]
 
     sum := 0
 
@@ -552,7 +552,7 @@ Main :: task() {
 func TestGenerateInferredArrayOfAny(t *testing.T) {
 	out, reporter := generate(t, `
 Main :: task() {
-    values: [?]any = [2, "hello", 3.14, true]
+    values: []any = [2, "hello", 3.14, true]
     n: usize = len(values)
 }
 `)
@@ -785,7 +785,7 @@ Sum :: task(values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     result := Sum(a...)
 }
 `)
@@ -850,7 +850,7 @@ Example :: task(prefix int, values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     result := Example(10, a...)
 }
 `)

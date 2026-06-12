@@ -348,7 +348,7 @@ Sum :: task(values ...int) int {
 }
 
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     Sum(a...)
 }
 `)

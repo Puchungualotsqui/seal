@@ -111,7 +111,7 @@ Buffer :: struct($T, #N) {
     len int
 }
 
-arr: [?]int = [2, 3, 4]
+arr: []int = [2, 3, 4]
 `)
 
 	if reporter.HasErrors() {
@@ -142,7 +142,6 @@ arr: [?]int = [2, 3, 4]
 		token.Ident,
 		token.Colon,
 		token.LBracket,
-		token.Question,
 		token.RBracket,
 		token.Ident,
 		token.Assign,

@@ -188,7 +188,7 @@ Foo :: task(number int) int {
 func TestParseTypedVarDeclWithArray(t *testing.T) {
 	file, reporter := parse(t, `
 Main :: task() {
-    arr: [?]int = [2, 3, 4]
+    arr: []int = [2, 3, 4]
 }
 `)
 
@@ -663,7 +663,7 @@ Main :: task() {
 func TestParseSpreadCallArgument(t *testing.T) {
 	file, reporter := parse(t, `
 Main :: task() {
-    a: [?]int = [1, 2, 3]
+    a: []int = [1, 2, 3]
     Sum(a...)
 }
 `)
@@ -731,5 +731,38 @@ Example :: task(a, b ...int) {
 
 	if !decl.Params[1].IsVariadic {
 		t.Fatalf("expected second grouped param to be variadic")
+	}
+}
+
+func TestParseInferredArrayType(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    values: []int = [1, 2, 3]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[0].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[0].(*ast.VarDeclStmt)
+
+	arrType, ok := stmt.Type.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("expected array type, got %T", stmt.Type)
+	}
+
+	if !arrType.Inferred {
+		t.Fatalf("expected inferred array type")
+	}
+
+	elem, ok := arrType.Elem.(*ast.NamedType)
+	if !ok {
+		t.Fatalf("expected named element type, got %T", arrType.Elem)
+	}
+
+	if elem.Parts[0].Name != "int" {
+		t.Fatalf("expected int element type, got %q", elem.Parts[0].Name)
 	}
 }
