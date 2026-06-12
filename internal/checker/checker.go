@@ -149,15 +149,24 @@ const (
 	SymbolParam
 	SymbolType
 	SymbolTask
+	SymbolOverload
 	SymbolPackage
 )
 
 type Symbol struct {
-	Name string
-	Kind SymbolKind
-	Type *Type
-	Span source.Span
-	Node ast.Node
+	Name     string
+	Kind     SymbolKind
+	Type     *Type
+	Span     source.Span
+	Node     ast.Node
+	Overload *OverloadInfo
+}
+
+type OverloadInfo struct {
+	Name       string
+	IsOperator bool
+	Candidates []*Symbol
+	Span       source.Span
 }
 
 type Scope struct {
@@ -214,7 +223,21 @@ func (c *Checker) CheckFile(file *ast.File) *Scope {
 		c.declareDecl(c.global, decl)
 	}
 
+	// Prepare all non-overload symbols first so overload declarations can
+	// refer to tasks declared later in the same global scope.
 	for _, decl := range file.Decls {
+		if _, ok := decl.(*ast.OverloadDecl); ok {
+			continue
+		}
+
+		c.prepareDecl(c.global, decl)
+	}
+
+	for _, decl := range file.Decls {
+		if _, ok := decl.(*ast.OverloadDecl); !ok {
+			continue
+		}
+
 		c.prepareDecl(c.global, decl)
 	}
 
@@ -223,6 +246,174 @@ func (c *Checker) CheckFile(file *ast.File) *Scope {
 	}
 
 	return c.global
+}
+
+type overloadResolution struct {
+	Candidate *Symbol
+	Score     int
+	Matched   bool
+	Ambiguous bool
+}
+
+func (c *Checker) resolveOverload(info *OverloadInfo, argTypes []*Type) overloadResolution {
+	best := overloadResolution{
+		Score: 1 << 30,
+	}
+
+	for _, candidate := range info.Candidates {
+		if candidate.Type == nil || candidate.Type.Kind != TypeTask {
+			continue
+		}
+
+		score, ok := c.callScore(candidate.Type, argTypes)
+		if !ok {
+			continue
+		}
+
+		if !best.Matched || score < best.Score {
+			best = overloadResolution{
+				Candidate: candidate,
+				Score:     score,
+				Matched:   true,
+			}
+			continue
+		}
+
+		if score == best.Score {
+			best.Ambiguous = true
+		}
+	}
+
+	return best
+}
+
+func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
+	if taskType == nil || taskType.Kind != TypeTask {
+		return 0, false
+	}
+
+	if len(taskType.Params) != len(argTypes) {
+		return 0, false
+	}
+
+	total := 0
+
+	for i := range argTypes {
+		score, ok := c.conversionScore(taskType.Params[i], argTypes[i])
+		if !ok {
+			return 0, false
+		}
+
+		total += score
+	}
+
+	return total, true
+}
+
+func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
+	if dst == nil || src == nil {
+		return 100, true
+	}
+
+	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
+		return 100, true
+	}
+
+	if c.sameType(dst, src) {
+		return 0, true
+	}
+
+	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
+		if c.enumHasVariant(dst, src.Name) {
+			return 1, true
+		}
+
+		return 0, false
+	}
+
+	if dst.Kind == TypeUnion {
+		if src.Kind == TypeNil || c.unionHasMember(dst, src) {
+			return 1, true
+		}
+
+		return 0, false
+	}
+
+	if src.Kind == TypeNil {
+		if dst.Kind == TypePointer || dst.Kind == TypeUnion {
+			return 1, true
+		}
+
+		return 0, false
+	}
+
+	if src.Kind == TypeUntypedInt {
+		switch dst.Kind {
+		case TypeInt:
+			return 1, true
+		case TypeF32, TypeF64:
+			return 2, true
+		}
+	}
+
+	if src.Kind == TypeUntypedFloat {
+		switch dst.Kind {
+		case TypeF64:
+			return 1, true
+		case TypeF32:
+			return 2, true
+		}
+	}
+
+	if dst.Kind == TypeArray && src.Kind == TypeArray {
+		if !dst.Inferred && src.Len >= 0 && dst.Len >= 0 && dst.Len != src.Len {
+			return 0, false
+		}
+
+		score, ok := c.conversionScore(dst.Elem, src.Elem)
+		if !ok {
+			return 0, false
+		}
+
+		return score + 1, true
+	}
+
+	if c.assignable(dst, src) {
+		return 10, true
+	}
+
+	return 0, false
+}
+
+func (c *Checker) formatTypes(types []*Type) string {
+	var parts []string
+
+	for _, t := range types {
+		if t == nil {
+			parts = append(parts, "<nil>")
+		} else {
+			parts = append(parts, t.String())
+		}
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+func (c *Checker) resultTypeFromCall(taskType *Type, span source.Span) *Type {
+	if taskType == nil || taskType.Kind != TypeTask {
+		return InvalidType
+	}
+
+	if len(taskType.Results) == 0 {
+		return VoidType
+	}
+
+	if len(taskType.Results) == 1 {
+		return taskType.Results[0]
+	}
+
+	c.diags.Add(span, "multi-result task call cannot be used as a single expression yet")
+	return InvalidType
 }
 
 func (c *Checker) declareBuiltins(scope *Scope) {
@@ -350,8 +541,18 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 		return
 
 	case *ast.OverloadDecl:
-		// Later phase.
-		return
+		scope.Declare(&Symbol{
+			Name: d.Name,
+			Kind: SymbolOverload,
+			Type: InvalidType,
+			Span: d.Span(),
+			Node: d,
+			Overload: &OverloadInfo{
+				Name:       d.Name,
+				IsOperator: isOperatorOverloadName(d.Name),
+				Span:       d.Span(),
+			},
+		})
 	}
 }
 
@@ -374,7 +575,41 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 
 	case *ast.InterfaceDecl:
 		c.prepareInterfaceDecl(scope, d)
+
+	case *ast.OverloadDecl:
+		c.prepareOverloadDecl(scope, d)
 	}
+}
+
+func (c *Checker) prepareOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
+	sym := scope.LookupLocal(d.Name)
+	if sym == nil || sym.Overload == nil {
+		return
+	}
+
+	var candidates []*Symbol
+
+	for _, name := range d.Names {
+		candidate := scope.Lookup(name.Name)
+		if candidate == nil {
+			c.diags.Add(name.Span(), fmt.Sprintf("undefined overload candidate %q", name.Name))
+			continue
+		}
+
+		if candidate.Kind != SymbolTask {
+			c.diags.Add(name.Span(), fmt.Sprintf("overload candidate %q is not a task", name.Name))
+			continue
+		}
+
+		if candidate.Type == nil || candidate.Type.Kind != TypeTask {
+			c.diags.Add(name.Span(), fmt.Sprintf("overload candidate %q has invalid task type", name.Name))
+			continue
+		}
+
+		candidates = append(candidates, candidate)
+	}
+
+	sym.Overload.Candidates = candidates
 }
 
 func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
@@ -474,10 +709,10 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 		// Later phase.
 
 	case *ast.ImplDecl:
-		// Later phase.
+	// Later phase.
 
 	case *ast.OverloadDecl:
-		// Later phase.
+		c.checkOverloadDecl(scope, d)
 
 	case *ast.DirectiveDecl:
 		return
@@ -485,6 +720,84 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 	case *ast.TaskDecl:
 		c.checkTaskDecl(scope, d)
 	}
+}
+
+func (c *Checker) checkOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
+	sym := scope.LookupLocal(d.Name)
+	if sym == nil || sym.Overload == nil {
+		return
+	}
+
+	info := sym.Overload
+
+	for _, candidate := range info.Candidates {
+		taskDecl, _ := candidate.Node.(*ast.TaskDecl)
+		taskType := candidate.Type
+
+		if taskType == nil || taskType.Kind != TypeTask {
+			continue
+		}
+
+		if info.IsOperator {
+			if taskDecl == nil || !taskDecl.IsPure {
+				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q requires pure task candidate %q", d.Name, candidate.Name))
+			}
+
+			if len(taskType.Params) != 2 {
+				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q must have exactly 2 parameters", d.Name, candidate.Name))
+			}
+
+			if len(taskType.Results) != 1 {
+				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q must return exactly 1 value", d.Name, candidate.Name))
+			}
+
+			if isComparisonOperatorName(d.Name) && len(taskType.Results) == 1 && !c.sameType(taskType.Results[0], BoolType) {
+				c.diags.Add(candidate.Span, fmt.Sprintf("comparison operator overload %q candidate %q must return bool", d.Name, candidate.Name))
+			}
+
+			if len(taskType.Params) == 2 &&
+				c.isBuiltinPrimitiveForOperator(taskType.Params[0]) &&
+				c.isBuiltinPrimitiveForOperator(taskType.Params[1]) {
+				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q cannot replace built-in primitive operator behavior", d.Name))
+			}
+		}
+	}
+
+	c.checkDuplicateOverloadSignatures(info)
+}
+
+func (c *Checker) checkDuplicateOverloadSignatures(info *OverloadInfo) {
+	for i := 0; i < len(info.Candidates); i++ {
+		a := info.Candidates[i]
+		if a.Type == nil || a.Type.Kind != TypeTask {
+			continue
+		}
+
+		for j := i + 1; j < len(info.Candidates); j++ {
+			b := info.Candidates[j]
+			if b.Type == nil || b.Type.Kind != TypeTask {
+				continue
+			}
+
+			if sameParamSignature(c, a.Type, b.Type) {
+				c.diags.Add(b.Span, fmt.Sprintf("duplicate overload signature for %q", info.Name))
+			}
+		}
+	}
+}
+
+func sameParamSignature(c *Checker, a *Type, b *Type) bool {
+	if len(a.Params) != len(b.Params) {
+		return false
+	}
+
+	for i := range a.Params {
+		if !c.sameType(a.Params[i], b.Params[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
@@ -822,40 +1135,74 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 
 	switch e.Op {
 	case token.Plus, token.Minus, token.Star, token.Slash:
-		if !c.isNumeric(left) || !c.isNumeric(right) {
-			c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
-			return InvalidType
+		if c.isNumeric(left) && c.isNumeric(right) {
+			result, ok := c.numericResultType(left, right)
+			if !ok {
+				c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
+				return InvalidType
+			}
+
+			return result
 		}
 
-		result, ok := c.numericResultType(left, right)
-		if !ok {
-			c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
-			return InvalidType
+		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
+			return result
 		}
 
-		return result
+		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
+		return InvalidType
 
-	case token.EqEq, token.NotEq:
-		if !c.assignableEitherWay(left, right) {
-			c.diags.Add(e.Span(), fmt.Sprintf("cannot compare %s and %s", left.String(), right.String()))
-			return InvalidType
+	case token.EqEq:
+		if c.builtinEqualityCompatible(left, right) {
+			return BoolType
 		}
 
-		return BoolType
+		if result, ok := c.checkOperatorOverload(scope, "==", []*Type{left, right}, e.Span(), true); ok {
+			return result
+		}
+
+		c.diags.Add(e.Span(), fmt.Sprintf("cannot compare %s and %s", left.String(), right.String()))
+		return InvalidType
+
+	case token.NotEq:
+		if c.builtinEqualityCompatible(left, right) {
+			return BoolType
+		}
+
+		if result, ok := c.checkOperatorOverload(scope, "!=", []*Type{left, right}, e.Span(), false); ok {
+			return result
+		}
+
+		// Derive != from == if only == exists.
+		if result, ok := c.checkOperatorOverload(scope, "==", []*Type{left, right}, e.Span(), false); ok {
+			if !c.sameType(result, BoolType) {
+				c.diags.Add(e.Span(), "derived != requires == overload to return bool")
+				return InvalidType
+			}
+
+			return BoolType
+		}
+
+		c.diags.Add(e.Span(), fmt.Sprintf("cannot compare %s and %s", left.String(), right.String()))
+		return InvalidType
 
 	case token.Lt, token.Gt, token.LtEq, token.GtEq:
-		if !c.isNumeric(left) || !c.isNumeric(right) {
-			c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
-			return InvalidType
+		if c.isNumeric(left) && c.isNumeric(right) {
+			_, ok := c.numericResultType(left, right)
+			if !ok {
+				c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
+				return InvalidType
+			}
+
+			return BoolType
 		}
 
-		_, ok := c.numericResultType(left, right)
-		if !ok {
-			c.diags.Add(e.Span(), fmt.Sprintf("mismatched numeric operands: %s and %s", left.String(), right.String()))
-			return InvalidType
+		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
+			return result
 		}
 
-		return BoolType
+		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
+		return InvalidType
 
 	case token.AndAnd, token.OrOr:
 		if !c.sameType(left, BoolType) || !c.sameType(right, BoolType) {
@@ -869,59 +1216,178 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 	return InvalidType
 }
 
+func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*Type, span source.Span, diagnoseMissing bool) (*Type, bool) {
+	sym := scope.Lookup(name)
+	if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+		return InvalidType, false
+	}
+
+	info := sym.Overload
+	result := c.resolveOverload(info, argTypes)
+
+	if !result.Matched {
+		if diagnoseMissing {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("no operator overload %q matches operand types (%s)", name, c.formatTypes(argTypes)),
+			)
+		}
+
+		return InvalidType, true
+	}
+
+	if result.Ambiguous {
+		c.diags.Add(
+			span,
+			fmt.Sprintf("ambiguous operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)),
+		)
+
+		return InvalidType, true
+	}
+
+	return c.resultTypeFromCall(result.Candidate.Type, span), true
+}
+
+func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
+	if a == nil || b == nil {
+		return false
+	}
+
+	if a.Kind == TypeInvalid || b.Kind == TypeInvalid {
+		return true
+	}
+
+	if c.isNumeric(a) && c.isNumeric(b) {
+		_, ok := c.numericResultType(a, b)
+		return ok
+	}
+
+	if c.sameType(a, BoolType) && c.sameType(b, BoolType) {
+		return true
+	}
+
+	if c.sameType(a, StringType) && c.sameType(b, StringType) {
+		return true
+	}
+
+	if a.Kind == TypeEnum && b.Kind == TypeEnum {
+		return c.sameType(a, b)
+	}
+
+	if a.Kind == TypeEnum && b.Kind == TypeEnumLiteral {
+		return c.enumHasVariant(a, b.Name)
+	}
+
+	if b.Kind == TypeEnum && a.Kind == TypeEnumLiteral {
+		return c.enumHasVariant(b, a.Name)
+	}
+
+	if a.Kind == TypePointer && b.Kind == TypeNil {
+		return true
+	}
+
+	if b.Kind == TypePointer && a.Kind == TypeNil {
+		return true
+	}
+
+	return false
+}
+
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
+	argTypes := make([]*Type, 0, len(e.Args))
+	for _, arg := range e.Args {
+		argTypes = append(argTypes, c.checkExpr(scope, arg))
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		sym := scope.Lookup(id.Name.Name)
+		if sym == nil {
+			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
+			return InvalidType
+		}
+
+		switch sym.Kind {
+		case SymbolTask:
+			return c.checkDirectTaskCall(sym, argTypes, e.Args, e.Span())
+
+		case SymbolOverload:
+			return c.checkOverloadCall(sym, argTypes, e.Args, e.Span())
+
+		default:
+			c.diags.Add(id.Span(), fmt.Sprintf("cannot call non-task symbol %q", id.Name.Name))
+			return InvalidType
+		}
+	}
+
 	calleeType := c.checkExpr(scope, e.Callee)
 
 	if calleeType.Kind != TypeTask {
 		c.diags.Add(e.Callee.Span(), fmt.Sprintf("cannot call non-task type %s", calleeType.String()))
-
-		for _, arg := range e.Args {
-			c.checkExpr(scope, arg)
-		}
-
 		return InvalidType
 	}
 
-	minArgs := 0
-	for _, param := range calleeType.Params {
-		if param != nil {
-			minArgs++
-		}
+	return c.checkTaskTypeCall(calleeType, argTypes, e.Args, e.Span())
+}
+
+func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+	if sym.Type == nil || sym.Type.Kind != TypeTask {
+		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
+		return InvalidType
 	}
 
-	// Default parameters are parsed, but their full metadata is not stored in Type yet.
-	// For now, require exact count.
-	if len(e.Args) != len(calleeType.Params) {
+	return c.checkTaskTypeCall(sym.Type, argTypes, args, span)
+}
+
+func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+	if len(argTypes) != len(taskType.Params) {
 		c.diags.Add(
-			e.Span(),
-			fmt.Sprintf("task call argument count mismatch: expected %d, got %d", len(calleeType.Params), len(e.Args)),
+			span,
+			fmt.Sprintf("task call argument count mismatch: expected %d, got %d", len(taskType.Params), len(argTypes)),
 		)
 	}
 
-	count := len(e.Args)
-	if len(calleeType.Params) < count {
-		count = len(calleeType.Params)
+	count := len(argTypes)
+	if len(taskType.Params) < count {
+		count = len(taskType.Params)
 	}
 
 	for i := 0; i < count; i++ {
-		argType := c.checkExpr(scope, e.Args[i])
-		c.checkAssignable(calleeType.Params[i], argType, e.Args[i].Span())
+		c.checkAssignable(taskType.Params[i], argTypes[i], args[i].Span())
 	}
 
-	for i := count; i < len(e.Args); i++ {
-		c.checkExpr(scope, e.Args[i])
+	return c.resultTypeFromCall(taskType, span)
+}
+
+func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+	info := sym.Overload
+	if info == nil {
+		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
+		return InvalidType
 	}
 
-	if len(calleeType.Results) == 0 {
-		return VoidType
+	result := c.resolveOverload(info, argTypes)
+
+	if !result.Matched {
+		c.diags.Add(
+			span,
+			fmt.Sprintf("no overload of %q matches argument types (%s)", info.Name, c.formatTypes(argTypes)),
+		)
+		return InvalidType
 	}
 
-	if len(calleeType.Results) == 1 {
-		return calleeType.Results[0]
+	if result.Ambiguous {
+		c.diags.Add(
+			span,
+			fmt.Sprintf("ambiguous overload call %q with argument types (%s)", info.Name, c.formatTypes(argTypes)),
+		)
+		return InvalidType
 	}
 
-	c.diags.Add(e.Span(), "multi-result task call cannot be used as a single expression yet")
-	return InvalidType
+	for i, arg := range args {
+		c.checkAssignable(result.Candidate.Type.Params[i], argTypes[i], arg.Span())
+	}
+
+	return c.resultTypeFromCall(result.Candidate.Type, span)
 }
 
 func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
@@ -1543,6 +2009,37 @@ func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *
 		for _, stmt := range swCase.Body {
 			c.checkStmt(caseScope, stmt)
 		}
+	}
+}
+
+func isOperatorOverloadName(name string) bool {
+	switch name {
+	case "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "^":
+		return true
+	default:
+		return false
+	}
+}
+
+func isComparisonOperatorName(name string) bool {
+	switch name {
+	case "==", "!=", "<", ">", "<=", ">=":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeBool, TypeInt, TypeF32, TypeF64, TypeString:
+		return true
+	default:
+		return false
 	}
 }
 

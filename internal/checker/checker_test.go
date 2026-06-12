@@ -690,3 +690,235 @@ Area :: task(s Shape) f32 {
 		t.Fatalf("expected invalid union member diagnostic, got:\n%s", reporter.String())
 	}
 }
+
+func TestNormalOverloadResolution(t *testing.T) {
+	_, reporter := check(t, `
+SumInt :: task(a int, b int) int {
+    return a + b
+}
+
+SumF64 :: task(a f64, b f64) f64 {
+    return a + b
+}
+
+Sum :: overload {
+    SumInt
+    SumF64
+}
+
+Main :: task() {
+    a := Sum(1, 2)
+    b := Sum(1.0, 2.0)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectNoMatchingOverload(t *testing.T) {
+	_, reporter := check(t, `
+SumInt :: task(a int, b int) int {
+    return a + b
+}
+
+Sum :: overload {
+    SumInt
+}
+
+Main :: task() {
+    a := Sum(true, false)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `no overload of "Sum" matches argument types`) {
+		t.Fatalf("expected no matching overload diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectAmbiguousOverload(t *testing.T) {
+	_, reporter := check(t, `
+A :: struct {
+    value int
+}
+
+UseA1 :: task(a A) int {
+    return a.value
+}
+
+UseA2 :: task(a A) int {
+    return a.value
+}
+
+UseA :: overload {
+    UseA1
+    UseA2
+}
+
+Main :: task() {
+    a := A{value = 1}
+    x := UseA(a)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `ambiguous overload call "UseA"`) {
+		t.Fatalf("expected ambiguous overload diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestOperatorOverloadVec2Add(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Vec2Add :: pure task(a Vec2, b Vec2) Vec2 {
+    return Vec2{x = a.x + b.x, y = a.y + b.y}
+}
+
++ :: overload {
+    Vec2Add
+}
+
+Main :: task() {
+    a := Vec2{x = 1.0, y = 2.0}
+    b := Vec2{x = 3.0, y = 4.0}
+    c := a + b
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectImpureOperatorOverload(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Vec2Add :: task(a Vec2, b Vec2) Vec2 {
+    return Vec2{x = a.x + b.x, y = a.y + b.y}
+}
+
++ :: overload {
+    Vec2Add
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `operator overload "+" requires pure task candidate "Vec2Add"`) {
+		t.Fatalf("expected pure operator diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectPrimitiveOperatorReplacement(t *testing.T) {
+	_, reporter := check(t, `
+IntAdd :: pure task(a int, b int) int {
+    return a + b
+}
+
++ :: overload {
+    IntAdd
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `operator overload "+" cannot replace built-in primitive operator behavior`) {
+		t.Fatalf("expected primitive replacement diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestEqualityOperatorOverload(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Vec2Equal :: pure task(a Vec2, b Vec2) bool {
+    return a.x == b.x && a.y == b.y
+}
+
+== :: overload {
+    Vec2Equal
+}
+
+Main :: task() {
+    a := Vec2{x = 1.0, y = 2.0}
+    b := Vec2{x = 1.0, y = 2.0}
+    same := a == b
+    different := a != b
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectStructEqualityWithoutOverload(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Main :: task() {
+    a := Vec2{x = 1.0, y = 2.0}
+    b := Vec2{x = 1.0, y = 2.0}
+    same := a == b
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot compare Vec2 and Vec2") {
+		t.Fatalf("expected struct equality diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectComparisonOperatorNonBoolReturn(t *testing.T) {
+	_, reporter := check(t, `
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+Vec2Less :: pure task(a Vec2, b Vec2) int {
+    return 0
+}
+
+< :: overload {
+    Vec2Less
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `comparison operator overload "<" candidate "Vec2Less" must return bool`) {
+		t.Fatalf("expected bool return diagnostic, got:\n%s", reporter.String())
+	}
+}
