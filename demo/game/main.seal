@@ -1,4 +1,0 @@
-Main :: task() {
-    x := helper.Double(10)
-    Print(x)
-}

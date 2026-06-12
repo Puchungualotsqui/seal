@@ -1,7 +1,0 @@
-name = "fmt"
-version = "0.1.0"
-kind = "library"
-
-dependencies = [
-    { name = "mem", version = "0.1.0" },
-]

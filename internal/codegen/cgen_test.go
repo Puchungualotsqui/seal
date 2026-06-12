@@ -57,7 +57,6 @@ func TestGenerateSimpleMain(t *testing.T) {
 Main :: task() {
     x := 10
     y := x + 20
-    Print(y)
 }
 `)
 
@@ -75,10 +74,6 @@ Main :: task() {
 
 	if !strings.Contains(out, "int y = (x + 20);") {
 		t.Fatalf("expected y variable, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, `printf("%d", y);`) {
-		t.Fatalf("expected printf, got:\n%s", out)
 	}
 
 	if !strings.Contains(out, "return 0;") {
@@ -193,7 +188,7 @@ Main :: task() {
     }
 
     if sum > 0 {
-        Print(sum)
+        sum = sum + 1
     }
 }
 `)
@@ -213,12 +208,15 @@ Main :: task() {
 	if !strings.Contains(out, "if ((sum > 0))") {
 		t.Fatalf("expected if statement, got:\n%s", out)
 	}
+
+	if !strings.Contains(out, "sum = (sum + 1);") {
+		t.Fatalf("expected if body assignment, got:\n%s", out)
+	}
 }
 
 func TestGenerateDefer(t *testing.T) {
 	out, reporter := generate(t, `
 Close :: task(x int) {
-    Print(x)
 }
 
 Main :: task() {
@@ -485,7 +483,7 @@ Sum :: task(args ...int) int {
 }
 
 Main :: task() {
-    Print(Sum(1, 2, 3))
+    result := Sum(1, 2, 3)
 }
 `)
 
@@ -522,7 +520,7 @@ CountAny :: task(args ...any) usize {
 
 Main :: task() {
     x: any = 10
-    Print(CountAny(x, "hello", 3.14))
+    result := CountAny(x, "hello", 3.14)
 }
 `)
 
@@ -555,7 +553,7 @@ func TestGenerateInferredArrayOfAny(t *testing.T) {
 	out, reporter := generate(t, `
 Main :: task() {
     values: [?]any = [2, "hello", 3.14, true]
-    Print(len(values))
+    n: usize = len(values)
 }
 `)
 
@@ -582,6 +580,10 @@ Main :: task() {
 	if !strings.Contains(out, "sealAny_bool(true)") {
 		t.Fatalf("expected bool boxing, got:\n%s", out)
 	}
+
+	if !strings.Contains(out, "size_t n = (size_t)4;") {
+		t.Fatalf("expected len(values) lowering, got:\n%s", out)
+	}
 }
 
 func TestGenerateVariadicArrayOfAny(t *testing.T) {
@@ -594,7 +596,7 @@ Main :: task() {
     a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
 
-    Print(TakeArrays(a, b))
+    result := TakeArrays(a, b)
 }
 `)
 
@@ -622,7 +624,6 @@ Main :: task() {
 
     if anyIs<int>(value) {
         x := anyAs<int>(value)
-        Print(x)
     }
 }
 `)
@@ -652,11 +653,9 @@ Main :: task() {
     @partial switch value type {
     case int:
         x := anyAs<int>(value)
-        Print(x)
 
     case string:
         s := anyAs<string>(value)
-        Print(s)
     }
 }
 `)
@@ -694,10 +693,9 @@ Main :: task() {
     switch value type {
     case int:
         x := anyAs<int>(value)
-        Print(x)
 
     default:
-        Print(0)
+        y := 0
     }
 }
 `)

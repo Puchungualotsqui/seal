@@ -1061,10 +1061,10 @@ Main :: task() {
 
 func TestExternVariadicAny(t *testing.T) {
 	_, reporter := check(t, `
-printf :: extern("printf") task(format string, args ...any) int
+printf :: extern("printf") task(format cstring, args ...any) int
 
 Main :: task() {
-    printf("%d %s", 10, "hello")
+    printf(c"%d %s", 10, c"hello")
 }
 `)
 
@@ -1075,7 +1075,7 @@ Main :: task() {
 
 func TestRejectVariadicNonAny(t *testing.T) {
 	_, reporter := check(t, `
-Bad :: extern("bad") task(format string, args ...int) int
+Bad :: extern("bad") task(format cstring, args ...int) int
 `)
 
 	if !reporter.HasErrors() {
@@ -1100,7 +1100,8 @@ Sum :: task(args ...int) int {
 }
 
 Main :: task() {
-    Print(Sum(1, 2, 3))
+    result := Sum(1, 2, 3)
+    Assert(result == 6)
 }
 `)
 
@@ -1117,7 +1118,8 @@ CountAny :: task(args ...any) usize {
 
 Main :: task() {
     x: any = 10
-    Print(CountAny(x, "hello", 3.14))
+    count := CountAny(x, "hello", 3.14)
+    Assert(count == 3)
 }
 `)
 
@@ -1128,7 +1130,7 @@ Main :: task() {
 
 func TestVariadicRejectWrongType(t *testing.T) {
 	_, reporter := check(t, `
-Sum :: task(args ...int) int {
+Sum :: task(args ...int) usize {
     return len(args)
 }
 
@@ -1156,7 +1158,8 @@ Main :: task() {
     a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
 
-    Print(TakeArrays(a, b))
+    count := TakeArrays(a, b)
+    Assert(count == 2)
 }
 `)
 
@@ -1169,7 +1172,8 @@ func TestInferredArrayOfAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     anyArr: [?]any = [2, 3, 4, 5, 6]
-    Print(len(anyArr))
+    n: usize = len(anyArr)
+    Assert(n == 5)
 }
 `)
 
@@ -1182,7 +1186,8 @@ func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     values: [?]any = [2, "hello", 3.14, true]
-    Print(len(values))
+    n: usize = len(values)
+    Assert(n == 4)
 }
 `)
 
@@ -1214,7 +1219,7 @@ Main :: task() {
 
     if anyIs<int>(value) {
         x := anyAs<int>(value)
-        Print(x)
+        Assert(x == 10)
     }
 }
 `)
@@ -1248,11 +1253,11 @@ Main :: task() {
     @partial switch value type {
     case int:
         x := anyAs<int>(value)
-        Print(x)
+        Assert(x == 10)
 
     case string:
         s := anyAs<string>(value)
-        Print(s)
+        Assert(len(s) > 0)
     }
 }
 `)
@@ -1270,7 +1275,7 @@ Main :: task() {
     switch value type {
     case int:
         x := anyAs<int>(value)
-        Print(x)
+        Assert(x == 10)
     }
 }
 `)
@@ -1292,10 +1297,10 @@ Main :: task() {
     switch value type {
     case int:
         x := anyAs<int>(value)
-        Print(x)
+        Assert(x == 10)
 
     default:
-        Print(0)
+        Assert(true)
     }
 }
 `)
@@ -1317,9 +1322,9 @@ Main :: task() {
 
     switch e {
     case .None:
-        Print(1)
+        Assert(true)
     case .None:
-        Print(2)
+        Assert(false)
     }
 }
 `)
@@ -1344,9 +1349,9 @@ Main :: task() {
 
     switch shape in s {
     case Circle:
-        Print(1)
+        Assert(true)
     case Circle:
-        Print(2)
+        Assert(false)
     }
 }
 `)
@@ -1369,9 +1374,9 @@ Main :: task() {
 
     switch shape in s {
     case nil:
-        Print(1)
+        Assert(true)
     case nil:
-        Print(2)
+        Assert(false)
     }
 }
 `)
@@ -1393,9 +1398,9 @@ Main :: task() {
 
     switch e {
     default:
-        Print(1)
+        Assert(true)
     default:
-        Print(2)
+        Assert(false)
     }
 }
 `)
@@ -1416,6 +1421,11 @@ Main :: task() {
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
+
+    Assert(n == 4)
+    Assert(h == 'h')
+    Assert(o == 'o')
+    Assert(a == 'a')
 }
 `)
 
@@ -1467,6 +1477,12 @@ Main :: task() {
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
+
+    Assert(c == 'ñ')
+    Assert(n == 4)
+    Assert(h == 'h')
+    Assert(o == 'o')
+    Assert(a == 'a')
 }
 `)
 

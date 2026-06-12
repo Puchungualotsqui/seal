@@ -1,0 +1,7 @@
+Main :: task() {
+    name := "Roger"
+    hp := 64
+
+    fmt.Print("player % has % hp\n", name, hp)
+    fmt.Println("done")
+}

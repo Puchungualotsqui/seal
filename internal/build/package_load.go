@@ -18,10 +18,11 @@ import (
 )
 
 type LoadedPackage struct {
-	Package *Package
-	File    *ast.File
-	CCode   string
-	CPath   string
+	Package      *Package
+	File         *ast.File
+	CCode        string
+	CPath        string
+	NativeCFiles []string
 }
 
 func LoadAndCheckPackage(
@@ -92,6 +93,37 @@ func LoadAndCheckPackage(
 	}
 
 	return combined, resolverScope, checkerScope, nil
+}
+
+func CFiles(root string) ([]string, error) {
+	var files []string
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if entry.IsDir() {
+			switch filepath.Base(path) {
+			case ".git", ".seal", "build", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if strings.HasSuffix(entry.Name(), ".c") {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Strings(files)
+	return files, nil
 }
 
 func GeneratePackageC(

@@ -72,6 +72,11 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 
 		cPath := filepath.Join(outDir, sanitizeFileName(pkg.Config.Name)+".c")
 
+		nativeCFiles, err := CFiles(pkg.Config.RootDir)
+		if err != nil {
+			return nil, err
+		}
+
 		if err := os.WriteFile(cPath, []byte(cCode), 0644); err != nil {
 			return nil, err
 		}
@@ -81,10 +86,11 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 		codegenPackages[pkg.Config.Name] = codegenInfo
 
 		loaded = append(loaded, &LoadedPackage{
-			Package: pkg,
-			File:    file,
-			CCode:   cCode,
-			CPath:   cPath,
+			Package:      pkg,
+			File:         file,
+			CCode:        cCode,
+			CPath:        cPath,
+			NativeCFiles: nativeCFiles,
 		})
 	}
 
@@ -113,10 +119,11 @@ func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) err
 		compiler = "cc"
 	}
 
-	args := make([]string, 0, len(loaded)+2)
+	var args []string
 
 	for _, pkg := range loaded {
 		args = append(args, pkg.CPath)
+		args = append(args, pkg.NativeCFiles...)
 	}
 
 	args = append(args, "-o", output)

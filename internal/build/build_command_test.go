@@ -21,7 +21,7 @@ kind = "executable"
 	writeFile(t, filepath.Join(root, "game", "main.seal"), `
 Main :: task() {
     x := 10
-    Print(x)
+    y := x + 20
 }
 `)
 
@@ -51,8 +51,12 @@ Main :: task() {
 		t.Fatalf("expected generated main, got:\n%s", text)
 	}
 
-	if !strings.Contains(text, `printf("%d", x);`) {
-		t.Fatalf("expected generated Print call, got:\n%s", text)
+	if !strings.Contains(text, "int x = 10;") {
+		t.Fatalf("expected generated x variable, got:\n%s", text)
+	}
+
+	if !strings.Contains(text, "int y = (x + 20);") {
+		t.Fatalf("expected generated y variable, got:\n%s", text)
 	}
 }
 
@@ -73,7 +77,7 @@ dependencies = [
 	writeFile(t, filepath.Join(root, "game", "main.seal"), `
 Main :: task() {
     x := 10
-    Print(x)
+    y := x + 20
 }
 `)
 
@@ -129,7 +133,7 @@ dependencies = [
 	writeFile(t, filepath.Join(root, "game", "main.seal"), `
 Main :: task() {
     x := helper.Double(10)
-    Print(x)
+    y := x + 1
 }
 `)
 

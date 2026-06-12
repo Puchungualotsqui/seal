@@ -1,0 +1,4 @@
+name = "app"
+kind = "executable"
+
+dependencies = ["fmt"]

@@ -128,11 +128,11 @@ func TestDuplicatePackageName(t *testing.T) {
 	writeFile(t, filepath.Join(root, "seal.workspace"), "")
 
 	writeFile(t, filepath.Join(root, "a", "seal.toml"), `
-name = "fmt"
+name = "dupe"
 `)
 
 	writeFile(t, filepath.Join(root, "b", "seal.toml"), `
-name = "fmt"
+name = "dupe"
 `)
 
 	_, err := DiscoverPackages(root)
@@ -140,7 +140,7 @@ name = "fmt"
 		t.Fatalf("expected duplicate package error")
 	}
 
-	if !strings.Contains(err.Error(), `duplicate package name "fmt"`) {
+	if !strings.Contains(err.Error(), `duplicate package name "dupe"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestMissingDependency(t *testing.T) {
 name = "game"
 kind = "executable"
 dependencies = [
-    { name = "fmt", version = "0.1.0" },
+    { name = "missing_pkg", version = "0.1.0" },
 ]
 `)
 
@@ -162,7 +162,7 @@ dependencies = [
 		t.Fatalf("expected missing dependency error")
 	}
 
-	if !strings.Contains(err.Error(), `depends on missing package "fmt"`) {
+	if !strings.Contains(err.Error(), `depends on missing package "missing_pkg"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -174,12 +174,12 @@ func TestVersionMismatch(t *testing.T) {
 	writeFile(t, filepath.Join(root, "game", "seal.toml"), `
 name = "game"
 dependencies = [
-    { name = "fmt", version = "1.0.0" },
+    { name = "localfmt", version = "1.0.0" },
 ]
 `)
 
-	writeFile(t, filepath.Join(root, "fmt", "seal.toml"), `
-name = "fmt"
+	writeFile(t, filepath.Join(root, "localfmt", "seal.toml"), `
+name = "localfmt"
 version = "0.1.0"
 `)
 
@@ -188,7 +188,7 @@ version = "0.1.0"
 		t.Fatalf("expected version mismatch")
 	}
 
-	if !strings.Contains(err.Error(), `requires fmt@1.0.0`) {
+	if !strings.Contains(err.Error(), `requires localfmt@1.0.0`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

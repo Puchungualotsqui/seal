@@ -560,17 +560,6 @@ func (c *Checker) declareBuiltins(scope *Scope) {
 			Results: nil,
 		},
 	})
-
-	scope.Declare(&Symbol{
-		Name: "Print",
-		Kind: SymbolTask,
-		Type: &Type{
-			Kind:    TypeTask,
-			Name:    "Print",
-			Params:  nil,
-			Results: nil,
-		},
-	})
 }
 
 func (c *Checker) declarePackages(scope *Scope) {
@@ -1682,10 +1671,6 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
-		if id.Name.Name == "Print" {
-			return VoidType
-		}
-
 		sym := scope.Lookup(id.Name.Name)
 		if sym == nil {
 			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
@@ -2860,7 +2845,7 @@ func DebugSummary(scope *Scope) string {
 
 	for _, sym := range scope.Symbols {
 		switch sym.Name {
-		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring", "Assert", "Print":
+		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring", "Assert":
 			continue
 		}
 
