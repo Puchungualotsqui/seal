@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"seal/internal/checker"
+	cgen "seal/internal/codegen"
 	"seal/internal/diag"
 	"seal/internal/lexer"
 	"seal/internal/parser"
@@ -34,6 +35,9 @@ func main() {
 	case "check":
 		runCheck(os.Args[2])
 
+	case "emit-c":
+		runEmitC(os.Args[2])
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		printUsage()
@@ -46,6 +50,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  sealc lex <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc parse <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc resolve <file.seal>")
+	fmt.Fprintln(os.Stderr, "  sealc check <file.seal>")
+	fmt.Fprintln(os.Stderr, "  sealc emit-c <file.seal>")
 }
 
 func readAndLex(path string) ([]token.Token, *diag.Reporter) {
@@ -156,6 +162,49 @@ func runCheck(path string) {
 	}
 
 	fmt.Println(checker.DebugSummary(scope))
+}
+
+func runEmitC(path string) {
+	tokens, reporter := readAndLex(path)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(file)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	c := checker.New(reporter)
+	c.CheckFile(file)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	g := cgen.New(reporter)
+	out := g.Generate(file)
+
+	if reporter.HasErrors() {
+		fmt.Fprint(os.Stderr, reporter.String())
+		os.Exit(1)
+	}
+
+	fmt.Print(out)
 }
 
 func printToken(tok token.Token) {

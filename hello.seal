@@ -1,0 +1,15 @@
+Vec2 :: struct {
+    x f32
+    y f32
+}
+
+LengthSq :: task(v Vec2) f32 {
+    return v.x * v.x + v.y * v.y
+}
+
+Main :: task() {
+    v := Vec2{x = 3.0, y = 4.0}
+    result := LengthSq(v)
+
+    Print(result)
+}

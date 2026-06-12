@@ -1381,6 +1381,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if id.Name.Name == "Print" {
+			return VoidType
+		}
+
 		sym := scope.Lookup(id.Name.Name)
 		if sym == nil {
 			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
