@@ -314,6 +314,87 @@ func typeNameFromAst(t ast.Type) string {
 	return named.Parts[len(named.Parts)-1].Name
 }
 
+func isBuiltinTypeName(name string) bool {
+	switch name {
+	case "void",
+		"bool",
+		"int",
+		"u8",
+		"usize",
+		"char",
+		"rawptr",
+		"any",
+		"cstring",
+		"f32",
+		"f64",
+		"string":
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (g *Generator) isLocalValueName(name string) bool {
+	if g.scope == nil {
+		return false
+	}
+
+	_, ok := g.scope.lookup(name)
+	return ok
+}
+
+func (g *Generator) cTypeFromSizeArg(expr ast.Expr) (CType, bool) {
+	id, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return CInvalid, false
+	}
+
+	name := id.Name.Name
+
+	if g.isLocalValueName(name) {
+		return CInvalid, false
+	}
+
+	if isBuiltinTypeName(name) ||
+		g.structs[name] != nil ||
+		g.enums[name] != nil ||
+		g.unions[name] != nil ||
+		g.interfaces[name] != nil {
+		return g.cTypeFromAst(&ast.NamedType{
+			Parts: []ast.Ident{id.Name},
+		}), true
+	}
+
+	return CInvalid, false
+}
+
+func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
+	if len(e.Args) != 1 {
+		g.error(e.Span(), "size expects 1 argument")
+		return "0"
+	}
+
+	if typ, ok := g.cTypeFromSizeArg(e.Args[0]); ok {
+		return fmt.Sprintf("(size_t)sizeof(%s)", typ.Name)
+	}
+
+	argType := g.inferExprType(e.Args[0], nil)
+
+	if argType.SealName == "string" {
+		value := g.emitExpr(e.Args[0], nil)
+		return fmt.Sprintf("(%s).byte_len", value)
+	}
+
+	if argType.SealName == "cstring" {
+		g.error(e.Args[0].Span(), "size(cstring) is not supported because cstring length requires scanning memory")
+		return "0"
+	}
+
+	value := g.emitExpr(e.Args[0], nil)
+	return fmt.Sprintf("(size_t)sizeof(%s)", value)
+}
+
 func (g *Generator) emitEnums(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.EnumDecl)
@@ -1696,6 +1777,10 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
 		return g.emitLenCall(e)
 	}
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+		return g.emitSizeCall(e)
+	}
+
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		argTypes := make([]CType, 0, len(e.Args))
 		for _, arg := range e.Args {
@@ -2633,6 +2718,10 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+			return CUsize
+		}
+
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
 			return CUsize
 		}
 

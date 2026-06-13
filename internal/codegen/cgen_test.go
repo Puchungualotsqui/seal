@@ -1062,3 +1062,41 @@ Main :: task() {
 		t.Fatalf("expected value byte write, got:\n%s", out)
 	}
 }
+
+func TestGenerateSizePrimitiveTypeAndValue(t *testing.T) {
+	out, reporter := generate(t, `
+Goblin :: struct {
+    hp int
+}
+
+Main :: task() {
+    x := 10
+    s := "ñ"
+
+    a: usize = size(int)
+    b: usize = size(Goblin)
+    c: usize = size(x)
+    d: usize = size(s)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "size_t a = (size_t)sizeof(int);") {
+		t.Fatalf("expected size(int), got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "size_t b = (size_t)sizeof(Goblin);") {
+		t.Fatalf("expected size(Goblin), got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "size_t c = (size_t)sizeof(x);") {
+		t.Fatalf("expected size(x), got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "size_t d = (s).byte_len;") {
+		t.Fatalf("expected size(s) as string byte length, got:\n%s", out)
+	}
+}

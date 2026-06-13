@@ -2074,6 +2074,11 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 		return []*Type{result}
 	}
 
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+		result := c.checkSizeCall(e.Args, argTypes, e.Span())
+		return []*Type{result}
+	}
+
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		sym := scope.Lookup(id.Name.Name)
 		if sym == nil {
@@ -2127,6 +2132,10 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
 		return c.checkLenCall(e.Args, argTypes, e.Span())
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+		return c.checkSizeCall(e.Args, argTypes, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2323,6 +2332,30 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+	if len(argTypes) != 1 {
+		c.diags.Add(span, fmt.Sprintf("size expects 1 argument, got %d", len(argTypes)))
+		return UsizeType
+	}
+
+	t := argTypes[0]
+	if t == nil || t.Kind == TypeInvalid {
+		return UsizeType
+	}
+
+	switch t.Kind {
+	case TypeVoid,
+		TypeNil,
+		TypePackage,
+		TypeTask,
+		TypeEnumLiteral:
+		c.diags.Add(args[0].Span(), fmt.Sprintf("size does not support %s", t.String()))
+		return UsizeType
+	}
+
+	return UsizeType
 }
 
 func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {

@@ -219,7 +219,8 @@ func (r *Resolver) declareBuiltins() {
 	builtinTasks := []string{
 		"Assert",
 		"len",
-		"Len",
+		"size",
+		"Size",
 		"anyAs",
 		"anyIs",
 		"Trap",
@@ -247,16 +248,21 @@ func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, spa
 	}
 
 	if existing := scope.LookupVisible(name); existing != nil {
-		r.diags.Add(
-			span,
-			fmt.Sprintf(
-				"declaration of %q shadows visible %s declared at %s",
-				name,
-				existing.Kind.String(),
-				existing.Span.String(),
-			),
-		)
-		return nil
+		if existing.Builtin && existing.Kind == SymbolBuiltinTask {
+			// Builtin compiler tasks like len/size/Assert can be shadowed by
+			// ordinary locals/params. Builtin types remain protected.
+		} else {
+			r.diags.Add(
+				span,
+				fmt.Sprintf(
+					"declaration of %q shadows visible %s declared at %s",
+					name,
+					existing.Kind.String(),
+					existing.Span.String(),
+				),
+			)
+			return nil
+		}
 	}
 
 	sym := &Symbol{

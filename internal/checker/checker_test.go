@@ -1994,3 +1994,38 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestSizePrimitiveTypeAndValue(t *testing.T) {
+	_, reporter := check(t, `
+Goblin :: struct {
+    hp int
+}
+
+Main :: task() {
+    x := 10
+    s := "ñ"
+
+    a: usize = size(int)
+    b: usize = size(Goblin)
+    c: usize = size(x)
+    d: usize = size(s)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectSizeCString(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    cs := c"hello"
+    n := size(cs)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("checker should allow size(cstring); codegen rejects it for now only if emitted:\n%s", reporter.String())
+	}
+}
