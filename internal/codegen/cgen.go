@@ -1552,11 +1552,24 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 			return "0"
 		}
 
+		if leftType.SealName == "rawptr" {
+			return fmt.Sprintf("((unsigned char *)(%s))[%s]", left, index)
+		}
+
 		if leftType.IsVariadic {
 			return fmt.Sprintf("(%s).data[%s]", left, index)
 		}
 
-		return fmt.Sprintf("%s[%s]", left, index)
+		if leftType.IsArray {
+			return fmt.Sprintf("%s[%s]", left, index)
+		}
+
+		if g.isByteIndexableCType(leftType) {
+			return g.emitByteIndexExpr(e, leftType, left, index)
+		}
+
+		g.error(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
+		return "0"
 
 	case *ast.ArrayLiteralExpr:
 		var values []string
@@ -2710,8 +2723,16 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			return CInvalid
 		}
 
+		if leftType.SealName == "rawptr" {
+			return CU8
+		}
+
 		if (leftType.IsArray || leftType.IsVariadic) && leftType.Elem != nil {
 			return *leftType.Elem
+		}
+
+		if g.isByteIndexableCType(leftType) {
+			return CU8
 		}
 
 		return CInvalid
@@ -2858,6 +2879,88 @@ func (g *Generator) conversionScore(dst CType, src CType) (int, bool) {
 	}
 
 	return 0, false
+}
+
+func (g *Generator) isByteIndexableCType(t CType) bool {
+	if t.IsArray || t.IsVariadic {
+		return false
+	}
+
+	switch t.SealName {
+	case "",
+		"<invalid>",
+		"void",
+		"nil",
+		"string",
+		"cstring":
+		return false
+
+	default:
+		return true
+	}
+}
+
+func (g *Generator) isScalarByteIndexableCType(t CType) bool {
+	if t.IsArray || t.IsVariadic {
+		return false
+	}
+
+	switch t.SealName {
+	case "bool",
+		"int",
+		"u8",
+		"usize",
+		"char",
+		"f32",
+		"f64",
+		"rawptr":
+		return true
+
+	default:
+		return strings.HasPrefix(t.SealName, "*")
+	}
+}
+
+func (g *Generator) isAddressableByteSource(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		_, ok := g.scope.lookup(e.Name.Name)
+		return ok
+
+	case *ast.SelectorExpr:
+		return g.isAddressableByteSource(e.Left)
+
+	case *ast.UnaryExpr:
+		return e.Op == token.Star
+
+	case *ast.IndexExpr:
+		leftType := g.inferExprType(e.Left, nil)
+
+		if leftType.IsArray || leftType.IsVariadic || leftType.SealName == "rawptr" {
+			return true
+		}
+
+		if g.isByteIndexableCType(leftType) {
+			return g.isAddressableByteSource(e.Left)
+		}
+
+		return false
+	}
+
+	return false
+}
+
+func (g *Generator) emitByteIndexExpr(e *ast.IndexExpr, leftType CType, left string, index string) string {
+	if g.isAddressableByteSource(e.Left) {
+		return fmt.Sprintf("((unsigned char *)&(%s))[%s]", left, index)
+	}
+
+	if g.isScalarByteIndexableCType(leftType) {
+		return fmt.Sprintf("((unsigned char *)&(%s){%s})[%s]", leftType.Name, left, index)
+	}
+
+	g.error(e.Left.Span(), "byte indexing a non-addressable composite value requires assigning it to a variable first")
+	return "0"
 }
 
 func (g *Generator) isUnion(t CType) bool {

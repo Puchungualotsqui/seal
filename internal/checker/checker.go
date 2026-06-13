@@ -560,7 +560,7 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 
 	if src.Kind == TypeUntypedInt {
 		switch dst.Kind {
-		case TypeInt, TypeUsize:
+		case TypeInt, TypeUsize, TypeU8:
 			return 1, true
 		case TypeF32, TypeF64:
 			return 2, true
@@ -1534,6 +1534,12 @@ func (c *Checker) checkAssignStmt(scope *Scope, s *ast.AssignStmt) {
 		if containerType.Kind == TypeCstring {
 			c.diags.Add(index.Span(), "cannot assign to cstring index")
 		}
+
+		if c.isByteIndexableValue(containerType) && containerType.Kind != TypeRawptr {
+			if !c.isAddressableExpr(scope, index.Left) {
+				c.diags.Add(index.Left.Span(), "byte-index assignment requires an addressable value")
+			}
+		}
 	}
 
 	leftType := c.checkExpr(scope, s.Left)
@@ -2430,11 +2436,18 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 	case TypeString:
 		return CharType
 
+	case TypeRawptr:
+		return U8Type
+
 	case TypeCstring:
 		c.diags.Add(e.Left.Span(), "cstring does not support character indexing")
 		return InvalidType
 
 	default:
+		if c.isByteIndexableValue(leftType) {
+			return U8Type
+		}
+
 		c.diags.Add(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
 		return InvalidType
 	}
@@ -2789,6 +2802,7 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	if src.Kind == TypeUntypedInt {
 		return dst.Kind == TypeInt ||
 			dst.Kind == TypeUsize ||
+			dst.Kind == TypeU8 ||
 			dst.Kind == TypeF32 ||
 			dst.Kind == TypeF64
 	}
@@ -2896,6 +2910,52 @@ func (c *Checker) isNumeric(t *Type) bool {
 	default:
 		return false
 	}
+}
+
+func (c *Checker) isByteIndexableValue(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeInvalid,
+		TypeVoid,
+		TypeNil,
+		TypePackage,
+		TypeTask,
+		TypeEnumLiteral,
+		TypeArray,
+		TypeVariadic,
+		TypeString,
+		TypeCstring:
+		return false
+
+	default:
+		return true
+	}
+}
+
+func (c *Checker) isAddressableExpr(scope *Scope, expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		return sym != nil && sym.Kind == SymbolVar
+
+	case *ast.SelectorExpr:
+		return c.isAddressableExpr(scope, e.Left)
+
+	case *ast.IndexExpr:
+		leftType := c.checkExpr(scope, e.Left)
+		return leftType.Kind == TypeArray ||
+			leftType.Kind == TypeVariadic ||
+			leftType.Kind == TypeRawptr ||
+			c.isAddressableExpr(scope, e.Left)
+
+	case *ast.UnaryExpr:
+		return e.Op == token.Star
+	}
+
+	return false
 }
 
 func (c *Checker) isIndexType(t *Type) bool {

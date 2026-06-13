@@ -1016,3 +1016,49 @@ Main :: task() {
 		t.Fatalf("expected interface dispatch, got:\n%s", out)
 	}
 }
+
+func TestGenerateRawptrByteIndexReadWrite(t *testing.T) {
+	out, reporter := generate(t, `
+malloc :: extern("malloc") task(size usize) rawptr
+
+Main :: task() {
+    ptr := malloc(4)
+    ptr[0] = 255
+    b := ptr[0]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "((unsigned char *)(ptr))[0] = 255;") {
+		t.Fatalf("expected rawptr byte write, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "unsigned char b = ((unsigned char *)(ptr))[0];") {
+		t.Fatalf("expected rawptr byte read, got:\n%s", out)
+	}
+}
+
+func TestGenerateValueByteIndexReadWrite(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    x := 300
+    b := x[0]
+    x[0] = b
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "unsigned char b = ((unsigned char *)&(x))[0];") {
+		t.Fatalf("expected value byte read, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "((unsigned char *)&(x))[0] = b;") {
+		t.Fatalf("expected value byte write, got:\n%s", out)
+	}
+}

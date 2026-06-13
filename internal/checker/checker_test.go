@@ -1948,3 +1948,49 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestRawptrByteIndexReadWrite(t *testing.T) {
+	_, reporter := check(t, `
+malloc :: extern("malloc") task(size usize) rawptr
+
+Main :: task() {
+    ptr := malloc(4)
+    ptr[0] = 255
+    b := ptr[0]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestValueByteIndexReadWrite(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    x := 300
+    b := x[0]
+    x[0] = b
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectByteIndexAssignmentToNonAddressableValue(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    (10)[0] = 1
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "byte-index assignment requires an addressable value") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
