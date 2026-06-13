@@ -222,9 +222,7 @@ func (r *Resolver) declareBuiltins() {
 		"size",
 		"anyAs",
 		"anyIs",
-		"Trap",
-		"Panic",
-		"Unreachable",
+		"panic",
 	}
 
 	for _, name := range builtinTasks {
