@@ -199,11 +199,11 @@ void fmt_writeAny(sealAny v) {
 void fmt_Print(sealString format, sealVariadic_any args) {
 	int argIndex = 0;
 	int i = 0;
-	for (; (i < sealString_len(format)); ) {
+	for (; (i < (format).byte_len); ) {
 		uint32_t ch = sealString_at(format, (ptrdiff_t)(i));
 		if ((ch == 37)) {
 			int next = (i + 1);
-			if (((next < sealString_len(format)) && (sealString_at(format, (ptrdiff_t)(next)) == 37))) {
+			if (((next < (format).byte_len) && (sealString_at(format, (ptrdiff_t)(next)) == 37))) {
 				seal_fmt_write_char(37);
 				i = (i + 2);
 			} else {

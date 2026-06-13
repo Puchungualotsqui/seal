@@ -1951,10 +1951,6 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 		return fmt.Sprintf("(size_t)%s", argType.ArrayLen)
 	}
 
-	if argType.SealName == "string" {
-		return fmt.Sprintf("sealString_len(%s)", arg)
-	}
-
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
 	return "0"
 }

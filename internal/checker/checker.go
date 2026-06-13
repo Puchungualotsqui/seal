@@ -2370,7 +2370,7 @@ func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Sp
 	}
 
 	switch t.Kind {
-	case TypeArray, TypeVariadic, TypeString:
+	case TypeArray, TypeVariadic:
 		return UsizeType
 
 	default:

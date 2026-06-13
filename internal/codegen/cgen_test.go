@@ -718,7 +718,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"world"
 
-    n: usize = len(s)
+    n: usize = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -755,8 +755,8 @@ Main :: task() {
 		t.Fatalf("expected char lowering for ñ, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "size_t n = sealString_len(s);") {
-		t.Fatalf("expected len(s) lowering, got:\n%s", out)
+	if !strings.Contains(out, "size_t n = (s).byte_len;") {
+		t.Fatalf("expected size(s) lowering, got:\n%s", out)
 	}
 
 	if !strings.Contains(out, "uint32_t h = sealString_at(s, (ptrdiff_t)(0));") {

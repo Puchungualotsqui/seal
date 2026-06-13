@@ -43,13 +43,13 @@ Print :: task(format string, args ...any) {
     argIndex := 0
     i := 0
 
-    for i < len(format) {
+    for i < size(format) {
         ch := format[i]
 
         if ch == '%' {
             next := i + 1
 
-            if next < len(format) && format[next] == '%' {
+            if next < size(format) && format[next] == '%' {
                 writeChar('%')
                 i = i + 2
             } else {
@@ -59,7 +59,6 @@ Print :: task(format string, args ...any) {
                 } else {
                     writeChar('%')
                 }
-
                 i = i + 1
             }
         } else {

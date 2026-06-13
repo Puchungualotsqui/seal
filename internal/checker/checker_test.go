@@ -1271,7 +1271,7 @@ Main :: task() {
 
     case string:
         s := anyAs<string>(value)
-        Assert(len(s) > 0)
+        Assert(size(s) > 0)
     }
 }
 `)
@@ -1431,7 +1431,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"hola"
 
-    n: usize = len(s)
+    n: usize = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -1487,7 +1487,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"hola"
 
-    n: usize = len(s)
+    n: usize = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -2027,5 +2027,22 @@ Main :: task() {
 
 	if reporter.HasErrors() {
 		t.Fatalf("checker should allow size(cstring); codegen rejects it for now only if emitted:\n%s", reporter.String())
+	}
+}
+
+func TestRejectLenString(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hello"
+    n := len(s)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "len does not support string") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
