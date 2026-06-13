@@ -16,6 +16,7 @@ const (
 	// Keywords
 	KeywordTask
 	KeywordPure
+	KeywordIntrinsic
 	KeywordTest
 	KeywordStruct
 	KeywordInterface
@@ -88,6 +89,7 @@ const (
 var keywordKinds = map[string]Kind{
 	"task":      KeywordTask,
 	"pure":      KeywordPure,
+	"intrinsic": KeywordIntrinsic,
 	"test":      KeywordTest,
 	"struct":    KeywordStruct,
 	"interface": KeywordInterface,
@@ -143,6 +145,8 @@ func (k Kind) String() string {
 		return "task"
 	case KeywordPure:
 		return "pure"
+	case KeywordIntrinsic:
+		return "intrinsic"
 	case KeywordTest:
 		return "test"
 	case KeywordStruct:

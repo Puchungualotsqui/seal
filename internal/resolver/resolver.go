@@ -217,10 +217,9 @@ func (r *Resolver) declareBuiltins() {
 	}
 
 	builtinTasks := []string{
-		"Assert",
+		"assert",
 		"len",
 		"size",
-		"Size",
 		"anyAs",
 		"anyIs",
 		"Trap",
@@ -249,8 +248,6 @@ func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, spa
 
 	if existing := scope.LookupVisible(name); existing != nil {
 		if existing.Builtin && existing.Kind == SymbolBuiltinTask {
-			// Builtin compiler tasks like len/size/Assert can be shadowed by
-			// ordinary locals/params. Builtin types remain protected.
 		} else {
 			r.diags.Add(
 				span,
@@ -458,7 +455,9 @@ func (r *Resolver) resolveTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		r.resolveType(taskScope, result)
 	}
 
-	r.resolveBlockInScope(d.Body, taskScope, false)
+	if d.Body != nil {
+		r.resolveBlockInScope(d.Body, taskScope, false)
+	}
 }
 
 func (r *Resolver) resolveBlockInScope(block *ast.BlockStmt, parent *Scope, createChild bool) {

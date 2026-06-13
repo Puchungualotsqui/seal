@@ -276,7 +276,7 @@ func TestCStyleFor(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     for i := 0; i < 10; i = i + 1 {
-        Assert(true)
+        assert(true)
     }
 }
 `)
@@ -1101,7 +1101,7 @@ Sum :: task(args ...int) int {
 
 Main :: task() {
     result := Sum(1, 2, 3)
-    Assert(result == 6)
+    assert(result == 6)
 }
 `)
 
@@ -1119,7 +1119,7 @@ CountAny :: task(args ...any) usize {
 Main :: task() {
     x: any = 10
     count := CountAny(x, "hello", 3.14)
-    Assert(count == 3)
+    assert(count == 3)
 }
 `)
 
@@ -1159,7 +1159,7 @@ Main :: task() {
     b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
 
     count := TakeArrays(a, b)
-    Assert(count == 2)
+    assert(count == 2)
 }
 `)
 
@@ -1173,7 +1173,7 @@ func TestInferredArrayOfAnyIsValid(t *testing.T) {
 Main :: task() {
     anyArr: []any = [2, 3, 4, 5, 6]
     n: usize = len(anyArr)
-    Assert(n == 5)
+    assert(n == 5)
 }
 `)
 
@@ -1187,7 +1187,7 @@ func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
 Main :: task() {
     values: []any = [2, "hello", 3.14, true]
     n: usize = len(values)
-    Assert(n == 4)
+    assert(n == 4)
 }
 `)
 
@@ -1233,7 +1233,7 @@ Main :: task() {
 
     if anyIs<int>(value) {
         x := anyAs<int>(value)
-        Assert(x == 10)
+        assert(x == 10)
     }
 }
 `)
@@ -1267,11 +1267,11 @@ Main :: task() {
     @partial switch value type {
     case int:
         x := anyAs<int>(value)
-        Assert(x == 10)
+        assert(x == 10)
 
     case string:
         s := anyAs<string>(value)
-        Assert(size(s) > 0)
+        assert(size(s) > 0)
     }
 }
 `)
@@ -1289,7 +1289,7 @@ Main :: task() {
     switch value type {
     case int:
         x := anyAs<int>(value)
-        Assert(x == 10)
+        assert(x == 10)
     }
 }
 `)
@@ -1311,10 +1311,10 @@ Main :: task() {
     switch value type {
     case int:
         x := anyAs<int>(value)
-        Assert(x == 10)
+        assert(x == 10)
 
     default:
-        Assert(true)
+        assert(true)
     }
 }
 `)
@@ -1336,9 +1336,9 @@ Main :: task() {
 
     switch e {
     case .None:
-        Assert(true)
+        assert(true)
     case .None:
-        Assert(false)
+        assert(false)
     }
 }
 `)
@@ -1363,9 +1363,9 @@ Main :: task() {
 
     switch shape in s {
     case Circle:
-        Assert(true)
+        assert(true)
     case Circle:
-        Assert(false)
+        assert(false)
     }
 }
 `)
@@ -1388,9 +1388,9 @@ Main :: task() {
 
     switch shape in s {
     case nil:
-        Assert(true)
+        assert(true)
     case nil:
-        Assert(false)
+        assert(false)
     }
 }
 `)
@@ -1412,9 +1412,9 @@ Main :: task() {
 
     switch e {
     default:
-        Assert(true)
+        assert(true)
     default:
-        Assert(false)
+        assert(false)
     }
 }
 `)
@@ -1436,10 +1436,10 @@ Main :: task() {
     o: char = s[1]
     a: char = s[-1]
 
-    Assert(n == 4)
-    Assert(h == 'h')
-    Assert(o == 'o')
-    Assert(a == 'a')
+    assert(n == 4)
+    assert(h == 'h')
+    assert(o == 'o')
+    assert(a == 'a')
 }
 `)
 
@@ -1492,11 +1492,11 @@ Main :: task() {
     o: char = s[1]
     a: char = s[-1]
 
-    Assert(c == 'ñ')
-    Assert(n == 4)
-    Assert(h == 'h')
-    Assert(o == 'o')
-    Assert(a == 'a')
+    assert(c == 'ñ')
+    assert(n == 4)
+    assert(h == 'h')
+    assert(o == 'o')
+    assert(a == 'a')
 }
 `)
 
@@ -1571,7 +1571,7 @@ Sum :: task(values ...int) int {
 Main :: task() {
     a: []int = [1, 2, 3]
     result := Sum(a...)
-    Assert(result == 6)
+    assert(result == 6)
 }
 `)
 
@@ -1598,7 +1598,7 @@ Forward :: task(values ...int) int {
 
 Main :: task() {
     result := Forward(1, 2, 3)
-    Assert(result == 6)
+    assert(result == 6)
 }
 `)
 
@@ -1622,7 +1622,7 @@ Example :: task(prefix int, values ...int) int {
 Main :: task() {
     a: []int = [1, 2, 3]
     result := Example(10, a...)
-    Assert(result == 16)
+    assert(result == 16)
 }
 `)
 
@@ -1645,7 +1645,7 @@ Example :: task(a, b ...int) int {
 
 Main :: task() {
     result := Example(10, 1, 2, 3)
-    Assert(result == 16)
+    assert(result == 16)
 }
 `)
 
@@ -1837,7 +1837,7 @@ Main :: task() {
     g := Goblin{hp = 10}
     e: Enemy = &g
     hp := Health(e)
-    Assert(hp == 10)
+    assert(hp == 10)
 }
 `)
 
@@ -2043,6 +2043,90 @@ Main :: task() {
 	}
 
 	if !strings.Contains(reporter.String(), "len does not support string") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestIntrinsicStructAndTaskDeclarations(t *testing.T) {
+	_, reporter := check(t, `
+Handle :: intrinsic struct {
+    ptr rawptr
+}
+
+ByteSize :: pure intrinsic task(value any) usize
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestTrustedPureExternTask(t *testing.T) {
+	_, reporter := check(t, `
+strlen :: @trusted_pure extern("strlen") task(s cstring) usize
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectPureExternTask(t *testing.T) {
+	_, reporter := check(t, `
+strlen :: pure extern("strlen") task(s cstring) usize
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "extern task cannot be marked pure") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestLowercaseAssertPrimitive(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    assert(true)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectOldAssertPrimitive(t *testing.T) {
+	file := source.NewFile("test.seal", `
+Main :: task() {
+    Assert(true)
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `undefined symbol "Assert"`) {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }

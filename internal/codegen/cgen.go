@@ -109,6 +109,10 @@ type TaskInfo struct {
 
 	IsExtern   bool
 	ExternName string
+
+	IsPure        bool
+	IsIntrinsic   bool
+	IsTrustedPure bool
 }
 
 type PackageInfo struct {
@@ -190,6 +194,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.line("#include <stdint.h>")
 	g.line("#include <stddef.h>")
 	g.line("#include <stdio.h>")
+	g.line("#include <assert.h>")
 	g.line("")
 	g.line("#ifndef NULL")
 	g.line("#define NULL ((void*)0)")
@@ -257,6 +262,9 @@ func (g *Generator) collect(file *ast.File) {
 				RequiredParams: len(d.Params),
 				IsExtern:       d.IsExtern,
 				ExternName:     d.ExternName,
+				IsPure:         d.IsPure,
+				IsIntrinsic:    d.IsIntrinsic,
+				IsTrustedPure:  d.IsTrustedPure,
 			}
 
 			for _, result := range d.Results {
@@ -395,6 +403,16 @@ func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
 	return fmt.Sprintf("(size_t)sizeof(%s)", value)
 }
 
+func (g *Generator) emitAssertCall(e *ast.CallExpr) string {
+	if len(e.Args) != 1 {
+		g.error(e.Span(), "assert expects 1 argument")
+		return "assert(false)"
+	}
+
+	cond := g.emitExpr(e.Args[0], &CBool)
+	return fmt.Sprintf("assert(%s)", cond)
+}
+
 func (g *Generator) emitEnums(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.EnumDecl)
@@ -424,6 +442,10 @@ func (g *Generator) emitStructs(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.StructDecl)
 		if !ok {
+			continue
+		}
+
+		if d.IsIntrinsic {
 			continue
 		}
 
@@ -621,7 +643,7 @@ func (g *Generator) packageTaskSignature(packageName string, taskName string, in
 func (g *Generator) emitTaskPrototypes(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.TaskDecl)
-		if !ok || d.IsTest {
+		if !ok || d.IsTest || d.IsIntrinsic {
 			continue
 		}
 
@@ -636,7 +658,7 @@ func (g *Generator) emitTaskPrototypes(file *ast.File) {
 func (g *Generator) emitTasks(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.TaskDecl)
-		if !ok || d.IsTest {
+		if !ok || d.IsTest || d.IsExtern || d.IsIntrinsic {
 			continue
 		}
 
@@ -1774,11 +1796,14 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		return g.emitGenericIntrinsicCall(gen, e.Args)
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !g.isLocalValueName("len") {
 		return g.emitLenCall(e)
 	}
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !g.isLocalValueName("size") {
 		return g.emitSizeCall(e)
+	}
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !g.isLocalValueName("assert") {
+		return g.emitAssertCall(e)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2561,6 +2586,14 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 			return []CType{CUsize}
 		}
 
+		if id.Name.Name == "size" {
+			return []CType{CUsize}
+		}
+
+		if id.Name.Name == "assert" {
+			return []CType{CVoid}
+		}
+
 		if info, ok := g.tasks[id.Name.Name]; ok {
 			return info.ReturnTypes
 		}
@@ -2713,12 +2746,16 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return left
 
 	case *ast.CallExpr:
-		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !g.isLocalValueName("len") {
 			return CUsize
 		}
 
-		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !g.isLocalValueName("size") {
 			return CUsize
+		}
+
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !g.isLocalValueName("assert") {
+			return CVoid
 		}
 
 		if gen, ok := e.Callee.(*ast.GenericExpr); ok {

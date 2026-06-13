@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <assert.h>
 
 #ifndef NULL
 #define NULL ((void*)0)

@@ -71,6 +71,10 @@ type Type struct {
 	IsVariadic      bool
 	IsExtern        bool
 	ExternName      string
+
+	IsPure        bool
+	IsIntrinsic   bool
+	IsTrustedPure bool
 }
 
 type EnumVariantInfo struct {
@@ -650,17 +654,6 @@ func (c *Checker) declareBuiltins(scope *Scope) {
 			Type: typ,
 		})
 	}
-
-	scope.Declare(&Symbol{
-		Name: "Assert",
-		Kind: SymbolTask,
-		Type: &Type{
-			Kind:    TypeTask,
-			Name:    "Assert",
-			Params:  []*Type{BoolType},
-			Results: nil,
-		},
-	})
 }
 
 func (c *Checker) declarePackages(scope *Scope) {
@@ -1249,9 +1242,22 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	c.checkTaskDefaultParameters(parent, d, taskType)
 
 	if d.IsExtern {
+		if d.IsPure && !d.IsTrustedPure {
+			c.diags.Add(d.Name.Span(), "extern task cannot be marked pure; use @trusted_pure extern(...) if this C function is safe to treat as pure")
+		}
+
 		if d.Body != nil {
 			c.diags.Add(d.Body.Span(), fmt.Sprintf("extern task %q cannot have a body", d.Name.Name))
 		}
+
+		return
+	}
+
+	if d.IsIntrinsic {
+		if d.Body != nil {
+			c.diags.Add(d.Body.Span(), fmt.Sprintf("intrinsic task %q cannot have a body", d.Name.Name))
+		}
+
 		return
 	}
 
@@ -1332,6 +1338,9 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 		IsVariadic:      isVariadic,
 		IsExtern:        d.IsExtern,
 		ExternName:      d.ExternName,
+		IsPure:          d.IsPure,
+		IsIntrinsic:     d.IsIntrinsic,
+		IsTrustedPure:   d.IsTrustedPure,
 	}
 }
 
@@ -2069,13 +2078,18 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 		return []*Type{result}
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !c.isShadowedPrimitive(scope, "len") {
 		result := c.checkLenCall(e.Args, argTypes, e.Span())
 		return []*Type{result}
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !c.isShadowedPrimitive(scope, "size") {
 		result := c.checkSizeCall(e.Args, argTypes, e.Span())
+		return []*Type{result}
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !c.isShadowedPrimitive(scope, "assert") {
+		result := c.checkAssertCall(e.Args, argTypes, e.Span())
 		return []*Type{result}
 	}
 
@@ -2130,12 +2144,16 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !c.isShadowedPrimitive(scope, "len") {
 		return c.checkLenCall(e.Args, argTypes, e.Span())
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" {
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !c.isShadowedPrimitive(scope, "size") {
 		return c.checkSizeCall(e.Args, argTypes, e.Span())
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !c.isShadowedPrimitive(scope, "assert") {
+		return c.checkAssertCall(e.Args, argTypes, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -3275,6 +3293,24 @@ func (c *Checker) checkTypeSwitch(scope *Scope, s *ast.SwitchStmt, targetType *T
 	}
 }
 
+func (c *Checker) checkAssertCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+	if len(argTypes) != 1 {
+		c.diags.Add(span, fmt.Sprintf("assert expects 1 argument, got %d", len(argTypes)))
+		return VoidType
+	}
+
+	t := argTypes[0]
+	if t == nil || t.Kind == TypeInvalid {
+		return VoidType
+	}
+
+	if !c.sameType(t, BoolType) {
+		c.diags.Add(args[0].Span(), fmt.Sprintf("assert expects bool, got %s", t.String()))
+	}
+
+	return VoidType
+}
+
 func (c *Checker) checkDirectTaskCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
@@ -3523,6 +3559,10 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 	}
 }
 
+func (c *Checker) isShadowedPrimitive(scope *Scope, name string) bool {
+	return scope.Lookup(name) != nil
+}
+
 func ExportPackage(name string, scope *Scope) *PackageInfo {
 	info := &PackageInfo{
 		Name:    name,
@@ -3555,7 +3595,7 @@ func DebugSummary(scope *Scope) string {
 
 	for _, sym := range scope.Symbols {
 		switch sym.Name {
-		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring", "Assert":
+		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring":
 			continue
 		}
 

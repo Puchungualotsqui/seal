@@ -1100,3 +1100,24 @@ Main :: task() {
 		t.Fatalf("expected size(s) as string byte length, got:\n%s", out)
 	}
 }
+
+func TestGenerateAssertPrimitive(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    x := 10
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "#include <assert.h>") {
+		t.Fatalf("expected assert include, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "assert((x == 10));") {
+		t.Fatalf("expected assert lowering, got:\n%s", out)
+	}
+}

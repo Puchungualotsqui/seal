@@ -16,6 +16,13 @@ type Parser struct {
 	diags  *diag.Reporter
 }
 
+type declModifiers struct {
+	Pure        bool
+	Test        bool
+	Intrinsic   bool
+	TrustedPure bool
+}
+
 func New(tokens []token.Token, diags *diag.Reporter) *Parser {
 	return &Parser{
 		tokens: tokens,
@@ -54,62 +61,123 @@ func (p *Parser) parseDecl() ast.Decl {
 		return nil
 	}
 
+	name := ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}
+	mods := declModifiers{}
+
 	if p.match(token.At) {
 		dir := p.expectIdent("expected directive name after '@'")
 		if dir.Name == "" {
 			return nil
 		}
 
-		if dir.Name == "rawUnion" {
+		switch dir.Name {
+		case "rawUnion":
 			if !p.expect(token.KeywordUnion, "expected 'union' after @rawUnion") {
 				return nil
 			}
 
-			return p.parseUnionDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start, true)
-		}
+			return p.parseUnionDecl(name, start, true)
 
-		return p.parseDirectiveDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, dir, start)
+		case "trusted_pure":
+			mods.TrustedPure = true
+
+		default:
+			return p.parseDirectiveDecl(name, dir, start)
+		}
+	}
+
+	for {
+		switch {
+		case p.match(token.KeywordPure):
+			mods.Pure = true
+
+		case p.match(token.KeywordIntrinsic):
+			mods.Intrinsic = true
+
+		case p.match(token.KeywordTest):
+			mods.Test = true
+
+		default:
+			goto doneModifiers
+		}
+	}
+
+doneModifiers:
+
+	if mods.Test && mods.Pure {
+		p.errorHere("test task cannot be marked pure")
+		return nil
+	}
+
+	if mods.Test && mods.Intrinsic {
+		p.errorHere("test task cannot be intrinsic")
+		return nil
 	}
 
 	if p.at(token.Ident) && p.peek().Lexeme == "extern" {
 		p.advance()
-		return p.parseExternTaskDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
+
+		if mods.Intrinsic {
+			p.errorHere("extern task cannot be intrinsic")
+			return nil
+		}
+
+		return p.parseExternTaskDecl(name, start, mods)
 	}
 
-	if p.match(token.KeywordTest) {
+	if mods.TrustedPure {
+		p.errorHere("@trusted_pure can only be used before extern")
+		return nil
+	}
+
+	if mods.Intrinsic {
+		switch {
+		case p.match(token.KeywordTask):
+			return p.parseIntrinsicTaskDecl(name, start, mods)
+
+		case p.match(token.KeywordStruct):
+			return p.parseStructDecl(name, start, true)
+
+		default:
+			p.errorHere("expected 'task' or 'struct' after intrinsic")
+			return nil
+		}
+	}
+
+	if mods.Test {
 		if !p.expect(token.KeywordTask, "expected 'task' after 'test'") {
 			return nil
 		}
 
-		return p.parseTaskDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start, false, true)
+		return p.parseTaskDecl(name, start, false, true)
 	}
 
-	if p.match(token.KeywordPure) {
+	if mods.Pure {
 		if !p.expect(token.KeywordTask, "expected 'task' after 'pure'") {
 			return nil
 		}
 
-		return p.parseTaskDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start, true, false)
+		return p.parseTaskDecl(name, start, true, false)
 	}
 
 	switch {
 	case p.match(token.KeywordTask):
-		return p.parseTaskDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start, false, false)
+		return p.parseTaskDecl(name, start, false, false)
 
 	case p.match(token.KeywordStruct):
-		return p.parseStructDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
+		return p.parseStructDecl(name, start, false)
 
 	case p.match(token.KeywordEnum):
-		return p.parseEnumDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
+		return p.parseEnumDecl(name, start)
 
 	case p.match(token.KeywordUnion):
-		return p.parseUnionDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start, false)
+		return p.parseUnionDecl(name, start, false)
 
 	case p.match(token.KeywordInterface):
-		return p.parseInterfaceDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
+		return p.parseInterfaceDecl(name, start)
 
 	case p.match(token.KeywordImpl):
-		return p.parseImplDecl(ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}, start)
+		return p.parseImplDecl(name, start)
 
 	case p.match(token.KeywordOverload):
 		return p.parseOverloadDecl(nameTok.Lexeme, start)
@@ -121,7 +189,7 @@ func (p *Parser) parseDecl() ast.Decl {
 		}
 
 		return &ast.ConstDecl{
-			Name:  ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span},
+			Name:  name,
 			Value: value,
 			Loc:   p.span(start, value.Span().End),
 		}
@@ -163,7 +231,7 @@ func (p *Parser) parseDirectiveDecl(name ast.Ident, dir ast.Ident, start int) as
 	}
 }
 
-func (p *Parser) parseStructDecl(name ast.Ident, start int) ast.Decl {
+func (p *Parser) parseStructDecl(name ast.Ident, start int, intrinsic bool) ast.Decl {
 	params := p.parseGenericParamsIfPresent()
 
 	if !p.expect(token.LBrace, "expected '{' after struct declaration") {
@@ -195,10 +263,11 @@ func (p *Parser) parseStructDecl(name ast.Ident, start int) ast.Decl {
 	endTok := p.expectToken(token.RBrace, "expected '}' after struct fields")
 
 	return &ast.StructDecl{
-		Name:   name,
-		Params: params,
-		Fields: fields,
-		Loc:    p.span(start, endTok.Span.End),
+		Name:        name,
+		Params:      params,
+		Fields:      fields,
+		IsIntrinsic: intrinsic,
+		Loc:         p.span(start, endTok.Span.End),
 	}
 }
 
@@ -358,7 +427,7 @@ func (p *Parser) parseOverloadDecl(name string, start int) ast.Decl {
 	}
 }
 
-func (p *Parser) parseExternTaskDecl(name ast.Ident, start int) ast.Decl {
+func (p *Parser) parseExternTaskDecl(name ast.Ident, start int, mods declModifiers) ast.Decl {
 	if !p.expect(token.LParen, "expected '(' after extern") {
 		return nil
 	}
@@ -382,13 +451,32 @@ func (p *Parser) parseExternTaskDecl(name ast.Ident, start int) ast.Decl {
 	end := p.previous().Span.End
 
 	return &ast.TaskDecl{
-		Name:       name,
-		IsExtern:   true,
-		ExternName: strings.Trim(cNameTok.Lexeme, `"`),
-		Params:     params,
-		Results:    results,
-		Body:       nil,
-		Loc:        p.span(start, end),
+		Name:          name,
+		IsPure:        mods.Pure || mods.TrustedPure,
+		IsExtern:      true,
+		IsTrustedPure: mods.TrustedPure,
+		ExternName:    strings.Trim(cNameTok.Lexeme, `"`),
+		Params:        params,
+		Results:       results,
+		Body:          nil,
+		Loc:           p.span(start, end),
+	}
+}
+
+func (p *Parser) parseIntrinsicTaskDecl(name ast.Ident, start int, mods declModifiers) ast.Decl {
+	params := p.parseParamList()
+	results := p.parseExternResultTypes()
+
+	end := p.previous().Span.End
+
+	return &ast.TaskDecl{
+		Name:        name,
+		IsPure:      mods.Pure,
+		IsIntrinsic: true,
+		Params:      params,
+		Results:     results,
+		Body:        nil,
+		Loc:         p.span(start, end),
 	}
 }
 

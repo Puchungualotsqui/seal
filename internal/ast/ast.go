@@ -70,10 +70,11 @@ type GenericParam struct {
 }
 
 type StructDecl struct {
-	Name   Ident
-	Params []GenericParam
-	Fields []Field
-	Loc    source.Span
+	Name        Ident
+	Params      []GenericParam
+	Fields      []Field
+	IsIntrinsic bool
+	Loc         source.Span
 }
 
 type DeclStmt struct {
@@ -106,15 +107,17 @@ type Param struct {
 }
 
 type TaskDecl struct {
-	Name       Ident
-	IsPure     bool
-	IsTest     bool
-	IsExtern   bool
-	ExternName string
-	Params     []Param
-	Results    []Type
-	Body       *BlockStmt
-	Loc        source.Span
+	Name          Ident
+	IsPure        bool
+	IsTest        bool
+	IsExtern      bool
+	IsIntrinsic   bool
+	IsTrustedPure bool
+	ExternName    string
+	Params        []Param
+	Results       []Type
+	Body          *BlockStmt
+	Loc           source.Span
 }
 
 func (*TaskDecl) declNode() {}

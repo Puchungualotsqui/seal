@@ -57,7 +57,7 @@ Main :: task() int {
 func TestLexPureTestTask(t *testing.T) {
 	kinds, reporter := lexKinds(t, `
 SwitchTest :: test task() {
-    Assert(true)
+    assert(true)
 }
 
 Length :: pure task(x f32) f32 {

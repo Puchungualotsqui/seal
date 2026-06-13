@@ -142,7 +142,7 @@ LengthSq :: pure task(v Vec2) f32 {
 func TestParseTestTaskDecl(t *testing.T) {
 	file, reporter := parse(t, `
 SwitchTest :: test task() {
-    Assert(true)
+    assert(true)
 }
 `)
 
