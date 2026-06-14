@@ -1825,12 +1825,12 @@ Goblin :: struct {
     hp int
 }
 
-GoblinHealth :: task(g *Goblin) int {
+Health :: task(g *Goblin) int {
     return g.hp
 }
 
 Enemy<Goblin> :: impl {
-    Health :: GoblinHealth
+    Health :: Health
 }
 
 Main :: task() {

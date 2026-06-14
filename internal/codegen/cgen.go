@@ -3704,8 +3704,23 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 		}
 
 	case *ast.GenericType:
+		base := g.cTypeFromAst(typ.Base)
+
+		// Temporary support for generic interfaces:
+		//
+		//     Enemy<Goblin>
+		//
+		// Until monomorphization exists, the C representation is still the
+		// base interface object:
+		//
+		//     Enemy
+		//
+		if g.isInterfaceCType(base) {
+			return base
+		}
+
 		g.error(typ.Span(), "generic type instantiation is not supported by C codegen yet")
-		return g.cTypeFromAst(typ.Base)
+		return base
 	}
 
 	return CInvalid
