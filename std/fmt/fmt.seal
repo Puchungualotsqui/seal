@@ -2,7 +2,7 @@ writeCString :: extern("seal_fmt_write_cstring") task(s cstring)
 writeString :: extern("seal_fmt_write_string") task(s string)
 writeChar :: extern("seal_fmt_write_char") task(c char)
 writeInt :: extern("seal_fmt_write_int") task(v int)
-writeUsize :: extern("seal_fmt_write_usize") task(v usize)
+writeUint :: extern("seal_fmt_write_uint") task(v uint)
 writeF32 :: extern("seal_fmt_write_f32") task(v f32)
 writeF64 :: extern("seal_fmt_write_f64") task(v f64)
 writeBool :: extern("seal_fmt_write_bool") task(v bool)
@@ -13,8 +13,8 @@ writeAny :: task(v any) {
     case int:
         writeInt(anyAs<int>(v))
 
-    case usize:
-        writeUsize(anyAs<usize>(v))
+    case uint:
+        writeUint(anyAs<uint>(v))
 
     case f32:
         writeF32(anyAs<f32>(v))

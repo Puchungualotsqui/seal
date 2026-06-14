@@ -38,8 +38,8 @@ void seal_fmt_write_int(int v) {
     printf("%d", v);
 }
 
-void seal_fmt_write_usize(size_t v) {
-    printf("%zu", v);
+void seal_fmt_write_uint(uintptr_t v) {
+    printf("%zu", (size_t)v);
 }
 
 void seal_fmt_write_f32(float v) {

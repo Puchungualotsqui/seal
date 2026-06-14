@@ -1,8 +1,28 @@
 Main :: task() {
-    allocator := CAllocator{}
+    a: i8 = 1
+    b: i16 = 2
+    c: i32 = 3
+    d: i64 = 4
 
-    a: Allocator = &allocator
+    e: u8 = 1
+    f: u16 = 2
+    g: u32 = 3
+    h: u64 = 4
 
-    ptr := Alloc(a, 64)
-    Free(a, ptr)
+    i: int = 5
+    j: uint = 6
+
+    x: f32 = 1.5
+    y: f64 = 2.5
+
+    flag: bool = true
+    ch: char = 'A'
+    s: string = "hello"
+    cs: cstring = c"world"
+
+    p: rawptr = nil
+    v: any = i
+
+    assert(flag)
+    assert(anyIs<int>(v))
 }
