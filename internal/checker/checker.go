@@ -54,6 +54,7 @@ const (
 	TypeArray
 	TypeVariadic
 	TypeStruct
+	TypeDistinct
 	TypeEnum
 	TypeUnion
 	TypeInterface
@@ -92,6 +93,8 @@ type Type struct {
 	IsPure        bool
 	IsIntrinsic   bool
 	IsTrustedPure bool
+
+	Underlying *Type
 }
 
 type EnumVariantInfo struct {
@@ -163,6 +166,9 @@ func (t *Type) String() string {
 		return "any"
 	case TypeInvalid:
 		return "<invalid>"
+
+	case TypeDistinct:
+		return t.Name
 
 	case TypeUntypedInt:
 		return "untyped int"
@@ -606,6 +612,20 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		return 20, true
 	}
 
+	if dst.Kind == TypeDistinct {
+		if src.Kind == TypeUntypedInt || src.Kind == TypeUntypedFloat {
+			if c.assignable(dst.Underlying, src) {
+				return 1, true
+			}
+		}
+
+		return 0, false
+	}
+
+	if src.Kind == TypeDistinct {
+		return 0, false
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		if c.enumHasVariant(dst, src.Name) {
 			return 1, true
@@ -764,6 +784,18 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 			Node: d,
 		})
 
+	case *ast.DistinctDecl:
+		scope.Declare(&Symbol{
+			Name: d.Name.Name,
+			Kind: SymbolType,
+			Type: &Type{
+				Kind: TypeDistinct,
+				Name: d.Name.Name,
+			},
+			Span: d.Name.Span(),
+			Node: d,
+		})
+
 	case *ast.EnumDecl:
 		scope.Declare(&Symbol{
 			Name: d.Name.Name,
@@ -834,6 +866,9 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 
 func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 	switch d := decl.(type) {
+	case *ast.DistinctDecl:
+		c.prepareDistinctDecl(scope, d)
+
 	case *ast.StructDecl:
 		c.prepareStructDecl(scope, d)
 
@@ -886,6 +921,24 @@ func (c *Checker) prepareOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
 	}
 
 	sym.Overload.Candidates = candidates
+}
+
+func (c *Checker) prepareDistinctDecl(scope *Scope, d *ast.DistinctDecl) {
+	sym := scope.LookupLocal(d.Name.Name)
+	if sym == nil || sym.Type == nil {
+		return
+	}
+
+	underlying := c.typeFromAst(scope, d.Underlying)
+
+	if !c.isValidDistinctUnderlying(underlying) {
+		c.diags.Add(
+			d.Underlying.Span(),
+			fmt.Sprintf("distinct underlying type must be a concrete primitive type, got %s", underlying.String()),
+		)
+	}
+
+	sym.Type.Underlying = underlying
 }
 
 func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
@@ -2099,6 +2152,10 @@ func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
 		return true
 	}
 
+	if a.Kind == TypeDistinct && b.Kind == TypeDistinct && c.sameType(a, b) {
+		return true
+	}
+
 	return false
 }
 
@@ -2993,6 +3050,18 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return true
 	}
 
+	if dst.Kind == TypeDistinct {
+		if src.Kind == TypeUntypedInt || src.Kind == TypeUntypedFloat {
+			return c.assignable(dst.Underlying, src)
+		}
+
+		return false
+	}
+
+	if src.Kind == TypeDistinct {
+		return false
+	}
+
 	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
 		return c.enumHasVariant(dst, src.Name)
 	}
@@ -3060,7 +3129,13 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 	case TypeVariadic:
 		return c.sameType(a.Elem, b.Elem)
 
-	case TypeStruct, TypeEnum, TypeUnion, TypeInterface, TypeTypeParam, TypeValueParam:
+	case TypeStruct,
+		TypeDistinct,
+		TypeEnum,
+		TypeUnion,
+		TypeInterface,
+		TypeTypeParam,
+		TypeValueParam:
 		return a.Name == b.Name
 
 	case TypeTask:
@@ -3208,6 +3283,36 @@ func (c *Checker) isAddressableExpr(scope *Scope, expr ast.Expr) bool {
 	}
 
 	return false
+}
+
+func (c *Checker) isValidDistinctUnderlying(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeBool,
+		TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
+		TypeF32,
+		TypeF64,
+		TypeChar,
+		TypeString,
+		TypeCstring,
+		TypeRawptr:
+		return true
+
+	default:
+		return false
+	}
 }
 
 func isInterfaceSelfParam(t ast.Type) bool {

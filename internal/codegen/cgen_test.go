@@ -1121,3 +1121,25 @@ Main :: task() {
 		t.Fatalf("expected assert lowering, got:\n%s", out)
 	}
 }
+
+func TestGenerateDistinctType(t *testing.T) {
+	out, reporter := generate(t, `
+EnemyId :: distinct uint
+
+Main :: task() {
+    id: EnemyId = 10
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef uintptr_t EnemyId;") {
+		t.Fatalf("expected distinct typedef, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "EnemyId id = 10;") {
+		t.Fatalf("expected distinct variable, got:\n%s", out)
+	}
+}

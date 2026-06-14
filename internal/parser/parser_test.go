@@ -816,3 +816,26 @@ Main :: task() {
 		t.Fatalf("unexpected names: %#v", stmt.Names)
 	}
 }
+
+func TestParseDistinctDecl(t *testing.T) {
+	file, reporter := parse(t, `
+EnemyId :: distinct uint
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf("expected 1 decl, got %d", len(file.Decls))
+	}
+
+	decl, ok := file.Decls[0].(*ast.DistinctDecl)
+	if !ok {
+		t.Fatalf("expected DistinctDecl, got %T", file.Decls[0])
+	}
+
+	if decl.Name.Name != "EnemyId" {
+		t.Fatalf("expected EnemyId, got %q", decl.Name.Name)
+	}
+}

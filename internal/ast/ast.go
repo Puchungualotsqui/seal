@@ -57,6 +57,18 @@ func (d *ConstDecl) Span() source.Span {
 	return d.Loc
 }
 
+type DistinctDecl struct {
+	Name       Ident
+	Underlying Type
+	Loc        source.Span
+}
+
+func (*DistinctDecl) declNode() {}
+
+func (d *DistinctDecl) Span() source.Span {
+	return d.Loc
+}
+
 type GenericParamKind int
 
 const (

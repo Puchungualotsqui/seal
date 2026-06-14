@@ -166,6 +166,8 @@ type Generator struct {
 	currentResults []CType
 
 	tempCounter int
+
+	distincts map[string]*ast.DistinctDecl
 }
 
 func New(diags *diag.Reporter) *Generator {
@@ -186,6 +188,7 @@ func NewWithPackages(diags *diag.Reporter, packageName string, packages map[stri
 		overloads:        map[string][]string{},
 		consts:           map[string]CType{},
 		emittedVariadics: map[string]bool{},
+		distincts:        map[string]*ast.DistinctDecl{},
 	}
 }
 
@@ -224,6 +227,7 @@ func (g *Generator) Generate(file *ast.File) string {
 
 	g.emitCImports(file)
 	g.emitRuntimeSupport()
+	g.emitDistincts(file)
 	g.emitEnums(file)
 	g.emitStructs(file)
 	g.emitUnions(file)
@@ -243,6 +247,9 @@ func (g *Generator) Generate(file *ast.File) string {
 func (g *Generator) collect(file *ast.File) {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
+		case *ast.DistinctDecl:
+			g.distincts[d.Name.Name] = d
+
 		case *ast.StructDecl:
 			g.structs[d.Name.Name] = d
 
@@ -450,6 +457,25 @@ func (g *Generator) emitAssertCall(e *ast.CallExpr) string {
 
 	cond := g.emitExpr(e.Args[0], &CBool)
 	return fmt.Sprintf("assert(%s)", cond)
+}
+
+func (g *Generator) emitDistincts(file *ast.File) {
+	emitted := false
+
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.DistinctDecl)
+		if !ok {
+			continue
+		}
+
+		underlying := g.cTypeFromAst(d.Underlying)
+		g.linef("typedef %s %s;", underlying.Name, d.Name.Name)
+		emitted = true
+	}
+
+	if emitted {
+		g.line("")
+	}
 }
 
 func (g *Generator) emitEnums(file *ast.File) {
@@ -3371,6 +3397,13 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			return CType{
 				Name:     spec.CName,
 				SealName: spec.Name,
+			}
+		}
+
+		if _, ok := g.distincts[name]; ok {
+			return CType{
+				Name:     name,
+				SealName: name,
 			}
 		}
 

@@ -161,6 +161,9 @@ doneModifiers:
 	}
 
 	switch {
+	case p.match(token.KeywordDistinct):
+		return p.parseDistinctDecl(name, start)
+
 	case p.match(token.KeywordTask):
 		return p.parseTaskDecl(name, start, false, false)
 
@@ -477,6 +480,20 @@ func (p *Parser) parseIntrinsicTaskDecl(name ast.Ident, start int, mods declModi
 		Results:     results,
 		Body:        nil,
 		Loc:         p.span(start, end),
+	}
+}
+
+func (p *Parser) parseDistinctDecl(name ast.Ident, start int) ast.Decl {
+	underlying := p.parseType()
+	if underlying == nil {
+		p.errorHere("expected underlying type after distinct")
+		return nil
+	}
+
+	return &ast.DistinctDecl{
+		Name:       name,
+		Underlying: underlying,
+		Loc:        p.span(start, underlying.Span().End),
 	}
 }
 

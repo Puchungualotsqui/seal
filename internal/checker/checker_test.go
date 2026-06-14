@@ -2199,3 +2199,92 @@ Main :: task() {
 		}
 	}
 }
+
+func TestDistinctTypeLiteralInitialization(t *testing.T) {
+	_, reporter := check(t, `
+EnemyId :: distinct uint
+
+Main :: task() {
+    id: EnemyId = 10
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestDistinctRejectsUnderlyingAssignment(t *testing.T) {
+	_, reporter := check(t, `
+EnemyId :: distinct uint
+
+Main :: task() {
+    raw: uint = 10
+    id: EnemyId = raw
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign uint to EnemyId") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestDistinctRejectsDifferentDistinctAssignment(t *testing.T) {
+	_, reporter := check(t, `
+EnemyId :: distinct uint
+PlayerId :: distinct uint
+
+Main :: task() {
+    enemy: EnemyId = 1
+    player: PlayerId = enemy
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign EnemyId to PlayerId") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestDistinctEqualitySameType(t *testing.T) {
+	_, reporter := check(t, `
+EnemyId :: distinct uint
+
+Main :: task() {
+    a: EnemyId = 1
+    b: EnemyId = 2
+    same := a == b
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestDistinctRejectsArithmeticForNow(t *testing.T) {
+	_, reporter := check(t, `
+EnemyId :: distinct uint
+
+Main :: task() {
+    a: EnemyId = 1
+    b: EnemyId = 2
+    c := a + b
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "requires numeric operands") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

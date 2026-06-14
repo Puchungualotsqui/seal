@@ -36,6 +36,7 @@ const (
 	KeywordDefer
 	KeywordSeal
 	KeywordConst
+	KeywordDistinct
 	KeywordNil
 	KeywordTrue
 	KeywordFalse
@@ -109,6 +110,7 @@ var keywordKinds = map[string]Kind{
 	"defer":     KeywordDefer,
 	"seal":      KeywordSeal,
 	"const":     KeywordConst,
+	"distinct":  KeywordDistinct,
 	"nil":       KeywordNil,
 	"true":      KeywordTrue,
 	"false":     KeywordFalse,
@@ -185,6 +187,8 @@ func (k Kind) String() string {
 		return "seal"
 	case KeywordConst:
 		return "const"
+	case KeywordDistinct:
+		return "distinct"
 	case KeywordNil:
 		return "nil"
 	case KeywordTrue:

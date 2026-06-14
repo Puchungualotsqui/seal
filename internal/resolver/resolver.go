@@ -21,6 +21,7 @@ const (
 
 	SymbolTask
 	SymbolStruct
+	SymbolDistinct
 	SymbolEnum
 	SymbolUnion
 	SymbolInterface
@@ -46,6 +47,8 @@ func (k SymbolKind) String() string {
 		return "parameter"
 	case SymbolTask:
 		return "task"
+	case SymbolDistinct:
+		return "distinct type"
 	case SymbolStruct:
 		return "struct"
 	case SymbolEnum:
@@ -273,6 +276,9 @@ func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 	case *ast.OverloadDecl:
 		r.declareSymbol(scope, d.Name, SymbolOverload, d.Span(), d)
 
+	case *ast.DistinctDecl:
+		r.declareSymbol(scope, d.Name.Name, SymbolDistinct, d.Name.Span(), d)
+
 	case *ast.DirectiveDecl:
 		// c :: @c_import { ... } is codegen metadata, not a visible Seal symbol.
 		return
@@ -293,6 +299,9 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 
 	case *ast.TaskDecl:
 		r.resolveTaskDecl(scope, d)
+
+	case *ast.DistinctDecl:
+		r.resolveType(scope, d.Underlying)
 
 	case *ast.EnumDecl:
 		r.resolveEnumDecl(d)
@@ -534,10 +543,25 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 		}
 
 		if len(t.Parts) == 1 {
-			if sym.Kind.IsRuntime() {
-				r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+			switch sym.Kind {
+			case SymbolStruct,
+				SymbolDistinct,
+				SymbolEnum,
+				SymbolUnion,
+				SymbolInterface,
+				SymbolBitSet,
+				SymbolGenericType,
+				SymbolBuiltinType:
+				return
+
+			default:
+				if sym.Kind.IsRuntime() {
+					r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+				} else {
+					r.diags.Add(first.Span(), fmt.Sprintf("%q is not a type", first.Name))
+				}
+				return
 			}
-			return
 		}
 
 		if sym.Kind != SymbolPackage {
@@ -558,7 +582,7 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 		}
 
 		switch member.Kind {
-		case SymbolStruct, SymbolEnum, SymbolUnion, SymbolInterface, SymbolBitSet:
+		case SymbolStruct, SymbolDistinct, SymbolEnum, SymbolUnion, SymbolInterface, SymbolBitSet:
 			return
 		default:
 			r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, memberName))
@@ -762,6 +786,7 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 		case SymbolConst,
 			SymbolTask,
 			SymbolStruct,
+			SymbolDistinct,
 			SymbolEnum,
 			SymbolUnion,
 			SymbolInterface,
