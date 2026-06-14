@@ -68,11 +68,11 @@ Main :: task() {
 		t.Fatalf("expected main function, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int x = 10;") {
+	if !strings.Contains(out, "intptr_t x = 10;") {
 		t.Fatalf("expected x variable, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int y = (x + 20);") {
+	if !strings.Contains(out, "intptr_t y = (x + 20);") {
 		t.Fatalf("expected y variable, got:\n%s", out)
 	}
 
@@ -136,7 +136,7 @@ Damage :: task(e *Soldier, amount int) {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "void Damage(Soldier * e, int amount)") {
+	if !strings.Contains(out, "void Damage(Soldier * e, intptr_t amount)") {
 		t.Fatalf("expected Damage signature, got:\n%s", out)
 	}
 
@@ -197,11 +197,11 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "int values[3] = {1, 2, 3};") {
+	if !strings.Contains(out, "intptr_t values[3] = {1, 2, 3};") {
 		t.Fatalf("expected array init, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "for (int i = 0; (i < 3); i = (i + 1))") {
+	if !strings.Contains(out, "for (intptr_t i = 0; (i < 3); i = (i + 1))") {
 		t.Fatalf("expected C-like for, got:\n%s", out)
 	}
 
@@ -230,7 +230,7 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "int __seal_defer_arg_") {
+	if !strings.Contains(out, "intptr_t __seal_defer_arg_") {
 		t.Fatalf("expected defer temp arg, got:\n%s", out)
 	}
 
@@ -268,7 +268,7 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "int a = SumInt(1, 2);") {
+	if !strings.Contains(out, "intptr_t a = SumInt(1, 2);") {
 		t.Fatalf("expected SumInt call, got:\n%s", out)
 	}
 
@@ -402,7 +402,7 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-malloc :: extern("malloc") task(size usize) rawptr
+malloc :: extern("malloc") task(size uint) rawptr
 free :: extern("free") task(ptr rawptr)
 
 Main :: task() {
@@ -419,7 +419,7 @@ Main :: task() {
 		t.Fatalf("expected stdlib include, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "void * malloc(size_t size);") {
+	if !strings.Contains(out, "void * malloc(uintptr_t size);") {
 		t.Fatalf("expected malloc prototype, got:\n%s", out)
 	}
 
@@ -427,7 +427,7 @@ Main :: task() {
 		t.Fatalf("expected free prototype, got:\n%s", out)
 	}
 
-	if strings.Contains(out, "void * malloc(size_t size) {") {
+	if strings.Contains(out, "void * malloc(uintptr_t size) {") {
 		t.Fatalf("extern malloc should not emit body, got:\n%s", out)
 	}
 
@@ -461,7 +461,7 @@ Main :: task() {
 		t.Fatalf("expected stdio include, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int printf(const char * format, ...);") {
+	if !strings.Contains(out, "intptr_t printf(const char * format, ...);") {
 		t.Fatalf("expected printf variadic prototype, got:\n%s", out)
 	}
 
@@ -495,11 +495,11 @@ Main :: task() {
 		t.Fatalf("expected variadic int runtime type, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int Sum(sealVariadic_int args)") {
+	if !strings.Contains(out, "intptr_t Sum(sealVariadic_int args)") {
 		t.Fatalf("expected Sum variadic signature, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (int[]){1, 2, 3}, .len = 3})") {
+	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (intptr_t[]){1, 2, 3}, .len = 3})") {
 		t.Fatalf("expected packed Sum call, got:\n%s", out)
 	}
 
@@ -507,14 +507,14 @@ Main :: task() {
 		t.Fatalf("expected args index lowering, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "((args).len)") {
+	if !strings.Contains(out, "((uintptr_t)(args).len)") {
 		t.Fatalf("expected len(args) lowering, got:\n%s", out)
 	}
 }
 
 func TestGenerateSealVariadicAny(t *testing.T) {
 	out, reporter := generate(t, `
-CountAny :: task(args ...any) usize {
+CountAny :: task(args ...any) uint {
     return len(args)
 }
 
@@ -536,7 +536,7 @@ Main :: task() {
 		t.Fatalf("expected any boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "size_t CountAny(sealVariadic_any args)") {
+	if !strings.Contains(out, "uintptr_t CountAny(sealVariadic_any args)") {
 		t.Fatalf("expected CountAny variadic any signature, got:\n%s", out)
 	}
 
@@ -553,7 +553,7 @@ func TestGenerateInferredArrayOfAny(t *testing.T) {
 	out, reporter := generate(t, `
 Main :: task() {
     values: []any = [2, "hello", 3.14, true]
-    n: usize = len(values)
+    n: uint = len(values)
 }
 `)
 
@@ -581,14 +581,14 @@ Main :: task() {
 		t.Fatalf("expected bool boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "size_t n = (size_t)4;") {
+	if !strings.Contains(out, "uintptr_t n = (uintptr_t)4;") {
 		t.Fatalf("expected len(values) lowering, got:\n%s", out)
 	}
 }
 
 func TestGenerateVariadicArrayOfAny(t *testing.T) {
 	out, reporter := generate(t, `
-TakeArrays :: task(args ...[10]any) usize {
+TakeArrays :: task(args ...[10]any) uint {
     return len(args)
 }
 
@@ -612,8 +612,8 @@ Main :: task() {
 		t.Fatalf("expected packed variadic length 2, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "size_t TakeArrays(") {
-		t.Fatalf("expected TakeArrays usize return, got:\n%s", out)
+	if !strings.Contains(out, "uintptr_t TakeArrays(") {
+		t.Fatalf("expected TakeArrays uint return, got:\n%s", out)
 	}
 }
 
@@ -640,7 +640,7 @@ Main :: task() {
 		t.Fatalf("expected anyIs<int> lowering, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int x = ((value).value.as_int);") {
+	if !strings.Contains(out, "intptr_t x = ((value).value.as_int);") {
 		t.Fatalf("expected anyAs<int> lowering, got:\n%s", out)
 	}
 }
@@ -676,7 +676,7 @@ Main :: task() {
 		t.Fatalf("expected string case, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "int x = ((value).value.as_int);") {
+	if !strings.Contains(out, "intptr_t x = ((value).value.as_int);") {
 		t.Fatalf("expected anyAs<int>, got:\n%s", out)
 	}
 
@@ -718,7 +718,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"world"
 
-    n: usize = size(s)
+    n: uint = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -755,7 +755,7 @@ Main :: task() {
 		t.Fatalf("expected char lowering for ñ, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "size_t n = (s).byte_len;") {
+	if !strings.Contains(out, "uintptr_t n = (uintptr_t)(s).byte_len;") {
 		t.Fatalf("expected size(s) lowering, got:\n%s", out)
 	}
 
@@ -794,7 +794,7 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "int a[3] = {1, 2, 3};") {
+	if !strings.Contains(out, "intptr_t a[3] = {1, 2, 3};") {
 		t.Fatalf("expected array declaration, got:\n%s", out)
 	}
 
@@ -828,7 +828,7 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "int Forward(sealVariadic_int values)") {
+	if !strings.Contains(out, "intptr_t Forward(sealVariadic_int values)") {
 		t.Fatalf("expected Forward variadic signature, got:\n%s", out)
 	}
 
@@ -866,7 +866,7 @@ Main :: task() {
 
 func TestGenerateSpreadArrayLiteralIntoVariadicTask(t *testing.T) {
 	out, reporter := generate(t, `
-Sum :: task(values ...int) usize {
+Sum :: task(values ...int) uint {
     return len(values)
 }
 
@@ -879,7 +879,7 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (int[]){1, 2, 3}, .len = 3})") {
+	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (intptr_t[]){1, 2, 3}, .len = 3})") {
 		t.Fatalf("expected array literal spread lowering, got:\n%s", out)
 	}
 }
@@ -1019,7 +1019,7 @@ Main :: task() {
 
 func TestGenerateRawptrByteIndexReadWrite(t *testing.T) {
 	out, reporter := generate(t, `
-malloc :: extern("malloc") task(size usize) rawptr
+malloc :: extern("malloc") task(size uint) rawptr
 
 Main :: task() {
     ptr := malloc(4)
@@ -1033,11 +1033,11 @@ Main :: task() {
 	}
 
 	if !strings.Contains(out, "((unsigned char *)(ptr))[0] = 255;") {
-		t.Fatalf("expected rawptr byte write, got:\n%s", out)
+		t.Fatalf("expected rawptr byte write")
 	}
 
-	if !strings.Contains(out, "unsigned char b = ((unsigned char *)(ptr))[0];") {
-		t.Fatalf("expected rawptr byte read, got:\n%s", out)
+	if !strings.Contains(out, "uint8_t b = ((unsigned char *)(ptr))[0];") {
+		t.Fatalf("expected rawptr byte read")
 	}
 }
 
@@ -1054,12 +1054,12 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "unsigned char b = ((unsigned char *)&(x))[0];") {
-		t.Fatalf("expected value byte read, got:\n%s", out)
+	if !strings.Contains(out, "uint8_t b = ((unsigned char *)&(x))[0];") {
+		t.Fatalf("expected value byte read")
 	}
 
 	if !strings.Contains(out, "((unsigned char *)&(x))[0] = b;") {
-		t.Fatalf("expected value byte write, got:\n%s", out)
+		t.Fatalf("expected value byte write")
 	}
 }
 
@@ -1073,10 +1073,10 @@ Main :: task() {
     x := 10
     s := "ñ"
 
-    a: usize = size(int)
-    b: usize = size(Goblin)
-    c: usize = size(x)
-    d: usize = size(s)
+    a: uint = size(int)
+    b: uint = size(Goblin)
+    c: uint = size(x)
+    d: uint = size(s)
 }
 `)
 
@@ -1084,20 +1084,20 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "size_t a = (size_t)sizeof(int);") {
-		t.Fatalf("expected size(int), got:\n%s", out)
+	if !strings.Contains(out, "uintptr_t a = (uintptr_t)sizeof(intptr_t);") {
+		t.Fatalf("expected size(int)")
 	}
 
-	if !strings.Contains(out, "size_t b = (size_t)sizeof(Goblin);") {
-		t.Fatalf("expected size(Goblin), got:\n%s", out)
+	if !strings.Contains(out, "uintptr_t b = (uintptr_t)sizeof(Goblin);") {
+		t.Fatalf("expected size(Goblin)")
 	}
 
-	if !strings.Contains(out, "size_t c = (size_t)sizeof(x);") {
-		t.Fatalf("expected size(x), got:\n%s", out)
+	if !strings.Contains(out, "uintptr_t c = (uintptr_t)sizeof(x);") {
+		t.Fatalf("expected size(x)")
 	}
 
-	if !strings.Contains(out, "size_t d = (s).byte_len;") {
-		t.Fatalf("expected size(s) as string byte length, got:\n%s", out)
+	if !strings.Contains(out, "uintptr_t d = (uintptr_t)(s).byte_len;") {
+		t.Fatalf("expected size(string)")
 	}
 }
 

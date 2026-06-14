@@ -1045,7 +1045,7 @@ Vec2Add :: pure task(a Vec2, b Vec2 = Vec2{x = 0.0, y = 0.0}) Vec2 {
 
 func TestExternTaskDecl(t *testing.T) {
 	_, reporter := check(t, `
-malloc :: extern("malloc") task(size usize) rawptr
+malloc :: extern("malloc") task(size uint) rawptr
 free :: extern("free") task(ptr rawptr)
 
 Main :: task() {
@@ -1112,7 +1112,7 @@ Main :: task() {
 
 func TestSealVariadicAny(t *testing.T) {
 	_, reporter := check(t, `
-CountAny :: task(args ...any) usize {
+CountAny :: task(args ...any) uint {
 	return len(args)
 }
 
@@ -1130,7 +1130,7 @@ Main :: task() {
 
 func TestVariadicRejectWrongType(t *testing.T) {
 	_, reporter := check(t, `
-Sum :: task(args ...int) usize {
+Sum :: task(args ...int) uint {
     return len(args)
 }
 
@@ -1150,7 +1150,7 @@ Main :: task() {
 
 func TestVariadicArrayOfAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
-TakeArrays :: task(args ...[10]any) usize {
+TakeArrays :: task(args ...[10]any) uint {
     return len(args)
 }
 
@@ -1172,7 +1172,7 @@ func TestInferredArrayOfAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     anyArr: []any = [2, 3, 4, 5, 6]
-    n: usize = len(anyArr)
+    n: uint = len(anyArr)
     assert(n == 5)
 }
 `)
@@ -1186,7 +1186,7 @@ func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     values: []any = [2, "hello", 3.14, true]
-    n: usize = len(values)
+    n: uint = len(values)
     assert(n == 4)
 }
 `)
@@ -1431,7 +1431,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"hola"
 
-    n: usize = size(s)
+    n: uint = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -1487,7 +1487,7 @@ Main :: task() {
     s: string = "hola"
     cs: cstring = c"hola"
 
-    n: usize = size(s)
+    n: uint = size(s)
     h: char = s[0]
     o: char = s[1]
     a: char = s[-1]
@@ -1951,7 +1951,7 @@ Main :: task() {
 
 func TestRawptrByteIndexReadWrite(t *testing.T) {
 	_, reporter := check(t, `
-malloc :: extern("malloc") task(size usize) rawptr
+malloc :: extern("malloc") task(size uint) rawptr
 
 Main :: task() {
     ptr := malloc(4)
@@ -2005,10 +2005,10 @@ Main :: task() {
     x := 10
     s := "ñ"
 
-    a: usize = size(int)
-    b: usize = size(Goblin)
-    c: usize = size(x)
-    d: usize = size(s)
+    a: uint = size(int)
+    b: uint = size(Goblin)
+    c: uint = size(x)
+    d: uint = size(s)
 }
 `)
 
@@ -2053,7 +2053,7 @@ Handle :: intrinsic struct {
     ptr rawptr
 }
 
-ByteSize :: pure intrinsic task(value any) usize
+ByteSize :: pure intrinsic task(value any) uint
 `)
 
 	if reporter.HasErrors() {
@@ -2063,7 +2063,7 @@ ByteSize :: pure intrinsic task(value any) usize
 
 func TestTrustedPureExternTask(t *testing.T) {
 	_, reporter := check(t, `
-strlen :: @trusted_pure extern("strlen") task(s cstring) usize
+strlen :: @trusted_pure extern("strlen") task(s cstring) uint
 `)
 
 	if reporter.HasErrors() {
@@ -2073,7 +2073,7 @@ strlen :: @trusted_pure extern("strlen") task(s cstring) usize
 
 func TestRejectPureExternTask(t *testing.T) {
 	_, reporter := check(t, `
-strlen :: pure extern("strlen") task(s cstring) usize
+strlen :: pure extern("strlen") task(s cstring) uint
 `)
 
 	if !reporter.HasErrors() {
@@ -2162,7 +2162,7 @@ Main :: task() {
 func TestRemovedFrontendTypesAreInvalid(t *testing.T) {
 	file := source.NewFile("test.seal", `
 Main :: task() {
-    a: usize = 1
+    a: uint = 1
 }
 `)
 	reporter := diag.NewReporter()
@@ -2188,7 +2188,7 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `undefined symbol "usize"`) {
+	if !strings.Contains(reporter.String(), `undefined symbol "uint"`) {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }

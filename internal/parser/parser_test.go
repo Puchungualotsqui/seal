@@ -499,7 +499,7 @@ Main :: task() {
 
 func TestParseExternTaskDecl(t *testing.T) {
 	file, reporter := parse(t, `
-malloc :: extern("malloc") task(size usize) rawptr
+malloc :: extern("malloc") task(size uint) rawptr
 printf :: extern("printf") task(format string, args ...any) int
 `)
 

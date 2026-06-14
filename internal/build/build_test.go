@@ -259,7 +259,7 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-Alloc :: extern("malloc") task(size usize) rawptr
+Alloc :: extern("malloc") task(size uint) rawptr
 Free :: extern("free") task(ptr rawptr)
 `)
 
@@ -391,7 +391,7 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-Alloc :: extern("malloc") task(size usize) rawptr
+Alloc :: extern("malloc") task(size uint) rawptr
 Free :: extern("free") task(ptr rawptr)
 `)
 

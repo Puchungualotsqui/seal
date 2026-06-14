@@ -157,6 +157,8 @@ type Generator struct {
 	overloads map[string][]string
 	consts    map[string]CType
 
+	emittedVariadics map[string]bool
+
 	scope     *scope
 	taskScope *scope
 
@@ -172,17 +174,18 @@ func New(diags *diag.Reporter) *Generator {
 
 func NewWithPackages(diags *diag.Reporter, packageName string, packages map[string]*PackageInfo) *Generator {
 	return &Generator{
-		diags:       diags,
-		packageName: packageName,
-		packages:    packages,
-		structs:     map[string]*ast.StructDecl{},
-		enums:       map[string]*ast.EnumDecl{},
-		unions:      map[string]*ast.UnionDecl{},
-		interfaces:  map[string]*ast.InterfaceDecl{},
-		impls:       map[string][]string{},
-		tasks:       map[string]TaskInfo{},
-		overloads:   map[string][]string{},
-		consts:      map[string]CType{},
+		diags:            diags,
+		packageName:      packageName,
+		packages:         packages,
+		structs:          map[string]*ast.StructDecl{},
+		enums:            map[string]*ast.EnumDecl{},
+		unions:           map[string]*ast.UnionDecl{},
+		interfaces:       map[string]*ast.InterfaceDecl{},
+		impls:            map[string][]string{},
+		tasks:            map[string]TaskInfo{},
+		overloads:        map[string][]string{},
+		consts:           map[string]CType{},
+		emittedVariadics: map[string]bool{},
 	}
 }
 
@@ -225,6 +228,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitStructs(file)
 	g.emitUnions(file)
 	g.emitInterfaces()
+	g.emitTaskVariadicRuntimeTypes()
 	g.emitConstants(file)
 	g.emitImportedResultStructs()
 	g.emitResultStructs(file)
@@ -1835,6 +1839,31 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 				return g.emitNoArgRuntimeCall("unreachable", "seal_unreachable", e)
 			}
 		}
+
+		if len(e.Args) > 0 {
+			firstType := g.inferExprType(e.Args[0], nil)
+
+			if g.isInterfaceCType(firstType) {
+				if _, ok := g.lookupInterfaceRequirement(firstType.SealName, id.Name.Name); ok {
+					return g.emitInterfaceDispatchCall(firstType, id.Name.Name, e.Args, preparedArgs)
+				}
+			}
+		}
+
+		if _, ok := g.tasks[id.Name.Name]; ok {
+			return g.emitTaskCall(id.Name.Name, e.Args, preparedArgs)
+		}
+
+		if _, ok := g.overloads[id.Name.Name]; ok {
+			argTypes := make([]CType, 0, len(e.Args))
+			for _, arg := range e.Args {
+				argTypes = append(argTypes, g.inferExprType(arg, nil))
+			}
+
+			if candidate, ok := g.resolveOverload(id.Name.Name, argTypes); ok {
+				return g.emitTaskCall(candidate, e.Args, preparedArgs)
+			}
+		}
 	}
 
 	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
@@ -2241,6 +2270,48 @@ func (g *Generator) emitRepackedArraySpread(elem CType, expr ast.Expr, srcType C
 	)
 }
 
+func (g *Generator) emitArrayElementLiteral(elem CType, arg ast.Expr) string {
+	if !elem.IsArray || elem.Elem == nil {
+		return g.emitExpr(arg, &elem)
+	}
+
+	argType := g.inferExprType(arg, nil)
+
+	if lit, ok := arg.(*ast.ArrayLiteralExpr); ok {
+		var values []string
+		for _, value := range lit.Values {
+			values = append(values, g.emitExpr(value, elem.Elem))
+		}
+
+		return "{" + strings.Join(values, ", ") + "}"
+	}
+
+	if !argType.IsArray || argType.ArrayLen == "" {
+		return "{" + g.emitExpr(arg, &elem) + "}"
+	}
+
+	length, err := strconv.Atoi(argType.ArrayLen)
+	if err != nil {
+		return "{" + g.emitExpr(arg, &elem) + "}"
+	}
+
+	var values []string
+	for i := 0; i < length; i++ {
+		indexExpr := &ast.IndexExpr{
+			Left: arg,
+			Index: &ast.IntLitExpr{
+				Value: fmt.Sprintf("%d", i),
+				Loc:   arg.Span(),
+			},
+			Loc: arg.Span(),
+		}
+
+		values = append(values, g.emitExpr(indexExpr, elem.Elem))
+	}
+
+	return "{" + strings.Join(values, ", ") + "}"
+}
+
 func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArgs []string, preparedOffset int) string {
 	variadicType := g.variadicCType(elem)
 
@@ -2258,7 +2329,23 @@ func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArg
 			continue
 		}
 
+		if elem.IsArray && elem.Elem != nil {
+			values = append(values, g.emitArrayElementLiteral(elem, arg))
+			continue
+		}
+
 		values = append(values, g.emitExpr(arg, &elem))
+	}
+
+	if elem.IsArray && elem.Elem != nil {
+		return fmt.Sprintf(
+			"(%s){.data = (%s[][%s]){%s}, .len = %d}",
+			variadicType.Name,
+			elem.Elem.Name,
+			elem.ArrayLen,
+			strings.Join(values, ", "),
+			len(values),
+		)
 	}
 
 	return fmt.Sprintf(
@@ -2410,6 +2497,28 @@ func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) s
 	return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
 }
 
+func (g *Generator) emitTaskVariadicRuntimeTypes() {
+	names := make([]string, 0, len(g.tasks))
+	for name := range g.tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		info := g.tasks[name]
+
+		for i, paramType := range info.ParamTypes {
+			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+				g.emitVariadicRuntimeType(paramType)
+			}
+		}
+	}
+
+	if len(names) > 0 {
+		g.line("")
+	}
+}
+
 func (g *Generator) emitRuntimeSupport() {
 	g.line("typedef struct sealString {")
 	g.indent++
@@ -2547,17 +2656,41 @@ func (g *Generator) emitRuntimeSupport() {
 }
 
 func (g *Generator) emitVariadicRuntimeType(elem CType) {
-	name := g.variadicCType(elem).Name
+	variadicType := g.variadicCType(elem)
+	name := variadicType.Name
+
+	if g.emittedVariadics[name] {
+		return
+	}
+	g.emittedVariadics[name] = true
+
 	g.linef("typedef struct %s {", name)
 	g.indent++
-	g.linef("%s *data;", elem.Name)
+
+	if elem.IsArray && elem.Elem != nil {
+		g.linef("%s (*data)[%s];", elem.Elem.Name, elem.ArrayLen)
+	} else {
+		g.linef("%s *data;", elem.Name)
+	}
+
 	g.line("size_t len;")
 	g.indent--
 	g.linef("} %s;", name)
 }
 
 func (g *Generator) variadicCType(elem CType) CType {
-	name := "sealVariadic_" + sanitizeCName(elem.SealName)
+	elemName := elem.SealName
+
+	if elem.IsArray && elem.Elem != nil {
+		length := elem.ArrayLen
+		if length == "" {
+			length = "inferred"
+		}
+
+		elemName = "array_" + sanitizeCName(length) + "_" + sanitizeCName(elem.Elem.SealName)
+	}
+
+	name := "sealVariadic_" + sanitizeCName(elemName)
 
 	return CType{
 		Name:       name,
@@ -3273,12 +3406,17 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			}
 		}
 
+		sealName := "[]" + elem.SealName
+		if !typ.Inferred {
+			sealName = "[" + length + "]" + elem.SealName
+		}
+
 		return CType{
 			IsArray:  true,
 			ArrayLen: length,
 			Elem:     &elem,
 			Name:     elem.Name,
-			SealName: "[]" + elem.SealName,
+			SealName: sealName,
 		}
 
 	case *ast.GenericType:
