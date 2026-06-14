@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"seal/internal/ast"
+	"seal/internal/builtin"
 	"seal/internal/diag"
 	"seal/internal/source"
 	"seal/internal/token"
@@ -2144,16 +2145,28 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !c.isShadowedPrimitive(scope, "len") {
-		return c.checkLenCall(e.Args, argTypes, e.Span())
-	}
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
+			switch kind {
+			case builtin.TaskLen:
+				return c.checkLenCall(e.Args, argTypes, e.Span())
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !c.isShadowedPrimitive(scope, "size") {
-		return c.checkSizeCall(e.Args, argTypes, e.Span())
-	}
+			case builtin.TaskSize:
+				return c.checkSizeCall(e.Args, argTypes, e.Span())
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !c.isShadowedPrimitive(scope, "assert") {
-		return c.checkAssertCall(e.Args, argTypes, e.Span())
+			case builtin.TaskAssert:
+				return c.checkAssertCall(e.Args, argTypes, e.Span())
+
+			case builtin.TaskPanic:
+				return c.checkPanicCall(e.Args, argTypes, e.Span())
+
+			case builtin.TaskTrap:
+				return c.checkNoArgVoidPrimitive("trap", e.Args, argTypes, e.Span())
+
+			case builtin.TaskUnreachable:
+				return c.checkNoArgVoidPrimitive("unreachable", e.Args, argTypes, e.Span())
+			}
+		}
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2193,6 +2206,30 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	return c.checkTaskTypeCall(calleeType, argTypes, argSpans, e.Span())
+}
+
+func (c *Checker) checkNoArgVoidPrimitive(name string, args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+	if len(argTypes) != 0 {
+		c.diags.Add(span, fmt.Sprintf("%s expects 0 arguments, got %d", name, len(argTypes)))
+	}
+
+	return VoidType
+}
+
+func (c *Checker) checkPanicCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+	if len(argTypes) > 1 {
+		c.diags.Add(span, fmt.Sprintf("panic expects 0 or 1 argument, got %d", len(argTypes)))
+		return VoidType
+	}
+
+	if len(argTypes) == 1 {
+		t := argTypes[0]
+		if !c.sameType(t, StringType) && !c.sameType(t, CstringType) {
+			c.diags.Add(args[0].Span(), fmt.Sprintf("panic expects string or cstring, got %s", t.String()))
+		}
+	}
+
+	return VoidType
 }
 
 func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
@@ -2320,7 +2357,8 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 
 	name := id.Name.Name
 
-	if name != "anyAs" && name != "anyIs" {
+	task, ok := builtin.LookupTask(name)
+	if !ok || !task.Generic {
 		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
 		return InvalidType
 	}
@@ -2332,24 +2370,20 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 
 	targetType := c.typeFromAst(scope, gen.Args[0])
 
-	if len(argTypes) != 1 {
-		c.diags.Add(span, fmt.Sprintf("%s expects exactly 1 value argument", name))
-		return InvalidType
-	}
-
-	if !c.sameType(argTypes[0], AnyType) {
-		c.diags.Add(args[0].Span(), fmt.Sprintf("%s expects any, got %s", name, argTypes[0].String()))
-	}
-
-	switch name {
-	case "anyAs":
+	switch task.Kind {
+	case builtin.TaskAnyAs:
 		return targetType
 
-	case "anyIs":
+	case builtin.TaskAnyIs:
 		return BoolType
-	}
 
-	return InvalidType
+	case builtin.TaskCast:
+		return targetType
+
+	default:
+		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
+		return InvalidType
+	}
 }
 
 func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
@@ -3561,6 +3595,19 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 
 func (c *Checker) isShadowedPrimitive(scope *Scope, name string) bool {
 	return scope.Lookup(name) != nil
+}
+
+func (c *Checker) primitiveTaskKind(scope *Scope, name string) (builtin.TaskKind, bool) {
+	if c.isShadowedPrimitive(scope, name) {
+		return builtin.TaskInvalid, false
+	}
+
+	task, ok := builtin.LookupTask(name)
+	if !ok {
+		return builtin.TaskInvalid, false
+	}
+
+	return task.Kind, true
 }
 
 func ExportPackage(name string, scope *Scope) *PackageInfo {

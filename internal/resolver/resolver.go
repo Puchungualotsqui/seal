@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"seal/internal/ast"
+	"seal/internal/builtin"
 	"seal/internal/diag"
 	"seal/internal/source"
 )
@@ -187,46 +188,12 @@ func (r *Resolver) ResolveFile(file *ast.File) *Scope {
 }
 
 func (r *Resolver) declareBuiltins() {
-	builtinTypes := []string{
-		"void",
-		"bool",
-		"int",
-		"i8",
-		"i16",
-		"i32",
-		"i64",
-		"u8",
-		"u16",
-		"u32",
-		"u64",
-		"usize",
-		"isize",
-		"f32",
-		"f64",
-		"char",
-		"cstring",
-		"string",
-		"rawptr",
-		"any",
-		"uintptr",
-		"voidptr",
+	for _, typ := range builtin.Types {
+		r.declareBuiltin(typ.Name, SymbolBuiltinType)
 	}
 
-	for _, name := range builtinTypes {
-		r.declareBuiltin(name, SymbolBuiltinType)
-	}
-
-	builtinTasks := []string{
-		"assert",
-		"len",
-		"size",
-		"anyAs",
-		"anyIs",
-		"panic",
-	}
-
-	for _, name := range builtinTasks {
-		r.declareBuiltin(name, SymbolBuiltinTask)
+	for _, task := range builtin.Tasks {
+		r.declareBuiltin(task.Name, SymbolBuiltinTask)
 	}
 }
 
