@@ -1517,7 +1517,7 @@ func (p *Parser) parseSwitchStmt(start int, isPartial bool) ast.Stmt {
 		}
 	}
 
-	if !isUnionSwitch && p.at(token.Ident) && p.peek().Lexeme == "type" {
+	if !isUnionSwitch && (p.at(token.KeywordType) || (p.at(token.Ident) && p.peek().Lexeme == "type")) {
 		p.advance()
 		isTypeSwitch = true
 	}
@@ -1828,27 +1828,6 @@ func (p *Parser) parsePrefix() ast.Expr {
 			Loc:  p.previous().Span,
 		}
 
-		baseType := ast.Type(&ast.NamedType{
-			Parts: []ast.Ident{id},
-			Loc:   id.Span(),
-		})
-
-		if p.at(token.Lt) {
-			baseType = p.parseGenericTypeSuffix(baseType, start)
-		}
-
-		if p.at(token.LBrace) {
-			return p.parseCompoundLiteral(baseType, start)
-		}
-
-		if genericType, ok := baseType.(*ast.GenericType); ok {
-			return &ast.GenericExpr{
-				Base: &ast.IdentExpr{Name: id},
-				Args: genericType.Args,
-				Loc:  genericType.Loc,
-			}
-		}
-
 		return &ast.IdentExpr{Name: id}
 
 	case p.match(token.IntLit):
@@ -2033,6 +2012,15 @@ func (p *Parser) parsePostfix(left ast.Expr) ast.Expr {
 			Loc:  p.span(start, name.Span().End),
 		}
 
+	case p.match(token.LBrace):
+		t := p.typeFromExprForLiteral(left)
+		if t == nil {
+			p.errorHere("compound literal requires a type name")
+			return left
+		}
+
+		return p.parseCompoundLiteralAfterLBrace(t, start)
+
 	case p.match(token.LBracket):
 		index := p.parseExpr(0)
 		if index == nil {
@@ -2076,9 +2064,53 @@ func (p *Parser) parseArrayLiteral(start int) ast.Expr {
 	}
 }
 
-func (p *Parser) parseCompoundLiteral(t ast.Type, start int) ast.Expr {
-	p.expect(token.LBrace, "expected '{'")
+func (p *Parser) typeFromExprForLiteral(expr ast.Expr) ast.Type {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return &ast.NamedType{
+			Parts: []ast.Ident{e.Name},
+			Loc:   e.Name.Span(),
+		}
 
+	case *ast.SelectorExpr:
+		var parts []ast.Ident
+
+		current := expr
+		for {
+			switch x := current.(type) {
+			case *ast.SelectorExpr:
+				parts = append([]ast.Ident{x.Name}, parts...)
+				current = x.Left
+
+			case *ast.IdentExpr:
+				parts = append([]ast.Ident{x.Name}, parts...)
+				return &ast.NamedType{
+					Parts: parts,
+					Loc:   p.span(expr.Span().Start, expr.Span().End),
+				}
+
+			default:
+				return nil
+			}
+		}
+
+	case *ast.GenericExpr:
+		base := p.typeFromExprForLiteral(e.Base)
+		if base == nil {
+			return nil
+		}
+
+		return &ast.GenericType{
+			Base: base,
+			Args: e.Args,
+			Loc:  e.Loc,
+		}
+	}
+
+	return nil
+}
+
+func (p *Parser) parseCompoundLiteralAfterLBrace(t ast.Type, start int) ast.Expr {
 	var fields []ast.LiteralField
 	var values []ast.Expr
 
@@ -2118,6 +2150,11 @@ func (p *Parser) parseCompoundLiteral(t ast.Type, start int) ast.Expr {
 		Values: values,
 		Loc:    p.span(start, endTok.Span.End),
 	}
+}
+
+func (p *Parser) parseCompoundLiteral(t ast.Type, start int) ast.Expr {
+	p.expect(token.LBrace, "expected '{'")
+	return p.parseCompoundLiteralAfterLBrace(t, start)
 }
 
 func (p *Parser) parseInterfaceResultTypes() []ast.Type {
@@ -2176,7 +2213,7 @@ func (p *Parser) isUnaryOp(kind token.Kind) bool {
 
 func (p *Parser) isPostfixStart(kind token.Kind) bool {
 	switch kind {
-	case token.LParen, token.Dot, token.LBracket:
+	case token.LParen, token.Dot, token.LBracket, token.LBrace:
 		return true
 	default:
 		return false
@@ -2422,6 +2459,11 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 		var expr ast.Expr = &ast.IdentExpr{Name: id}
 
 		for {
+			if p.at(token.Lt) && p.looksLikeGenericExpr(expr) {
+				expr = p.parseGenericExpr(expr)
+				continue
+			}
+
 			switch p.peek().Kind {
 			case token.LParen, token.Dot, token.LBracket:
 				expr = p.parsePostfix(expr)
