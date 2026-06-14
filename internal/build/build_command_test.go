@@ -51,11 +51,11 @@ Main :: task() {
 		t.Fatalf("expected generated main, got:\n%s", text)
 	}
 
-	if !strings.Contains(text, "int x = 10;") {
+	if !strings.Contains(text, "intptr_t x = 10;") {
 		t.Fatalf("expected generated x variable, got:\n%s", text)
 	}
 
-	if !strings.Contains(text, "int y = (x + 20);") {
+	if !strings.Contains(text, "intptr_t y = (x + 20);") {
 		t.Fatalf("expected generated y variable, got:\n%s", text)
 	}
 }
@@ -166,11 +166,11 @@ Double :: task(x int) int {
 
 	gameC := string(gameBytes)
 
-	if !strings.Contains(gameC, "int helper_Double(int arg0);") {
+	if !strings.Contains(gameC, "intptr_t helper_Double(intptr_t arg0);") {
 		t.Fatalf("expected imported helper prototype, got:\n%s", gameC)
 	}
 
-	if !strings.Contains(gameC, "int x = helper_Double(10);") {
+	if !strings.Contains(gameC, "intptr_t x = helper_Double(10);") {
 		t.Fatalf("expected helper_Double call, got:\n%s", gameC)
 	}
 
@@ -181,7 +181,7 @@ Double :: task(x int) int {
 
 	helperC := string(helperBytes)
 
-	if !strings.Contains(helperC, "int helper_Double(int x)") {
+	if !strings.Contains(helperC, "intptr_t helper_Double(intptr_t x)") {
 		t.Fatalf("expected prefixed helper function definition, got:\n%s", helperC)
 	}
 }

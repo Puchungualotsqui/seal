@@ -2162,7 +2162,10 @@ Main :: task() {
 func TestRemovedFrontendTypesAreInvalid(t *testing.T) {
 	file := source.NewFile("test.seal", `
 Main :: task() {
-    a: uint = 1
+    a: usize = 1
+    b: isize = 1
+    c: uintptr = 1
+    d: voidptr = nil
 }
 `)
 	reporter := diag.NewReporter()
@@ -2188,7 +2191,11 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `undefined symbol "uint"`) {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	text := reporter.String()
+
+	for _, name := range []string{"usize", "isize", "uintptr", "voidptr"} {
+		if !strings.Contains(text, `undefined symbol "`+name+`"`) {
+			t.Fatalf("expected undefined symbol diagnostic for %q, got:\n%s", name, text)
+		}
 	}
 }
