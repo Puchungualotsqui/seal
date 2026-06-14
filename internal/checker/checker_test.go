@@ -1198,26 +1198,26 @@ Main :: task() {
 
 func TestArrayOfInterfaceValuesIsValid(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Goblin :: impl {
-    Enemy,
+Enemy<Goblin> :: impl {
+    Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy = &g
-    enemies: [1]Enemy = [e]
+    e: Enemy<Goblin> = &g
+    enemies: [1]Enemy<Goblin> = [e]
 }
 `)
 
@@ -1817,25 +1817,25 @@ Main :: task() {
 
 func TestInterfaceAssignmentAndDispatch(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Goblin :: impl {
-    Enemy,
+Enemy<Goblin> :: impl {
+    Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy = &g
+    e: Enemy<Goblin> = &g
     hp := Health(e)
     assert(hp == 10)
 }
@@ -1848,15 +1848,18 @@ Main :: task() {
 
 func TestInterfaceCanBeNil(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
+}
+
+Goblin :: struct {
+    hp int
 }
 
 Main :: task() {
-    e: Enemy = nil
+    e: Enemy<Goblin> = nil
 }
 `)
-
 	if reporter.HasErrors() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
@@ -1864,21 +1867,21 @@ Main :: task() {
 
 func TestRejectInterfaceAssignmentWithoutImpl(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy = &g
+    e: Enemy<Goblin> = &g
 }
 `)
 
@@ -1893,16 +1896,15 @@ Main :: task() {
 
 func TestRejectImplMissingRequirement(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Goblin :: impl {
-    Enemy,
+Enemy<Goblin> :: impl {
 }
 `)
 
@@ -1917,25 +1919,25 @@ Goblin :: impl {
 
 func TestRejectInterfaceMethodSyntax(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Goblin :: impl {
-    Enemy,
+Enemy<Goblin> :: impl {
+    Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy = &g
+    e: Enemy<Goblin> = &g
     hp := e.Health()
 }
 `)

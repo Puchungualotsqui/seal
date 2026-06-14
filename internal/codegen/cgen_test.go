@@ -969,25 +969,25 @@ Main :: task() {
 
 func TestGenerateInterfaceAssignmentAndDispatch(t *testing.T) {
 	out, reporter := generate(t, `
-Enemy :: interface {
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Health :: task(e *T) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Goblin :: impl {
-    Enemy,
+Enemy<Goblin> :: impl {
+    Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy = &g
+    e: Enemy<Goblin> = &g
     hp := Health(e)
 }
 `)
