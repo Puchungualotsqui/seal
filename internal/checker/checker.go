@@ -16,18 +16,34 @@ type TypeKind int
 
 const (
 	TypeInvalid TypeKind = iota
+
+	// Internal only. Not a Seal source type.
 	TypeVoid
+
 	TypeBool
+
 	TypeInt
+	TypeUint
+
+	TypeI8
+	TypeI16
+	TypeI32
+	TypeI64
+
+	TypeU8
+	TypeU16
+	TypeU32
+	TypeU64
+
 	TypeF32
 	TypeF64
+
 	TypeChar
 	TypeString
 	TypeCstring
-	TypeU8
-	TypeUsize
 	TypeRawptr
 	TypeAny
+
 	TypeNil
 	TypeEnumLiteral
 
@@ -102,38 +118,59 @@ func (t *Type) String() string {
 	}
 
 	switch t.Kind {
-	case TypeInvalid:
-		return "<invalid>"
 	case TypeVoid:
 		return "void"
 	case TypeBool:
 		return "bool"
+
 	case TypeInt:
 		return "int"
+	case TypeUint:
+		return "uint"
+
+	case TypeI8:
+		return "i8"
+	case TypeI16:
+		return "i16"
+	case TypeI32:
+		return "i32"
+	case TypeI64:
+		return "i64"
+
+	case TypeU8:
+		return "u8"
+	case TypeU16:
+		return "u16"
+	case TypeU32:
+		return "u32"
+	case TypeU64:
+		return "u64"
+
 	case TypeF32:
 		return "f32"
 	case TypeF64:
 		return "f64"
+
 	case TypeChar:
 		return "char"
 	case TypeString:
 		return "string"
 	case TypeCstring:
 		return "cstring"
-	case TypeU8:
-		return "u8"
+	case TypeRawptr:
+		return "rawptr"
+	case TypeAny:
+		return "any"
+	case TypeInvalid:
+		return "<invalid>"
+
 	case TypeUntypedInt:
 		return "untyped int"
 	case TypeUntypedFloat:
 		return "untyped float"
 	case TypePointer:
 		return "*" + t.Elem.String()
-	case TypeUsize:
-		return "usize"
-	case TypeRawptr:
-		return "rawptr"
-	case TypeAny:
-		return "any"
+
 	case TypeArray:
 		if t.Inferred {
 			return "[]" + t.Elem.String()
@@ -180,23 +217,65 @@ func (t *Type) String() string {
 }
 
 var (
-	InvalidType      = &Type{Kind: TypeInvalid, Name: "<invalid>"}
-	VoidType         = &Type{Kind: TypeVoid, Name: "void"}
-	BoolType         = &Type{Kind: TypeBool, Name: "bool"}
-	IntType          = &Type{Kind: TypeInt, Name: "int"}
-	F32Type          = &Type{Kind: TypeF32, Name: "f32"}
-	F64Type          = &Type{Kind: TypeF64, Name: "f64"}
-	CharType         = &Type{Kind: TypeChar, Name: "char"}
-	StringType       = &Type{Kind: TypeString, Name: "string"}
-	CstringType      = &Type{Kind: TypeCstring, Name: "cstring"}
-	U8Type           = &Type{Kind: TypeU8, Name: "u8"}
-	UsizeType        = &Type{Kind: TypeUsize, Name: "usize"}
-	RawptrType       = &Type{Kind: TypeRawptr, Name: "rawptr"}
-	AnyType          = &Type{Kind: TypeAny, Name: "any"}
+	InvalidType = &Type{Kind: TypeInvalid, Name: "<invalid>"}
+
+	// Internal only.
+	VoidType = &Type{Kind: TypeVoid, Name: "void"}
+
+	BoolType = &Type{Kind: TypeBool, Name: "bool"}
+
+	IntType  = &Type{Kind: TypeInt, Name: "int"}
+	UintType = &Type{Kind: TypeUint, Name: "uint"}
+
+	I8Type  = &Type{Kind: TypeI8, Name: "i8"}
+	I16Type = &Type{Kind: TypeI16, Name: "i16"}
+	I32Type = &Type{Kind: TypeI32, Name: "i32"}
+	I64Type = &Type{Kind: TypeI64, Name: "i64"}
+
+	U8Type  = &Type{Kind: TypeU8, Name: "u8"}
+	U16Type = &Type{Kind: TypeU16, Name: "u16"}
+	U32Type = &Type{Kind: TypeU32, Name: "u32"}
+	U64Type = &Type{Kind: TypeU64, Name: "u64"}
+
+	F32Type = &Type{Kind: TypeF32, Name: "f32"}
+	F64Type = &Type{Kind: TypeF64, Name: "f64"}
+
+	CharType    = &Type{Kind: TypeChar, Name: "char"}
+	StringType  = &Type{Kind: TypeString, Name: "string"}
+	CstringType = &Type{Kind: TypeCstring, Name: "cstring"}
+	RawptrType  = &Type{Kind: TypeRawptr, Name: "rawptr"}
+	AnyType     = &Type{Kind: TypeAny, Name: "any"}
+
 	NilType          = &Type{Kind: TypeNil, Name: "nil"}
 	UntypedIntType   = &Type{Kind: TypeUntypedInt, Name: "untyped int"}
 	UntypedFloatType = &Type{Kind: TypeUntypedFloat, Name: "untyped float"}
 )
+
+var checkerBuiltinTypes = map[string]*Type{
+	"bool": BoolType,
+
+	"int":  IntType,
+	"uint": UintType,
+
+	"i8":  I8Type,
+	"i16": I16Type,
+	"i32": I32Type,
+	"i64": I64Type,
+
+	"u8":  U8Type,
+	"u16": U16Type,
+	"u32": U32Type,
+	"u64": U64Type,
+
+	"f32": F32Type,
+	"f64": F64Type,
+
+	"char":    CharType,
+	"string":  StringType,
+	"cstring": CstringType,
+	"rawptr":  RawptrType,
+	"any":     AnyType,
+}
 
 type SymbolKind int
 
@@ -564,9 +643,11 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 	}
 
 	if src.Kind == TypeUntypedInt {
-		switch dst.Kind {
-		case TypeInt, TypeUsize, TypeU8:
+		if c.isIntegerLike(dst) {
 			return 1, true
+		}
+
+		switch dst.Kind {
 		case TypeF32, TypeF64:
 			return 2, true
 		}
@@ -633,22 +714,7 @@ func (c *Checker) resultTypeFromCall(taskType *Type, span source.Span) *Type {
 }
 
 func (c *Checker) declareBuiltins(scope *Scope) {
-	builtinTypes := map[string]*Type{
-		"void":    VoidType,
-		"bool":    BoolType,
-		"int":     IntType,
-		"u8":      U8Type,
-		"usize":   UsizeType,
-		"rawptr":  RawptrType,
-		"any":     AnyType,
-		"f32":     F32Type,
-		"f64":     F64Type,
-		"char":    CharType,
-		"string":  StringType,
-		"cstring": CstringType,
-	}
-
-	for name, typ := range builtinTypes {
+	for name, typ := range checkerBuiltinTypes {
 		scope.Declare(&Symbol{
 			Name: name,
 			Kind: SymbolType,
@@ -1812,6 +1878,42 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
 		return InvalidType
 
+	case token.Percent:
+		if c.isIntegerLike(left) && c.isIntegerLike(right) {
+			result, ok := c.numericResultType(left, right)
+			if !ok {
+				c.diags.Add(e.Span(), fmt.Sprintf("mismatched integer operands: %s and %s", left.String(), right.String()))
+				return InvalidType
+			}
+
+			return result
+		}
+
+		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
+			return result
+		}
+
+		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires integer operands", e.Op.String()))
+		return InvalidType
+
+	case token.Amp, token.Pipe, token.Caret:
+		if c.isIntegerLike(left) && c.isIntegerLike(right) {
+			result, ok := c.numericResultType(left, right)
+			if !ok {
+				c.diags.Add(e.Span(), fmt.Sprintf("mismatched integer operands: %s and %s", left.String(), right.String()))
+				return InvalidType
+			}
+
+			return result
+		}
+
+		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
+			return result
+		}
+
+		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires integer operands", e.Op.String()))
+		return InvalidType
+
 	case token.EqEq:
 		if c.builtinEqualityCompatible(left, right) {
 			return BoolType
@@ -1833,7 +1935,6 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 			return result
 		}
 
-		// Derive != from == if only == exists.
 		if result, ok := c.checkOperatorOverload(scope, "==", []*Type{left, right}, e.Span(), false); ok {
 			if !c.sameType(result, BoolType) {
 				c.diags.Add(e.Span(), "derived != requires == overload to return bool")
@@ -2079,19 +2180,28 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 		return []*Type{result}
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !c.isShadowedPrimitive(scope, "len") {
-		result := c.checkLenCall(e.Args, argTypes, e.Span())
-		return []*Type{result}
-	}
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
+			switch kind {
+			case builtin.TaskLen:
+				return []*Type{c.checkLenCall(e.Args, argTypes, e.Span())}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !c.isShadowedPrimitive(scope, "size") {
-		result := c.checkSizeCall(e.Args, argTypes, e.Span())
-		return []*Type{result}
-	}
+			case builtin.TaskSize:
+				return []*Type{c.checkSizeCall(e.Args, argTypes, e.Span())}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !c.isShadowedPrimitive(scope, "assert") {
-		result := c.checkAssertCall(e.Args, argTypes, e.Span())
-		return []*Type{result}
+			case builtin.TaskAssert:
+				return []*Type{c.checkAssertCall(e.Args, argTypes, e.Span())}
+
+			case builtin.TaskPanic:
+				return []*Type{c.checkPanicCall(e.Args, argTypes, e.Span())}
+
+			case builtin.TaskTrap:
+				return []*Type{c.checkNoArgVoidPrimitive("trap", e.Args, argTypes, e.Span())}
+
+			case builtin.TaskUnreachable:
+				return []*Type{c.checkNoArgVoidPrimitive("unreachable", e.Args, argTypes, e.Span())}
+			}
+		}
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2357,6 +2467,11 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 
 	name := id.Name.Name
 
+	if c.isShadowedPrimitive(scope, name) {
+		c.diags.Add(id.Span(), fmt.Sprintf("%q is not an intrinsic generic task in this scope", name))
+		return InvalidType
+	}
+
 	task, ok := builtin.LookupTask(name)
 	if !ok || !task.Generic {
 		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
@@ -2368,13 +2483,24 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 		return InvalidType
 	}
 
+	if len(argTypes) != 1 {
+		c.diags.Add(span, fmt.Sprintf("%s expects exactly 1 value argument, got %d", name, len(argTypes)))
+		return InvalidType
+	}
+
 	targetType := c.typeFromAst(scope, gen.Args[0])
 
 	switch task.Kind {
 	case builtin.TaskAnyAs:
+		if !c.sameType(argTypes[0], AnyType) {
+			c.diags.Add(args[0].Span(), fmt.Sprintf("anyAs expects any, got %s", argTypes[0].String()))
+		}
 		return targetType
 
 	case builtin.TaskAnyIs:
+		if !c.sameType(argTypes[0], AnyType) {
+			c.diags.Add(args[0].Span(), fmt.Sprintf("anyIs expects any, got %s", argTypes[0].String()))
+		}
 		return BoolType
 
 	case builtin.TaskCast:
@@ -2389,12 +2515,12 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
 	if len(argTypes) != 1 {
 		c.diags.Add(span, fmt.Sprintf("size expects 1 argument, got %d", len(argTypes)))
-		return UsizeType
+		return UintType
 	}
 
 	t := argTypes[0]
 	if t == nil || t.Kind == TypeInvalid {
-		return UsizeType
+		return UintType
 	}
 
 	switch t.Kind {
@@ -2404,30 +2530,30 @@ func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.S
 		TypeTask,
 		TypeEnumLiteral:
 		c.diags.Add(args[0].Span(), fmt.Sprintf("size does not support %s", t.String()))
-		return UsizeType
+		return UintType
 	}
 
-	return UsizeType
+	return UintType
 }
 
 func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
 	if len(argTypes) != 1 {
 		c.diags.Add(span, fmt.Sprintf("len expects 1 argument, got %d", len(argTypes)))
-		return UsizeType
+		return UintType
 	}
 
 	t := argTypes[0]
 	if t == nil || t.Kind == TypeInvalid {
-		return UsizeType
+		return UintType
 	}
 
 	switch t.Kind {
 	case TypeArray, TypeVariadic:
-		return UsizeType
+		return UintType
 
 	default:
 		c.diags.Add(args[0].Span(), fmt.Sprintf("len does not support %s", t.String()))
-		return UsizeType
+		return UintType
 	}
 }
 
@@ -2470,7 +2596,7 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 	leftType := c.checkExpr(scope, e.Left)
 
 	if leftType.Kind == TypeString {
-		c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q; use len(s) or s[i]", e.Name.Name))
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q; use size(s) or s[i]", e.Name.Name))
 		return InvalidType
 	}
 
@@ -2508,7 +2634,7 @@ func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
 	indexType := c.checkExpr(scope, e.Index)
 
 	if !c.isIndexType(indexType) {
-		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be int or usize, got %s", indexType.String()))
+		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be integer, got %s", indexType.String()))
 	}
 
 	switch leftType.Kind {
@@ -2712,8 +2838,8 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 			}
 
 			lenType := c.checkExpr(scope, t.Len)
-			if !c.assignable(IntType, lenType) {
-				c.diags.Add(t.Len.Span(), fmt.Sprintf("array length must be int, got %s", lenType.String()))
+			if !c.isIntegerLike(lenType) {
+				c.diags.Add(t.Len.Span(), fmt.Sprintf("array length must be integer, got %s", lenType.String()))
 			}
 		}
 
@@ -2885,11 +3011,7 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if src.Kind == TypeUntypedInt {
-		return dst.Kind == TypeInt ||
-			dst.Kind == TypeUsize ||
-			dst.Kind == TypeU8 ||
-			dst.Kind == TypeF32 ||
-			dst.Kind == TypeF64
+		return c.isIntegerLike(dst) || dst.Kind == TypeF32 || dst.Kind == TypeF64
 	}
 
 	if src.Kind == TypeUntypedFloat {
@@ -2984,17 +3106,62 @@ func (c *Checker) defaultType(t *Type) *Type {
 	}
 }
 
-func (c *Checker) isNumeric(t *Type) bool {
+func (c *Checker) isSignedInteger(t *Type) bool {
 	if t == nil {
 		return false
 	}
 
 	switch t.Kind {
-	case TypeInt, TypeU8, TypeUsize, TypeChar, TypeF32, TypeF64, TypeUntypedInt, TypeUntypedFloat:
+	case TypeInt, TypeI8, TypeI16, TypeI32, TypeI64:
 		return true
 	default:
 		return false
 	}
+}
+
+func (c *Checker) isUnsignedInteger(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeUint, TypeU8, TypeU16, TypeU32, TypeU64:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Checker) isIntegerLike(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	if t.Kind == TypeUntypedInt {
+		return true
+	}
+
+	if t.Kind == TypeChar {
+		return true
+	}
+
+	return c.isSignedInteger(t) || c.isUnsignedInteger(t)
+}
+
+func (c *Checker) isFloat(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	return t.Kind == TypeF32 || t.Kind == TypeF64 || t.Kind == TypeUntypedFloat
+}
+
+func (c *Checker) isNumeric(t *Type) bool {
+	return c.isIntegerLike(t) || c.isFloat(t)
+}
+
+func (c *Checker) isIndexType(t *Type) bool {
+	return c.isIntegerLike(t)
 }
 
 func (c *Checker) isByteIndexableValue(t *Type) bool {
@@ -3043,20 +3210,6 @@ func (c *Checker) isAddressableExpr(scope *Scope, expr ast.Expr) bool {
 	return false
 }
 
-func (c *Checker) isIndexType(t *Type) bool {
-	if t == nil {
-		return false
-	}
-
-	switch t.Kind {
-	case TypeInt, TypeUsize, TypeUntypedInt:
-		return true
-
-	default:
-		return false
-	}
-}
-
 func isInterfaceSelfParam(t ast.Type) bool {
 	ptr, ok := t.(*ast.PointerType)
 	if !ok {
@@ -3069,19 +3222,6 @@ func isInterfaceSelfParam(t ast.Type) bool {
 	}
 
 	return len(named.Parts) == 1 && named.Parts[0].Name == "T"
-}
-
-func (c *Checker) isIntegerLike(t *Type) bool {
-	if t == nil {
-		return false
-	}
-
-	switch t.Kind {
-	case TypeInt, TypeU8, TypeUsize, TypeChar, TypeUntypedInt:
-		return true
-	default:
-		return false
-	}
 }
 
 func (c *Checker) numericResultType(a *Type, b *Type) (*Type, bool) {
@@ -3133,8 +3273,8 @@ func (c *Checker) numericResultType(a *Type, b *Type) (*Type, bool) {
 		return a, true
 	}
 
-	// Allow comparisons between integer-like types, but avoid silently choosing
-	// a result type for arithmetic with mixed concrete integer types.
+	// Do not silently choose a concrete result for mixed integer arithmetic.
+	// Users should cast explicitly.
 	if c.isIntegerLike(a) && c.isIntegerLike(b) {
 		return InvalidType, false
 	}
@@ -3586,8 +3726,15 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 	}
 
 	switch t.Kind {
-	case TypeBool, TypeInt, TypeU8, TypeUsize, TypeChar, TypeF32, TypeF64, TypeString, TypeCstring:
+	case TypeBool,
+		TypeInt, TypeUint,
+		TypeI8, TypeI16, TypeI32, TypeI64,
+		TypeU8, TypeU16, TypeU32, TypeU64,
+		TypeChar,
+		TypeF32, TypeF64,
+		TypeString, TypeCstring:
 		return true
+
 	default:
 		return false
 	}
@@ -3641,8 +3788,7 @@ func DebugSummary(scope *Scope) string {
 	count := 0
 
 	for _, sym := range scope.Symbols {
-		switch sym.Name {
-		case "void", "bool", "int", "u8", "usize", "rawptr", "any", "f32", "f64", "char", "string", "cstring":
+		if builtin.IsType(sym.Name) {
 			continue
 		}
 

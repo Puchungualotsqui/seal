@@ -45,14 +45,30 @@ func (t CType) Decl(name string) string {
 }
 
 var (
-	CInvalid    = CType{Name: "/*invalid*/ int", SealName: "<invalid>"}
+	CInvalid = CType{Name: "/*invalid*/ int", SealName: "<invalid>"}
+
+	// Internal C-only helpers.
 	CVoid       = CType{Name: "void", SealName: "void"}
-	CBool       = CType{Name: "bool", SealName: "bool"}
-	CInt        = CType{Name: "int", SealName: "int"}
-	CF32        = CType{Name: "float", SealName: "f32"}
-	CF64        = CType{Name: "double", SealName: "f64"}
-	CU8         = CType{Name: "unsigned char", SealName: "u8"}
-	CUsize      = CType{Name: "size_t", SealName: "usize"}
+	CMainReturn = CType{Name: "int", SealName: "__c_main_return"}
+
+	CBool = CType{Name: "bool", SealName: "bool"}
+
+	CInt  = CType{Name: "intptr_t", SealName: "int"}
+	CUint = CType{Name: "uintptr_t", SealName: "uint"}
+
+	CI8  = CType{Name: "int8_t", SealName: "i8"}
+	CI16 = CType{Name: "int16_t", SealName: "i16"}
+	CI32 = CType{Name: "int32_t", SealName: "i32"}
+	CI64 = CType{Name: "int64_t", SealName: "i64"}
+
+	CU8  = CType{Name: "uint8_t", SealName: "u8"}
+	CU16 = CType{Name: "uint16_t", SealName: "u16"}
+	CU32 = CType{Name: "uint32_t", SealName: "u32"}
+	CU64 = CType{Name: "uint64_t", SealName: "u64"}
+
+	CF32 = CType{Name: "float", SealName: "f32"}
+	CF64 = CType{Name: "double", SealName: "f64"}
+
 	CChar       = CType{Name: "uint32_t", SealName: "char"}
 	CRawptr     = CType{Name: "void *", SealName: "rawptr"}
 	CAny        = CType{Name: "sealAny", SealName: "any"}
@@ -275,7 +291,7 @@ func (g *Generator) collect(file *ast.File) {
 
 			if len(d.Results) == 0 {
 				if d.Name.Name == "Main" {
-					info.ReturnType = CInt
+					info.ReturnType = CMainReturn
 				} else {
 					info.ReturnType = CVoid
 				}
@@ -369,14 +385,14 @@ func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
 	}
 
 	if typ, ok := g.cTypeFromSizeArg(e.Args[0]); ok {
-		return fmt.Sprintf("(size_t)sizeof(%s)", typ.Name)
+		return fmt.Sprintf("(uintptr_t)sizeof(%s)", typ.Name)
 	}
 
 	argType := g.inferExprType(e.Args[0], nil)
 
 	if argType.SealName == "string" {
 		value := g.emitExpr(e.Args[0], nil)
-		return fmt.Sprintf("(%s).byte_len", value)
+		return fmt.Sprintf("(uintptr_t)(%s).byte_len", value)
 	}
 
 	if argType.SealName == "cstring" {
@@ -385,7 +401,7 @@ func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
 	}
 
 	value := g.emitExpr(e.Args[0], nil)
-	return fmt.Sprintf("(size_t)sizeof(%s)", value)
+	return fmt.Sprintf("(uintptr_t)sizeof(%s)", value)
 }
 
 func (g *Generator) emitNoArgRuntimeCall(name string, cName string, e *ast.CallExpr) string {
@@ -621,7 +637,7 @@ func (g *Generator) emitImportedTaskPrototypes() {
 
 		for _, taskName := range taskNames {
 			info := pkg.Tasks[taskName]
-			if taskName == "Main" {
+			if taskName == "Main" || info.IsIntrinsic {
 				continue
 			}
 
@@ -1641,7 +1657,7 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		leftType := g.inferExprType(e.Left, nil)
 
 		if leftType.SealName == "string" {
-			g.error(e.Name.Span(), fmt.Sprintf("string has no field %q; use len(s) or s[i]", e.Name.Name))
+			g.error(e.Name.Span(), fmt.Sprintf("string has no field %q; use size(s) or s[i]", e.Name.Name))
 			return "0"
 		}
 
@@ -1779,31 +1795,13 @@ func (g *Generator) emitAnyExpr(expr ast.Expr) string {
 
 	value := g.emitExpr(expr, &srcType)
 
-	switch srcType.SealName {
-	case "bool":
-		return fmt.Sprintf("sealAny_bool(%s)", value)
-	case "int":
-		return fmt.Sprintf("sealAny_int(%s)", value)
-	case "u8":
-		return fmt.Sprintf("sealAny_u8(%s)", value)
-	case "usize":
-		return fmt.Sprintf("sealAny_usize(%s)", value)
-	case "char":
-		return fmt.Sprintf("sealAny_char(%s)", value)
-	case "f32":
-		return fmt.Sprintf("sealAny_f32(%s)", value)
-	case "f64":
-		return fmt.Sprintf("sealAny_f64(%s)", value)
-	case "string":
-		return fmt.Sprintf("sealAny_string(%s)", value)
-	case "cstring":
-		return fmt.Sprintf("sealAny_cstring(%s)", value)
-	case "rawptr":
-		return fmt.Sprintf("sealAny_rawptr(%s)", value)
-	default:
+	spec, ok := builtin.LookupType(srcType.SealName)
+	if !ok || spec.AnyCtor == "" {
 		g.error(expr.Span(), fmt.Sprintf("cannot box %s as any yet", srcType.String()))
 		return "sealAny_any((sealAny){0})"
 	}
+
+	return fmt.Sprintf("%s(%s)", spec.AnyCtor, value)
 }
 
 func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
@@ -1813,16 +1811,6 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		return g.emitGenericIntrinsicCall(gen, e.Args)
-	}
-
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !g.isLocalValueName("len") {
-		return g.emitLenCall(e)
-	}
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !g.isLocalValueName("size") {
-		return g.emitSizeCall(e)
-	}
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !g.isLocalValueName("assert") {
-		return g.emitAssertCall(e)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -1877,6 +1865,12 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 		return "0"
 	}
 
+	task, ok := builtin.LookupTask(id.Name.Name)
+	if !ok || !task.Generic {
+		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
+		return "0"
+	}
+
 	if len(gen.Args) != 1 {
 		g.error(gen.Span(), fmt.Sprintf("%s expects exactly 1 type argument", id.Name.Name))
 		return "0"
@@ -1890,8 +1884,8 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 	target := g.cTypeFromAst(gen.Args[0])
 	value := g.emitExpr(args[0], nil)
 
-	switch id.Name.Name {
-	case "anyIs":
+	switch task.Kind {
+	case builtin.TaskAnyIs:
 		kind, ok := g.sealTypeKindFor(target)
 		if !ok {
 			g.error(gen.Args[0].Span(), fmt.Sprintf("anyIs does not support %s yet", target.String()))
@@ -1900,7 +1894,7 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 
 		return fmt.Sprintf("((%s).type == %s)", value, kind)
 
-	case "anyAs":
+	case builtin.TaskAnyAs:
 		field, ok := g.sealAnyFieldFor(target)
 		if !ok {
 			g.error(gen.Args[0].Span(), fmt.Sprintf("anyAs does not support %s yet", target.String()))
@@ -1913,6 +1907,9 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 
 		return fmt.Sprintf("((%s).value.%s)", value, field)
 
+	case builtin.TaskCast:
+		return fmt.Sprintf("((%s)(%s))", target.Name, value)
+
 	default:
 		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
 		return "0"
@@ -1920,61 +1917,25 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 }
 
 func (g *Generator) sealTypeKindFor(t CType) (string, bool) {
-	switch t.SealName {
-	case "bool":
-		return "sealType_bool", true
-	case "int":
-		return "sealType_int", true
-	case "u8":
-		return "sealType_u8", true
-	case "usize":
-		return "sealType_usize", true
-	case "char":
-		return "sealType_char", true
-	case "f32":
-		return "sealType_f32", true
-	case "f64":
-		return "sealType_f64", true
-	case "string":
-		return "sealType_string", true
-	case "cstring":
-		return "sealType_cstring", true
-	case "rawptr":
-		return "sealType_rawptr", true
-	case "any":
-		return "sealType_any", true
-	default:
+	spec, ok := builtin.LookupType(t.SealName)
+	if !ok || spec.AnyKind == "" {
 		return "", false
 	}
+
+	return spec.AnyKind, true
 }
 
 func (g *Generator) sealAnyFieldFor(t CType) (string, bool) {
-	switch t.SealName {
-	case "bool":
-		return "as_bool", true
-	case "int":
-		return "as_int", true
-	case "u8":
-		return "as_u8", true
-	case "usize":
-		return "as_usize", true
-	case "char":
-		return "as_char", true
-	case "f32":
-		return "as_f32", true
-	case "f64":
-		return "as_f64", true
-	case "string":
-		return "as_string", true
-	case "cstring":
-		return "as_cstring", true
-	case "rawptr":
-		return "as_rawptr", true
-	case "any":
+	if t.SealName == "any" {
 		return "", true
-	default:
+	}
+
+	spec, ok := builtin.LookupType(t.SealName)
+	if !ok || spec.AnyField == "" {
 		return "", false
 	}
+
+	return spec.AnyField, true
 }
 
 func (g *Generator) emitLenCall(e *ast.CallExpr) string {
@@ -1987,11 +1948,11 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 	arg := g.emitExpr(e.Args[0], nil)
 
 	if argType.IsVariadic {
-		return fmt.Sprintf("((%s).len)", arg)
+		return fmt.Sprintf("((uintptr_t)(%s).len)", arg)
 	}
 
 	if argType.IsArray {
-		return fmt.Sprintf("(size_t)%s", argType.ArrayLen)
+		return fmt.Sprintf("(uintptr_t)%s", argType.ArrayLen)
 	}
 
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
@@ -2175,6 +2136,72 @@ func (g *Generator) emitArrayDataPointer(expr ast.Expr, elem CType) string {
 	}
 
 	return g.emitExpr(expr, nil)
+}
+
+func (g *Generator) emitAnyRuntimeSupport() {
+	anyTypes := builtin.AnyTypes()
+
+	g.line("typedef enum sealTypeKind {")
+	g.indent++
+	g.line("sealType_invalid = 0,")
+
+	for i, typ := range anyTypes {
+		comma := ","
+		if i == len(anyTypes)-1 {
+			comma = ""
+		}
+
+		g.linef("%s%s", typ.AnyKind, comma)
+	}
+
+	g.indent--
+	g.line("} sealTypeKind;")
+	g.line("")
+
+	g.line("typedef struct sealAny {")
+	g.indent++
+	g.line("sealTypeKind type;")
+	g.line("union {")
+	g.indent++
+
+	for _, typ := range anyTypes {
+		if typ.Name == "any" {
+			continue
+		}
+
+		if typ.AnyField == "" {
+			continue
+		}
+
+		g.linef("%s %s;", typ.CName, typ.AnyField)
+	}
+
+	g.indent--
+	g.line("} value;")
+	g.indent--
+	g.line("} sealAny;")
+	g.line("")
+
+	for _, typ := range anyTypes {
+		if typ.Name == "any" {
+			g.line("static inline sealAny sealAny_any(sealAny value) { return value; }")
+			continue
+		}
+
+		if typ.AnyField == "" {
+			continue
+		}
+
+		g.linef(
+			"static inline sealAny %s(%s value) { sealAny out; out.type = %s; out.value.%s = value; return out; }",
+			typ.AnyCtor,
+			typ.CName,
+			typ.AnyKind,
+			typ.AnyField,
+		)
+	}
+
+	g.line("")
 }
 
 func (g *Generator) emitRepackedArraySpread(elem CType, expr ast.Expr, srcType CType, variadicType CType) string {
@@ -2459,57 +2486,7 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("}")
 	g.line("")
 
-	g.line("typedef enum sealTypeKind {")
-	g.indent++
-	g.line("sealType_invalid = 0,")
-	g.line("sealType_bool,")
-	g.line("sealType_int,")
-	g.line("sealType_u8,")
-	g.line("sealType_usize,")
-	g.line("sealType_char,")
-	g.line("sealType_f32,")
-	g.line("sealType_f64,")
-	g.line("sealType_string,")
-	g.line("sealType_cstring,")
-	g.line("sealType_rawptr,")
-	g.line("sealType_any")
-	g.indent--
-	g.line("} sealTypeKind;")
-	g.line("")
-
-	g.line("typedef struct sealAny {")
-	g.indent++
-	g.line("sealTypeKind type;")
-	g.line("union {")
-	g.indent++
-	g.line("bool as_bool;")
-	g.line("int as_int;")
-	g.line("unsigned char as_u8;")
-	g.line("size_t as_usize;")
-	g.line("uint32_t as_char;")
-	g.line("float as_f32;")
-	g.line("double as_f64;")
-	g.line("sealString as_string;")
-	g.line("const char *as_cstring;")
-	g.line("void *as_rawptr;")
-	g.indent--
-	g.line("} value;")
-	g.indent--
-	g.line("} sealAny;")
-	g.line("")
-
-	g.line("static inline sealAny sealAny_bool(bool value) { sealAny out; out.type = sealType_bool; out.value.as_bool = value; return out; }")
-	g.line("static inline sealAny sealAny_int(int value) { sealAny out; out.type = sealType_int; out.value.as_int = value; return out; }")
-	g.line("static inline sealAny sealAny_u8(unsigned char value) { sealAny out; out.type = sealType_u8; out.value.as_u8 = value; return out; }")
-	g.line("static inline sealAny sealAny_usize(size_t value) { sealAny out; out.type = sealType_usize; out.value.as_usize = value; return out; }")
-	g.line("static inline sealAny sealAny_char(uint32_t value) { sealAny out; out.type = sealType_char; out.value.as_char = value; return out; }")
-	g.line("static inline sealAny sealAny_f32(float value) { sealAny out; out.type = sealType_f32; out.value.as_f32 = value; return out; }")
-	g.line("static inline sealAny sealAny_f64(double value) { sealAny out; out.type = sealType_f64; out.value.as_f64 = value; return out; }")
-	g.line("static inline sealAny sealAny_string(sealString value) { sealAny out; out.type = sealType_string; out.value.as_string = value; return out; }")
-	g.line("static inline sealAny sealAny_cstring(const char *value) { sealAny out; out.type = sealType_cstring; out.value.as_cstring = value; return out; }")
-	g.line("static inline sealAny sealAny_rawptr(void *value) { sealAny out; out.type = sealType_rawptr; out.value.as_rawptr = value; return out; }")
-	g.line("static inline sealAny sealAny_any(sealAny value) { return value; }")
-	g.line("")
+	g.emitAnyRuntimeSupport()
 
 	g.line("static inline void seal_trap(void) {")
 	g.indent++
@@ -2557,17 +2534,15 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("}")
 	g.line("")
 
-	g.emitVariadicRuntimeType(CBool)
-	g.emitVariadicRuntimeType(CInt)
-	g.emitVariadicRuntimeType(CU8)
-	g.emitVariadicRuntimeType(CUsize)
-	g.emitVariadicRuntimeType(CChar)
-	g.emitVariadicRuntimeType(CF32)
-	g.emitVariadicRuntimeType(CF64)
-	g.emitVariadicRuntimeType(CSealString)
-	g.emitVariadicRuntimeType(CCString)
-	g.emitVariadicRuntimeType(CRawptr)
-	g.emitVariadicRuntimeType(CAny)
+	for _, typ := range builtin.Types {
+		cType := CType{
+			Name:     typ.CName,
+			SealName: typ.Name,
+		}
+
+		g.emitVariadicRuntimeType(cType)
+	}
+
 	g.line("")
 }
 
@@ -2647,11 +2622,11 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 
 	if id, ok := call.Callee.(*ast.IdentExpr); ok {
 		if id.Name.Name == "len" {
-			return []CType{CUsize}
+			return []CType{CUint}
 		}
 
 		if id.Name.Name == "size" {
-			return []CType{CUsize}
+			return []CType{CUint}
 		}
 
 		if id.Name.Name == "assert" {
@@ -2811,11 +2786,11 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !g.isLocalValueName("len") {
-			return CUsize
+			return CUint
 		}
 
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && !g.isLocalValueName("size") {
-			return CUsize
+			return CUint
 		}
 
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "assert" && !g.isLocalValueName("assert") {
@@ -2823,15 +2798,23 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		}
 
 		if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-			if id, ok := gen.Base.(*ast.IdentExpr); ok {
-				switch id.Name.Name {
-				case "anyIs":
-					return CBool
+			id, ok := gen.Base.(*ast.IdentExpr)
+			if !ok {
+				return CInvalid
+			}
 
-				case "anyAs":
-					if len(gen.Args) == 1 {
-						return g.cTypeFromAst(gen.Args[0])
-					}
+			task, ok := builtin.LookupTask(id.Name.Name)
+			if !ok || !task.Generic {
+				return CInvalid
+			}
+
+			switch task.Kind {
+			case builtin.TaskAnyIs:
+				return CBool
+
+			case builtin.TaskAnyAs, builtin.TaskCast:
+				if len(gen.Args) == 1 {
+					return g.cTypeFromAst(gen.Args[0])
 				}
 			}
 
@@ -3093,12 +3076,11 @@ func (g *Generator) isScalarByteIndexableCType(t CType) bool {
 
 	switch t.SealName {
 	case "bool",
-		"int",
-		"u8",
-		"usize",
+		"int", "uint",
+		"i8", "i16", "i32", "i64",
+		"u8", "u16", "u32", "u64",
 		"char",
-		"f32",
-		"f64",
+		"f32", "f64",
 		"rawptr":
 		return true
 

@@ -2130,3 +2130,65 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestNumericPrimitiveTypes(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    a: i8 = 1
+    b: i16 = 2
+    c: i32 = 3
+    d: i64 = 4
+
+    e: u8 = 1
+    f: u16 = 2
+    g: u32 = 3
+    h: u64 = 4
+
+    i: int = 5
+    j: uint = 6
+
+    x: f32 = 1.5
+    y: f64 = 2.5
+
+    flag: bool = true
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRemovedFrontendTypesAreInvalid(t *testing.T) {
+	file := source.NewFile("test.seal", `
+Main :: task() {
+    a: usize = 1
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `undefined symbol "usize"`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
