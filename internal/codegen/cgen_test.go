@@ -1143,3 +1143,56 @@ Main :: task() {
 		t.Fatalf("expected distinct variable, got:\n%s", out)
 	}
 }
+
+func TestGenerateDistinctCast(t *testing.T) {
+	out, reporter := generate(t, `
+Id :: distinct int
+
+Main :: task() {
+    x := cast<Id>(5)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef intptr_t Id;") {
+		t.Fatalf("expected distinct typedef, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Id x = ((Id)(5));") {
+		t.Fatalf("expected distinct cast lowering, got:\n%s", out)
+	}
+}
+
+func TestRejectDistinctCompoundLiteralInCodegen(t *testing.T) {
+	file := source.NewFile("test.seal", `
+Id :: distinct int
+
+Main :: task() {
+    x := Id{5}
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	g := New(reporter)
+	_ = g.Generate(parsed)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "distinct type Id cannot be constructed with a literal") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

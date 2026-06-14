@@ -29,6 +29,9 @@ const (
 	SymbolOverload
 
 	SymbolGenericType
+	SymbolGenericEnum
+	SymbolGenericUnion
+	SymbolGenericTask
 	SymbolGenericValue
 
 	SymbolBuiltinType
@@ -61,14 +64,20 @@ func (k SymbolKind) String() string {
 		return "bit_set"
 	case SymbolOverload:
 		return "overload"
-	case SymbolGenericType:
-		return "generic type"
-	case SymbolGenericValue:
-		return "generic value"
 	case SymbolBuiltinType:
 		return "builtin type"
 	case SymbolBuiltinTask:
 		return "builtin task"
+	case SymbolGenericType:
+		return "generic type"
+	case SymbolGenericEnum:
+		return "generic enum"
+	case SymbolGenericUnion:
+		return "generic union"
+	case SymbolGenericTask:
+		return "generic task"
+	case SymbolGenericValue:
+		return "generic value"
 	default:
 		return "symbol"
 	}
@@ -243,6 +252,118 @@ func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, spa
 	return sym
 }
 
+func genericParamSymbolKind(category ast.GenericParamCategory) SymbolKind {
+	switch category {
+	case ast.GenericParamType:
+		return SymbolGenericType
+
+	case ast.GenericParamEnum:
+		return SymbolGenericEnum
+
+	case ast.GenericParamUnion:
+		return SymbolGenericUnion
+
+	case ast.GenericParamTask:
+		return SymbolGenericTask
+
+	case ast.GenericParamInt,
+		ast.GenericParamBool,
+		ast.GenericParamString,
+		ast.GenericParamValue:
+		return SymbolGenericValue
+
+	default:
+		return SymbolInvalid
+	}
+}
+
+func (r *Resolver) declareGenericParams(scope *Scope, params []ast.GenericParam) {
+	for _, param := range params {
+		kind := genericParamSymbolKind(param.Category)
+		if kind == SymbolInvalid {
+			r.diags.Add(param.Span(), fmt.Sprintf("invalid generic parameter category for %q", param.Name.Name))
+			continue
+		}
+
+		r.declareSymbol(scope, param.Name.Name, kind, param.Name.Span(), nil)
+	}
+}
+
+func (r *Resolver) resolveGenericParams(scope *Scope, params []ast.GenericParam) {
+	for _, param := range params {
+		if param.Type != nil {
+			r.resolveType(scope, param.Type)
+		}
+
+		for _, constraint := range param.Constraints {
+			r.resolveGenericConstraint(scope, constraint)
+		}
+	}
+}
+
+func (r *Resolver) resolveGenericConstraint(scope *Scope, constraint ast.GenericConstraint) {
+	switch c := constraint.(type) {
+	case *ast.GenericExprConstraint:
+		r.resolveExpr(scope, c.Expr)
+
+	case *ast.GenericFieldConstraint:
+		if c.HasType && c.Type != nil {
+			r.resolveType(scope, c.Type)
+		}
+
+	case *ast.GenericImplConstraint:
+		r.resolveType(scope, c.Interface)
+
+	case *ast.GenericEnumVariantConstraint:
+		// Variant names are checked later by the checker.
+
+	case *ast.GenericUnionMemberConstraint:
+		r.resolveType(scope, c.Member)
+
+	case *ast.GenericTaskConstraint:
+		for _, param := range c.Params {
+			r.resolveType(scope, param)
+		}
+
+		for _, result := range c.Results {
+			r.resolveType(scope, result)
+		}
+	}
+}
+
+func (r *Resolver) resolveGenericArg(scope *Scope, arg ast.GenericArg) {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		if arg.Type != nil {
+			r.resolveType(scope, arg.Type)
+		}
+
+	case ast.GenericArgExpr:
+		if arg.Expr != nil {
+			r.resolveExpr(scope, arg.Expr)
+		}
+	}
+}
+
+func isTypeSymbolKind(kind SymbolKind) bool {
+	switch kind {
+	case SymbolStruct,
+		SymbolDistinct,
+		SymbolEnum,
+		SymbolUnion,
+		SymbolInterface,
+		SymbolBitSet,
+		SymbolGenericType,
+		SymbolGenericEnum,
+		SymbolGenericUnion,
+		SymbolBuiltinType:
+		return true
+
+	default:
+		return false
+	}
+}
+
 func (r *Resolver) declareGenericSymbol(scope *Scope, name string, kind SymbolKind, span source.Span) *Symbol {
 	if existing := scope.LookupLocal(name); existing != nil {
 		if existing.Kind == kind {
@@ -330,15 +451,8 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 func (r *Resolver) resolveStructDecl(parent *Scope, d *ast.StructDecl) {
 	scope := NewScope(ScopeDecl, parent)
 
-	for _, param := range d.Params {
-		switch param.Kind {
-		case ast.GenericTypeParam:
-			r.declareSymbol(scope, param.Name.Name, SymbolGenericType, param.Name.Span(), nil)
-
-		case ast.GenericValueParam:
-			r.declareSymbol(scope, param.Name.Name, SymbolGenericValue, param.Name.Span(), nil)
-		}
-	}
+	r.declareGenericParams(scope, d.GenericParams)
+	r.resolveGenericParams(scope, d.GenericParams)
 
 	for _, field := range d.Fields {
 		r.resolveType(scope, field.Type)
@@ -364,18 +478,13 @@ func (r *Resolver) resolveEnumDecl(d *ast.EnumDecl) {
 func (r *Resolver) resolveInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 	scope := NewScope(ScopeDecl, parent)
 
-	// Inside an interface requirement, $T is a special compile-time type
-	// symbol meaning "the concrete implementing type".
-	r.declareGenericSymbol(
-		scope,
-		"T",
-		SymbolGenericType,
-		d.Name.Span(),
-	)
+	r.declareGenericParams(scope, d.GenericParams)
+	r.resolveGenericParams(scope, d.GenericParams)
 
 	for _, req := range d.Requirements {
 		for _, param := range req.Params {
 			r.resolveType(scope, param.Type)
+
 			if param.HasDefault {
 				r.diags.Add(
 					param.Name.Span(),
@@ -391,27 +500,28 @@ func (r *Resolver) resolveInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 }
 
 func (r *Resolver) resolveImplDecl(scope *Scope, d *ast.ImplDecl) {
-	typeSym := r.resolveSymbolUse(scope, d.TypeName.Name, d.TypeName.Span())
-	if typeSym == nil {
-		return
-	}
+	r.resolveType(scope, d.Interface)
 
-	// The type must be declared in the same scope where the impl appears.
-	// This supports package-local impls and local-scope impls.
-	if typeSym.Scope != scope {
-		r.diags.Add(
-			d.TypeName.Span(),
-			fmt.Sprintf("impl for %q must be declared in the type's defining scope", d.TypeName.Name),
-		)
-	}
+	implScope := NewScope(ScopeDecl, scope)
 
-	for _, iface := range d.Interfaces {
-		r.resolveType(scope, iface)
+	for _, entry := range d.Entries {
+		if entry.Task != nil {
+			r.resolveTaskDecl(implScope, entry.Task)
+		}
+
+		if entry.Alias != nil {
+			r.resolveExpr(implScope, entry.Alias)
+		}
 	}
 }
 
 func (r *Resolver) resolveTaskDecl(parent *Scope, d *ast.TaskDecl) {
-	taskScope := NewScope(ScopeTask, parent)
+	genericScope := NewScope(ScopeDecl, parent)
+
+	r.declareGenericParams(genericScope, d.GenericParams)
+	r.resolveGenericParams(genericScope, d.GenericParams)
+
+	taskScope := NewScope(ScopeTask, genericScope)
 	taskScope.TaskID = r.nextTaskID
 	r.nextTaskID++
 
@@ -419,7 +529,7 @@ func (r *Resolver) resolveTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		r.resolveType(taskScope, param.Type)
 
 		if param.HasDefault {
-			r.resolveExpr(parent, param.Default)
+			r.resolveExpr(genericScope, param.Default)
 		}
 
 		r.declareSymbol(taskScope, param.Name.Name, SymbolParam, param.Name.Span(), nil)
@@ -543,25 +653,16 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 		}
 
 		if len(t.Parts) == 1 {
-			switch sym.Kind {
-			case SymbolStruct,
-				SymbolDistinct,
-				SymbolEnum,
-				SymbolUnion,
-				SymbolInterface,
-				SymbolBitSet,
-				SymbolGenericType,
-				SymbolBuiltinType:
-				return
-
-			default:
-				if sym.Kind.IsRuntime() {
-					r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
-				} else {
-					r.diags.Add(first.Span(), fmt.Sprintf("%q is not a type", first.Name))
-				}
+			if isTypeSymbolKind(sym.Kind) {
 				return
 			}
+
+			if sym.Kind.IsRuntime() {
+				r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+			} else {
+				r.diags.Add(first.Span(), fmt.Sprintf("%q is not a type", first.Name))
+			}
+			return
 		}
 
 		if sym.Kind != SymbolPackage {
@@ -581,13 +682,12 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 			return
 		}
 
-		switch member.Kind {
-		case SymbolStruct, SymbolDistinct, SymbolEnum, SymbolUnion, SymbolInterface, SymbolBitSet:
-			return
-		default:
-			r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, memberName))
+		if isTypeSymbolKind(member.Kind) {
 			return
 		}
+
+		r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, memberName))
+		return
 
 	case *ast.PointerType:
 		r.resolveType(scope, t.Elem)
@@ -603,7 +703,7 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 		r.resolveType(scope, t.Base)
 
 		for _, arg := range t.Args {
-			r.resolveExpr(scope, arg)
+			r.resolveGenericArg(scope, arg)
 		}
 	}
 }
@@ -647,7 +747,7 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		r.resolveExpr(scope, e.Base)
 
 		for _, arg := range e.Args {
-			r.resolveType(scope, arg)
+			r.resolveGenericArg(scope, arg)
 		}
 
 	case *ast.SpreadExpr:

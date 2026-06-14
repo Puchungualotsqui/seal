@@ -69,24 +69,185 @@ func (d *DistinctDecl) Span() source.Span {
 	return d.Loc
 }
 
-type GenericParamKind int
+type GenericParamCategory int
 
 const (
-	GenericTypeParam GenericParamKind = iota
-	GenericValueParam
+	GenericParamInvalid GenericParamCategory = iota
+
+	// Type-level parameters.
+	GenericParamType
+	GenericParamEnum
+	GenericParamUnion
+	GenericParamTask
+
+	// Builtin comptime value parameters.
+	GenericParamInt
+	GenericParamBool
+	GenericParamString
+
+	// Typed comptime value parameter:
+	//
+	//     player Id
+	//     defaultZombie Zombie
+	//
+	GenericParamValue
 )
 
+func (c GenericParamCategory) String() string {
+	switch c {
+	case GenericParamType:
+		return "type"
+	case GenericParamEnum:
+		return "enum"
+	case GenericParamUnion:
+		return "union"
+	case GenericParamTask:
+		return "task"
+	case GenericParamInt:
+		return "int"
+	case GenericParamBool:
+		return "bool"
+	case GenericParamString:
+		return "string"
+	case GenericParamValue:
+		return "value"
+	default:
+		return "<invalid>"
+	}
+}
+
 type GenericParam struct {
-	Kind GenericParamKind
 	Name Ident
+
+	// Category is one of:
+	//
+	//     T type
+	//     E enum
+	//     U union
+	//     F task
+	//     N int
+	//     B bool
+	//     Name string
+	//     player Id
+	//
+	Category GenericParamCategory
+
+	// Type is used only for typed comptime value parameters:
+	//
+	//     player Id
+	//     defaultZombie Zombie
+	//
+	Type Type
+
+	Constraints []GenericConstraint
+	Loc         source.Span
+}
+
+func (p GenericParam) Span() source.Span {
+	return p.Loc
+}
+
+type GenericConstraint interface {
+	Node
+	genericConstraintNode()
+}
+
+// Value constraint:
+//
+//	N int[N > 0]
+//	Name string[len(Name) > 0]
+//	defaultZombie Zombie[defaultZombie.id >= cast<Id>(0)]
+type GenericExprConstraint struct {
+	Expr Expr
+	Loc  source.Span
+}
+
+func (*GenericExprConstraint) genericConstraintNode() {}
+
+func (c *GenericExprConstraint) Span() source.Span {
+	return c.Loc
+}
+
+// Field requirement:
+//
+//	T type[health]
+//	T type[health int]
+type GenericFieldConstraint struct {
+	Name    Ident
+	Type    Type
+	HasType bool
+	Loc     source.Span
+}
+
+func (*GenericFieldConstraint) genericConstraintNode() {}
+
+func (c *GenericFieldConstraint) Span() source.Span {
+	return c.Loc
+}
+
+// Static interface implementation requirement:
+//
+//	T type[Enemy()]
+type GenericImplConstraint struct {
+	Interface Type
+	Loc       source.Span
+}
+
+func (*GenericImplConstraint) genericConstraintNode() {}
+
+func (c *GenericImplConstraint) Span() source.Span {
+	return c.Loc
+}
+
+// Enum variant requirement:
+//
+//	E enum[North, East]
+type GenericEnumVariantConstraint struct {
+	Name Ident
+	Loc  source.Span
+}
+
+func (*GenericEnumVariantConstraint) genericConstraintNode() {}
+
+func (c *GenericEnumVariantConstraint) Span() source.Span {
+	return c.Loc
+}
+
+// Union member requirement:
+//
+//	U union[Circle, Rectangle]
+type GenericUnionMemberConstraint struct {
+	Member Type
+	Loc    source.Span
+}
+
+func (*GenericUnionMemberConstraint) genericConstraintNode() {}
+
+func (c *GenericUnionMemberConstraint) Span() source.Span {
+	return c.Loc
+}
+
+// Task signature requirement:
+//
+//	F task[(int, bool) f32, f64]
+type GenericTaskConstraint struct {
+	Params  []Type
+	Results []Type
+	Loc     source.Span
+}
+
+func (*GenericTaskConstraint) genericConstraintNode() {}
+
+func (c *GenericTaskConstraint) Span() source.Span {
+	return c.Loc
 }
 
 type StructDecl struct {
-	Name        Ident
-	Params      []GenericParam
-	Fields      []Field
-	IsIntrinsic bool
-	Loc         source.Span
+	Name          Ident
+	GenericParams []GenericParam
+	Fields        []Field
+	IsIntrinsic   bool
+	Loc           source.Span
 }
 
 type DeclStmt struct {
@@ -120,16 +281,19 @@ type Param struct {
 
 type TaskDecl struct {
 	Name          Ident
+	GenericParams []GenericParam
+
 	IsPure        bool
 	IsTest        bool
 	IsExtern      bool
 	IsIntrinsic   bool
 	IsTrustedPure bool
 	ExternName    string
-	Params        []Param
-	Results       []Type
-	Body          *BlockStmt
-	Loc           source.Span
+
+	Params  []Param
+	Results []Type
+	Body    *BlockStmt
+	Loc     source.Span
 }
 
 func (*TaskDecl) declNode() {}
@@ -161,7 +325,19 @@ func (d *UnionDecl) Span() source.Span {
 }
 
 type InterfaceDecl struct {
-	Name         Ident
+	Name          Ident
+	GenericParams []GenericParam
+
+	// false:
+	//
+	//     Enemy :: interface <T type> { ... }
+	//
+	// true:
+	//
+	//     Enemy :: dyn interface <T type> { ... }
+	//
+	IsDyn bool
+
 	Requirements []*TaskSignature
 	Loc          source.Span
 }
@@ -179,14 +355,37 @@ type TaskSignature struct {
 }
 
 type ImplDecl struct {
-	TypeName   Ident
-	Interfaces []Type
-	Loc        source.Span
+	// Interface is usually a generic type:
+	//
+	//     Drawable<Sprite> :: impl { ... }
+	//
+	Interface Type
+	Entries   []ImplEntry
+	Loc       source.Span
 }
 
 func (*ImplDecl) declNode() {}
+
 func (d *ImplDecl) Span() source.Span {
 	return d.Loc
+}
+
+type ImplEntry struct {
+	Name Ident
+
+	// Inline implementation:
+	//
+	//     Draw :: task(s *Sprite) { ... }
+	//
+	Task *TaskDecl
+
+	// Alias implementation:
+	//
+	//     Draw :: DrawSprite
+	//
+	Alias Expr
+
+	Loc source.Span
 }
 
 type OverloadDecl struct {
@@ -198,6 +397,25 @@ type OverloadDecl struct {
 func (*OverloadDecl) declNode() {}
 func (d *OverloadDecl) Span() source.Span {
 	return d.Loc
+}
+
+type GenericArgKind int
+
+const (
+	GenericArgInvalid GenericArgKind = iota
+	GenericArgType
+	GenericArgExpr
+)
+
+type GenericArg struct {
+	Kind GenericArgKind
+	Type Type
+	Expr Expr
+	Loc  source.Span
+}
+
+func (a GenericArg) Span() source.Span {
+	return a.Loc
 }
 
 type DirectiveDecl struct {
@@ -250,7 +468,7 @@ func (t *ArrayType) Span() source.Span {
 
 type GenericType struct {
 	Base Type
-	Args []Expr
+	Args []GenericArg
 	Loc  source.Span
 }
 
@@ -576,7 +794,7 @@ func (e *SelectorExpr) Span() source.Span {
 
 type GenericExpr struct {
 	Base Expr
-	Args []Type
+	Args []GenericArg
 	Loc  source.Span
 }
 

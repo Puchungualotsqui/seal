@@ -86,10 +86,6 @@ func (l *Lexer) Next() token.Token {
 		return l.makeToken(token.Semi, start, l.pos)
 	case '?':
 		return l.makeToken(token.Question, start, l.pos)
-	case '#':
-		return l.makeToken(token.Hash, start, l.pos)
-	case '$':
-		return l.makeToken(token.Dollar, start, l.pos)
 	case '@':
 		return l.makeToken(token.At, start, l.pos)
 	case '~':

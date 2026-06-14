@@ -34,6 +34,8 @@ const (
 	KeywordFor
 	KeywordReturn
 	KeywordDefer
+	KeywordDyn
+	KeywordType
 	KeywordSeal
 	KeywordConst
 	KeywordDistinct
@@ -53,8 +55,6 @@ const (
 	Semi     // ;
 	Colon    // :
 	Question // ?
-	Hash     // #
-	Dollar   // $
 	At       // @
 
 	// Operators
@@ -93,6 +93,8 @@ var keywordKinds = map[string]Kind{
 	"intrinsic": KeywordIntrinsic,
 	"test":      KeywordTest,
 	"struct":    KeywordStruct,
+	"distinct":  KeywordDistinct,
+	"dyn":       KeywordDyn,
 	"interface": KeywordInterface,
 	"union":     KeywordUnion,
 	"enum":      KeywordEnum,
@@ -110,7 +112,7 @@ var keywordKinds = map[string]Kind{
 	"defer":     KeywordDefer,
 	"seal":      KeywordSeal,
 	"const":     KeywordConst,
-	"distinct":  KeywordDistinct,
+	"type":      KeywordType,
 	"nil":       KeywordNil,
 	"true":      KeywordTrue,
 	"false":     KeywordFalse,
@@ -143,6 +145,10 @@ func (k Kind) String() string {
 	case CharLit:
 		return "CharLit"
 
+	case KeywordDyn:
+		return "dyn"
+	case KeywordType:
+		return "type"
 	case KeywordTask:
 		return "task"
 	case KeywordPure:
@@ -218,10 +224,6 @@ func (k Kind) String() string {
 		return ":"
 	case Question:
 		return "?"
-	case Hash:
-		return "#"
-	case Dollar:
-		return "$"
 	case At:
 		return "@"
 

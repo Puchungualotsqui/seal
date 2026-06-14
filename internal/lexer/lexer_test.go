@@ -104,9 +104,9 @@ Length :: pure task(x f32) f32 {
 	assertKinds(t, kinds, want)
 }
 
-func TestLexStructAndArray(t *testing.T) {
+func TestLexGenericStructAndArray(t *testing.T) {
 	kinds, reporter := lexKinds(t, `
-Buffer :: struct($T, #N) {
+Buffer :: struct <T type, N int> {
     data [N]T
     len int
 }
@@ -122,13 +122,13 @@ arr: []int = [2, 3, 4]
 		token.Ident,
 		token.ColonColon,
 		token.KeywordStruct,
-		token.LParen,
-		token.Dollar,
+		token.Lt,
 		token.Ident,
+		token.KeywordType,
 		token.Comma,
-		token.Hash,
 		token.Ident,
-		token.RParen,
+		token.Ident,
+		token.Gt,
 		token.LBrace,
 		token.Ident,
 		token.LBracket,
@@ -158,14 +158,14 @@ arr: []int = [2, 3, 4]
 	assertKinds(t, kinds, want)
 }
 
-func TestLexInterfaceAndImpl(t *testing.T) {
+func TestLexGenericInterfaceAndImpl(t *testing.T) {
 	kinds, reporter := lexKinds(t, `
-Enemy :: interface {
-    Damage :: task(e *$T, damage int)
+Enemy :: interface <T type> {
+    Damage :: task(e *T, damage int)
 }
 
-Soldier :: impl {
-    Enemy
+Enemy<Soldier> :: impl {
+    Damage :: DamageSoldier
 }
 `)
 
@@ -177,6 +177,10 @@ Soldier :: impl {
 		token.Ident,
 		token.ColonColon,
 		token.KeywordInterface,
+		token.Lt,
+		token.Ident,
+		token.KeywordType,
+		token.Gt,
 		token.LBrace,
 		token.Ident,
 		token.ColonColon,
@@ -184,7 +188,6 @@ Soldier :: impl {
 		token.LParen,
 		token.Ident,
 		token.Star,
-		token.Dollar,
 		token.Ident,
 		token.Comma,
 		token.Ident,
@@ -193,9 +196,14 @@ Soldier :: impl {
 		token.RBrace,
 
 		token.Ident,
+		token.Lt,
+		token.Ident,
+		token.Gt,
 		token.ColonColon,
 		token.KeywordImpl,
 		token.LBrace,
+		token.Ident,
+		token.ColonColon,
 		token.Ident,
 		token.RBrace,
 		token.EOF,
@@ -389,4 +397,15 @@ func tokenKinds(tokens []token.Token) []token.Kind {
 		kinds = append(kinds, tok.Kind)
 	}
 	return kinds
+}
+
+func TestLexOldGenericMarkersAreInvalid(t *testing.T) {
+	_, reporter := lexKinds(t, `
+Bad :: struct($T, #N) {
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics for old generic markers")
+	}
 }

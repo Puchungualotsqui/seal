@@ -3,12 +3,19 @@ package token
 import "testing"
 
 func TestLookupIdentKeyword(t *testing.T) {
-	if LookupIdent("task") != KeywordTask {
-		t.Fatalf("expected task keyword")
+	tests := map[string]Kind{
+		"task":      KeywordTask,
+		"struct":    KeywordStruct,
+		"distinct":  KeywordDistinct,
+		"dyn":       KeywordDyn,
+		"interface": KeywordInterface,
+		"type":      KeywordType,
 	}
 
-	if LookupIdent("struct") != KeywordStruct {
-		t.Fatalf("expected struct keyword")
+	for text, want := range tests {
+		if got := LookupIdent(text); got != want {
+			t.Fatalf("expected %q to be %s, got %s", text, want.String(), got.String())
+		}
 	}
 }
 
@@ -28,6 +35,9 @@ func TestKindString(t *testing.T) {
 		want string
 	}{
 		{KeywordTask, "task"},
+		{KeywordDistinct, "distinct"},
+		{KeywordDyn, "dyn"},
+		{KeywordType, "type"},
 		{ColonColon, "::"},
 		{ColonEq, ":="},
 		{Ellipsis, "..."},

@@ -35,3 +35,15 @@ func TestIdentExprImplementsExpr(t *testing.T) {
 func TestNamedTypeImplementsType(t *testing.T) {
 	var _ Type = (*NamedType)(nil)
 }
+
+func TestDistinctDeclImplementsDecl(t *testing.T) {
+	var _ Decl = (*DistinctDecl)(nil)
+}
+
+func TestGenericTypeImplementsType(t *testing.T) {
+	var _ Type = (*GenericType)(nil)
+}
+
+func TestGenericExprImplementsExpr(t *testing.T) {
+	var _ Expr = (*GenericExpr)(nil)
+}

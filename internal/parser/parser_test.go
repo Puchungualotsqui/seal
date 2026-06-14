@@ -81,7 +81,7 @@ Vec2 :: struct {
 
 func TestParseGenericStructDecl(t *testing.T) {
 	file, reporter := parse(t, `
-Buffer :: struct($T, #N) {
+Buffer :: struct <T type, N int> {
     data [N]T
     len int
 }
@@ -93,16 +93,16 @@ Buffer :: struct($T, #N) {
 
 	decl := file.Decls[0].(*ast.StructDecl)
 
-	if len(decl.Params) != 2 {
-		t.Fatalf("expected 2 generic params, got %d", len(decl.Params))
+	if len(decl.GenericParams) != 2 {
+		t.Fatalf("expected 2 generic params, got %d", len(decl.GenericParams))
 	}
 
-	if decl.Params[0].Kind != ast.GenericTypeParam {
+	if decl.GenericParams[0].Category != ast.GenericParamType {
 		t.Fatalf("expected first param to be type param")
 	}
 
-	if decl.Params[1].Kind != ast.GenericValueParam {
-		t.Fatalf("expected second param to be value param")
+	if decl.GenericParams[1].Category != ast.GenericParamInt {
+		t.Fatalf("expected second param to be int param")
 	}
 }
 
@@ -273,13 +273,14 @@ Shape :: union {
     Rectangle,
 }
 
-Enemy :: interface {
-    Damage :: task(e *$T, damage int)
-    Health :: task(e *$T) int
+Enemy :: interface <T type> {
+    Damage :: task(e *T, damage int)
+    Health :: task(e *T) int
 }
 
-Soldier :: impl {
-    Enemy
+Enemy<Soldier> :: impl {
+    Damage :: DamageSoldier
+    Health :: SoldierHealth
 }
 `)
 
@@ -303,8 +304,13 @@ Soldier :: impl {
 		t.Fatalf("expected InterfaceDecl")
 	}
 
-	if _, ok := file.Decls[3].(*ast.ImplDecl); !ok {
+	impl, ok := file.Decls[3].(*ast.ImplDecl)
+	if !ok {
 		t.Fatalf("expected ImplDecl")
+	}
+
+	if len(impl.Entries) != 2 {
+		t.Fatalf("expected 2 impl entries, got %d", len(impl.Entries))
 	}
 }
 
@@ -837,5 +843,127 @@ EnemyId :: distinct uint
 
 	if decl.Name.Name != "EnemyId" {
 		t.Fatalf("expected EnemyId, got %q", decl.Name.Name)
+	}
+}
+
+func TestParseDynInterfaceDecl(t *testing.T) {
+	file, reporter := parse(t, `
+Enemy :: dyn interface <T type> {
+    Health :: task(e *T) int
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	decl := file.Decls[0].(*ast.InterfaceDecl)
+
+	if !decl.IsDyn {
+		t.Fatalf("expected dyn interface")
+	}
+
+	if len(decl.GenericParams) != 1 {
+		t.Fatalf("expected 1 generic param")
+	}
+}
+
+func TestParseGenericTaskDeclWithConstraints(t *testing.T) {
+	file, reporter := parse(t, `
+T :: task <
+    defaultZombie Zombie[defaultZombie.id >= cast<Id>(0)],
+    player Id
+>() bool {
+    return defaultZombie.id == player
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	decl := file.Decls[0].(*ast.TaskDecl)
+
+	if len(decl.GenericParams) != 2 {
+		t.Fatalf("expected 2 generic params, got %d", len(decl.GenericParams))
+	}
+
+	if decl.GenericParams[0].Category != ast.GenericParamValue {
+		t.Fatalf("expected first param to be typed comptime value")
+	}
+
+	if len(decl.GenericParams[0].Constraints) != 1 {
+		t.Fatalf("expected first param to have 1 constraint")
+	}
+
+	if decl.GenericParams[1].Category != ast.GenericParamValue {
+		t.Fatalf("expected second param to be typed comptime value")
+	}
+}
+
+func TestParseGenericCategoriesAndConstraints(t *testing.T) {
+	file, reporter := parse(t, `
+S :: struct <
+    T type[health int, Enemy()],
+    E enum[North, East],
+    U union[Circle, Rectangle],
+    F task[(int, bool) f32, f64],
+    N int[N > 10],
+    B bool,
+    Name string
+> {
+    value T
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	decl := file.Decls[0].(*ast.StructDecl)
+
+	if len(decl.GenericParams) != 7 {
+		t.Fatalf("expected 7 generic params, got %d", len(decl.GenericParams))
+	}
+
+	want := []ast.GenericParamCategory{
+		ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion,
+		ast.GenericParamTask,
+		ast.GenericParamInt,
+		ast.GenericParamBool,
+		ast.GenericParamString,
+	}
+
+	for i, category := range want {
+		if decl.GenericParams[i].Category != category {
+			t.Fatalf("param %d: expected %s, got %s", i, category, decl.GenericParams[i].Category)
+		}
+	}
+}
+
+func TestParseGenericCallWithValueArguments(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    b := T<ZombieDefault, Id{5}>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	mainDecl := file.Decls[0].(*ast.TaskDecl)
+	stmt := mainDecl.Body.Stmts[0].(*ast.VarDeclStmt)
+	call := stmt.Value.(*ast.CallExpr)
+
+	gen, ok := call.Callee.(*ast.GenericExpr)
+	if !ok {
+		t.Fatalf("expected generic callee, got %T", call.Callee)
+	}
+
+	if len(gen.Args) != 2 {
+		t.Fatalf("expected 2 generic args, got %d", len(gen.Args))
 	}
 }

@@ -113,7 +113,9 @@ func (s *scope) lookup(name string) (valueInfo, bool) {
 }
 
 type TaskInfo struct {
-	Decl        *ast.TaskDecl
+	Decl          *ast.TaskDecl
+	GenericParams []ast.GenericParam
+
 	ReturnType  CType
 	ReturnTypes []CType
 	ParamTypes  []CType
@@ -136,6 +138,12 @@ type PackageInfo struct {
 	Name      string
 	Tasks     map[string]TaskInfo
 	Overloads map[string][]string
+}
+
+type ImplInfo struct {
+	Concrete  string
+	Interface string
+	Entries   map[string]ast.ImplEntry
 }
 
 type Generator struct {
@@ -168,6 +176,8 @@ type Generator struct {
 	tempCounter int
 
 	distincts map[string]*ast.DistinctDecl
+
+	implInfos map[string]map[string]*ImplInfo
 }
 
 func New(diags *diag.Reporter) *Generator {
@@ -189,6 +199,7 @@ func NewWithPackages(diags *diag.Reporter, packageName string, packages map[stri
 		consts:           map[string]CType{},
 		emittedVariadics: map[string]bool{},
 		distincts:        map[string]*ast.DistinctDecl{},
+		implInfos:        map[string]map[string]*ImplInfo{},
 	}
 }
 
@@ -263,13 +274,19 @@ func (g *Generator) collect(file *ast.File) {
 			g.interfaces[d.Name.Name] = d
 
 		case *ast.ImplDecl:
-			for _, iface := range d.Interfaces {
-				name := typeNameFromAst(iface)
-				if name == "" {
-					continue
-				}
+			info := g.implInfoFromDecl(d)
+			if info == nil {
+				continue
+			}
 
-				g.impls[d.TypeName.Name] = append(g.impls[d.TypeName.Name], name)
+			if _, ok := g.implInfos[info.Concrete]; !ok {
+				g.implInfos[info.Concrete] = map[string]*ImplInfo{}
+			}
+
+			g.implInfos[info.Concrete][info.Interface] = info
+
+			if !containsString(g.impls[info.Concrete], info.Interface) {
+				g.impls[info.Concrete] = append(g.impls[info.Concrete], info.Interface)
 			}
 		}
 	}
@@ -288,6 +305,7 @@ func (g *Generator) collect(file *ast.File) {
 
 			info := TaskInfo{
 				Decl:           d,
+				GenericParams:  d.GenericParams,
 				RequiredParams: len(d.Params),
 				IsExtern:       d.IsExtern,
 				ExternName:     d.ExternName,
@@ -343,12 +361,100 @@ func (g *Generator) collect(file *ast.File) {
 }
 
 func typeNameFromAst(t ast.Type) string {
-	named, ok := t.(*ast.NamedType)
-	if !ok || len(named.Parts) == 0 {
+	switch x := t.(type) {
+	case *ast.NamedType:
+		if len(x.Parts) == 0 {
+			return ""
+		}
+
+		return x.Parts[len(x.Parts)-1].Name
+
+	case *ast.GenericType:
+		return typeNameFromAst(x.Base)
+
+	default:
 		return ""
 	}
+}
 
-	return named.Parts[len(named.Parts)-1].Name
+func typeNameFromGenericArg(arg ast.GenericArg) string {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		return typeNameFromAst(arg.Type)
+
+	case ast.GenericArgExpr:
+		switch e := arg.Expr.(type) {
+		case *ast.IdentExpr:
+			return e.Name.Name
+
+		case *ast.SelectorExpr:
+			return e.Name.Name
+		}
+	}
+
+	return ""
+}
+
+func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		if arg.Type == nil {
+			return CInvalid
+		}
+
+		return g.cTypeFromAst(arg.Type)
+
+	case ast.GenericArgExpr:
+		switch e := arg.Expr.(type) {
+		case *ast.IdentExpr:
+			name := e.Name.Name
+
+			if spec, ok := builtin.LookupType(name); ok {
+				return CType{Name: spec.CName, SealName: spec.Name}
+			}
+
+			if _, ok := g.distincts[name]; ok {
+				return CType{Name: name, SealName: name}
+			}
+
+			if _, ok := g.structs[name]; ok {
+				return CType{Name: name, SealName: name}
+			}
+
+			if _, ok := g.enums[name]; ok {
+				return CType{Name: name, SealName: name}
+			}
+
+			if _, ok := g.unions[name]; ok {
+				return CType{Name: name, SealName: name}
+			}
+
+			if _, ok := g.interfaces[name]; ok {
+				return CType{Name: name, SealName: name, IsInterface: true}
+			}
+
+			g.error(e.Span(), fmt.Sprintf("expected type argument, got %q", name))
+			return CInvalid
+
+		case *ast.SelectorExpr:
+			if id, ok := e.Left.(*ast.IdentExpr); ok {
+				if pkg := g.packages[id.Name.Name]; pkg != nil {
+					// Package type export is not in cgen.PackageInfo yet.
+					g.error(e.Span(), "package-qualified type arguments are not supported by C codegen yet")
+					return CInvalid
+				}
+			}
+
+			g.error(e.Span(), "expected type argument")
+			return CInvalid
+
+		default:
+			g.error(arg.Span(), "expected type argument")
+			return CInvalid
+		}
+	}
+
+	return CInvalid
 }
 
 func isBuiltinTypeName(name string) bool {
@@ -377,6 +483,7 @@ func (g *Generator) cTypeFromSizeArg(expr ast.Expr) (CType, bool) {
 	}
 
 	if isBuiltinTypeName(name) ||
+		g.distincts[name] != nil ||
 		g.structs[name] != nil ||
 		g.enums[name] != nil ||
 		g.unions[name] != nil ||
@@ -514,7 +621,7 @@ func (g *Generator) emitStructs(file *ast.File) {
 			continue
 		}
 
-		if len(d.Params) > 0 {
+		if len(d.GenericParams) > 0 {
 			g.error(d.Name.Span(), fmt.Sprintf("generic struct %q is not supported by C codegen yet", d.Name.Name))
 			continue
 		}
@@ -712,6 +819,11 @@ func (g *Generator) emitTaskPrototypes(file *ast.File) {
 			continue
 		}
 
+		if len(d.GenericParams) > 0 {
+			g.error(d.Name.Span(), fmt.Sprintf("generic task %q is not supported by C codegen yet", d.Name.Name))
+			continue
+		}
+
 		g.linef("%s;", g.taskSignature(d, false))
 	}
 
@@ -724,6 +836,10 @@ func (g *Generator) emitTasks(file *ast.File) {
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.TaskDecl)
 		if !ok || d.IsTest || d.IsExtern || d.IsIntrinsic {
+			continue
+		}
+
+		if len(d.GenericParams) > 0 {
 			continue
 		}
 
@@ -1006,43 +1122,50 @@ func (g *Generator) emitInterfaceDispatchCall(iface CType, taskName string, args
 }
 
 func (g *Generator) emitImplVTables() {
-	if len(g.impls) == 0 {
+	if len(g.implInfos) == 0 {
 		return
 	}
 
-	concreteNames := make([]string, 0, len(g.impls))
-	for concrete := range g.impls {
+	concreteNames := make([]string, 0, len(g.implInfos))
+	for concrete := range g.implInfos {
 		concreteNames = append(concreteNames, concrete)
 	}
 	sort.Strings(concreteNames)
 
 	for _, concrete := range concreteNames {
-		ifaces := append([]string(nil), g.impls[concrete]...)
-		sort.Strings(ifaces)
+		ifaceNames := make([]string, 0, len(g.implInfos[concrete]))
+		for iface := range g.implInfos[concrete] {
+			ifaceNames = append(ifaceNames, iface)
+		}
+		sort.Strings(ifaceNames)
 
-		for _, iface := range ifaces {
-			g.emitImplVTable(concrete, iface)
+		for _, iface := range ifaceNames {
+			g.emitImplVTable(g.implInfos[concrete][iface])
 		}
 	}
 }
 
-func (g *Generator) emitImplVTable(concrete string, iface string) {
-	ifaceDecl := g.interfaces[iface]
+func (g *Generator) emitImplVTable(info *ImplInfo) {
+	if info == nil {
+		return
+	}
+
+	ifaceDecl := g.interfaces[info.Interface]
 	if ifaceDecl == nil {
 		return
 	}
 
 	for _, req := range ifaceDecl.Requirements {
-		g.emitInterfaceWrapper(concrete, iface, req)
+		g.emitInterfaceWrapper(info, req)
 	}
 
-	vtableName := interfaceVTableName(iface, concrete)
+	vtableName := interfaceVTableName(info.Interface, info.Concrete)
 
-	g.linef("static %s_vtable %s = {", iface, vtableName)
+	g.linef("static %s_vtable %s = {", info.Interface, vtableName)
 	g.indent++
 
 	for _, req := range ifaceDecl.Requirements {
-		g.linef(".%s = %s,", sanitizeCName(req.Name.Name), interfaceWrapperName(iface, concrete, req.Name.Name))
+		g.linef(".%s = %s,", sanitizeCName(req.Name.Name), interfaceWrapperName(info.Interface, info.Concrete, req.Name.Name))
 	}
 
 	g.indent--
@@ -1050,38 +1173,141 @@ func (g *Generator) emitImplVTable(concrete string, iface string) {
 	g.line("")
 }
 
-func (g *Generator) emitInterfaceWrapper(concrete string, iface string, req *ast.TaskSignature) {
+func (g *Generator) emitInterfaceWrapper(info *ImplInfo, req *ast.TaskSignature) {
 	ret := g.interfaceRequirementReturnType(req)
-	wrapperName := interfaceWrapperName(iface, concrete, req.Name.Name)
+	wrapperName := interfaceWrapperName(info.Interface, info.Concrete, req.Name.Name)
+
+	entry, hasEntry := info.Entries[req.Name.Name]
+	if !hasEntry {
+		g.error(req.Name.Span(), fmt.Sprintf("impl %s<%s> is missing requirement %q", info.Interface, info.Concrete, req.Name.Name))
+		return
+	}
 
 	var params []string
-	var callArgs []string
-
 	params = append(params, "void *data")
-	callArgs = append(callArgs, fmt.Sprintf("(%s *)data", concrete))
 
 	for i := 1; i < len(req.Params); i++ {
 		paramType := g.cTypeFromAst(req.Params[i].Type)
 		paramName := fmt.Sprintf("arg%d", i)
 
-		params = append(params, paramType.Decl(paramName))
-		callArgs = append(callArgs, paramName)
-	}
+		if entry.Task != nil && i < len(entry.Task.Params) {
+			paramName = entry.Task.Params[i].Name.Name
+		}
 
-	targetName := g.cTaskName(req.Name.Name)
+		params = append(params, paramType.Decl(paramName))
+	}
 
 	g.linef("static %s %s(%s) {", ret.Name, wrapperName, strings.Join(params, ", "))
 	g.indent++
 
-	if ret.SealName == "void" {
-		g.linef("%s(%s);", targetName, strings.Join(callArgs, ", "))
-	} else {
-		g.linef("return %s(%s);", targetName, strings.Join(callArgs, ", "))
+	if entry.Alias != nil {
+		targetName, ok := g.implAliasTaskName(entry.Alias)
+		if !ok {
+			g.error(entry.Alias.Span(), fmt.Sprintf("unsupported impl alias for %q", req.Name.Name))
+			if ret.SealName != "void" {
+				g.line("return 0;")
+			}
+			g.indent--
+			g.line("}")
+			g.line("")
+			return
+		}
+
+		var callArgs []string
+		callArgs = append(callArgs, fmt.Sprintf("(%s *)data", info.Concrete))
+
+		for i := 1; i < len(req.Params); i++ {
+			paramName := fmt.Sprintf("arg%d", i)
+			callArgs = append(callArgs, paramName)
+		}
+
+		if ret.SealName == "void" {
+			g.linef("%s(%s);", targetName, strings.Join(callArgs, ", "))
+		} else {
+			g.linef("return %s(%s);", targetName, strings.Join(callArgs, ", "))
+		}
+
+		g.indent--
+		g.line("}")
+		g.line("")
+		return
+	}
+
+	if entry.Task != nil {
+		oldScope := g.scope
+		oldTaskScope := g.taskScope
+		oldResults := g.currentResults
+
+		g.scope = newScope(oldScope)
+		g.taskScope = g.scope
+		g.currentResults = nil
+
+		for _, result := range entry.Task.Results {
+			g.currentResults = append(g.currentResults, g.cTypeFromAst(result))
+		}
+
+		if len(entry.Task.Params) > 0 {
+			first := entry.Task.Params[0]
+			firstType := g.cTypeFromAst(first.Type)
+
+			g.linef("%s = (%s)data;", firstType.Decl(first.Name.Name), firstType.Name)
+			g.scope.declare(first.Name.Name, firstType)
+		}
+
+		for i := 1; i < len(entry.Task.Params); i++ {
+			param := entry.Task.Params[i]
+			paramType := g.cTypeFromAst(param.Type)
+			g.scope.declare(param.Name.Name, paramType)
+		}
+
+		g.emitBlockStatements(entry.Task.Body)
+
+		g.scope = oldScope
+		g.taskScope = oldTaskScope
+		g.currentResults = oldResults
+
+		g.indent--
+		g.line("}")
+		g.line("")
+		return
+	}
+
+	g.error(entry.Name.Span(), fmt.Sprintf("impl entry %q has no task body or alias", entry.Name.Name))
+
+	if ret.SealName != "void" {
+		g.line("return 0;")
 	}
 
 	g.indent--
 	g.line("}")
 	g.line("")
+}
+
+func (g *Generator) implAliasTaskName(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return g.cTaskName(e.Name.Name), true
+
+	case *ast.SelectorExpr:
+		id, ok := e.Left.(*ast.IdentExpr)
+		if !ok {
+			return "", false
+		}
+
+		pkg := g.packages[id.Name.Name]
+		if pkg == nil {
+			return "", false
+		}
+
+		info, ok := pkg.Tasks[e.Name.Name]
+		if !ok {
+			return "", false
+		}
+
+		return cImportedTaskName(id.Name.Name, e.Name.Name, info), true
+	}
+
+	return "", false
 }
 
 func interfaceWrapperName(iface string, concrete string, task string) string {
@@ -1756,6 +1982,11 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	case *ast.CompoundLiteralExpr:
 		typ := g.cTypeFromAst(e.Type)
 
+		if _, ok := g.distincts[typ.SealName]; ok {
+			g.error(e.Span(), fmt.Sprintf("distinct type %s cannot be constructed with a literal; use cast<%s>(value)", typ.SealName, typ.SealName))
+			return "0"
+		}
+
 		if expected != nil && g.isUnion(*expected) && g.unionHasMember(expected.SealName, typ.SealName) {
 			payload := g.emitCompoundLiteral(e, typ)
 			return fmt.Sprintf("(%s){.tag = %s_Tag_%s, .as.%s = %s}",
@@ -1838,9 +2069,24 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 	return g.emitCallExprWithArgs(e, nil)
 }
 
+func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr) string {
+	id, ok := gen.Base.(*ast.IdentExpr)
+	if !ok {
+		g.error(gen.Base.Span(), "unsupported generic callee")
+		return "0"
+	}
+
+	if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
+		return g.emitGenericIntrinsicCall(gen, args)
+	}
+
+	g.error(gen.Span(), fmt.Sprintf("generic task call %q is not supported by C codegen yet", id.Name.Name))
+	return "0"
+}
+
 func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return g.emitGenericIntrinsicCall(gen, e.Args)
+		return g.emitGenericCall(gen, e.Args)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -1936,7 +2182,7 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 		return "0"
 	}
 
-	target := g.cTypeFromAst(gen.Args[0])
+	target := g.cTypeFromGenericArg(gen.Args[0])
 	value := g.emitExpr(args[0], nil)
 
 	switch task.Kind {
@@ -2509,6 +2755,11 @@ func (g *Generator) emitPackageTaskCall(packageName string, taskName string, arg
 }
 
 func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
+	if _, ok := g.distincts[typ.SealName]; ok {
+		g.error(e.Span(), fmt.Sprintf("distinct type %s cannot be constructed with a literal; use cast<%s>(value)", typ.SealName, typ.SealName))
+		return "0"
+	}
+
 	var values []string
 
 	for _, field := range e.Fields {
@@ -2973,7 +3224,7 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 			case builtin.TaskAnyAs, builtin.TaskCast:
 				if len(gen.Args) == 1 {
-					return g.cTypeFromAst(gen.Args[0])
+					return g.cTypeFromGenericArg(gen.Args[0])
 				}
 			}
 
@@ -3569,6 +3820,52 @@ func (g *Generator) lookupStructFieldType(structName string, fieldName string) C
 	}
 
 	return CInvalid
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (g *Generator) implInfoFromDecl(d *ast.ImplDecl) *ImplInfo {
+	gen, ok := d.Interface.(*ast.GenericType)
+	if !ok {
+		g.error(d.Interface.Span(), "impl must specialize an interface, for example: Drawable<Sprite> :: impl")
+		return nil
+	}
+
+	iface := typeNameFromAst(gen.Base)
+	if iface == "" {
+		g.error(gen.Base.Span(), "expected interface name in impl")
+		return nil
+	}
+
+	if len(gen.Args) == 0 {
+		g.error(gen.Span(), "impl interface specialization requires at least one generic argument")
+		return nil
+	}
+
+	concrete := typeNameFromGenericArg(gen.Args[0])
+	if concrete == "" {
+		g.error(gen.Args[0].Span(), "expected concrete type argument in impl")
+		return nil
+	}
+
+	entries := map[string]ast.ImplEntry{}
+	for _, entry := range d.Entries {
+		entries[entry.Name.Name] = entry
+	}
+
+	return &ImplInfo{
+		Concrete:  concrete,
+		Interface: iface,
+		Entries:   entries,
+	}
 }
 
 func (g *Generator) line(s string) {

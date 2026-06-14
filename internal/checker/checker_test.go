@@ -2288,3 +2288,105 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestRejectDistinctCompoundLiteral(t *testing.T) {
+	_, reporter := check(t, `
+Id :: distinct int
+
+Main :: task() {
+    x := Id{5}
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "distinct type Id cannot be constructed with a literal") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueArgumentUsesCastForDistinct(t *testing.T) {
+	_, reporter := check(t, `
+Id :: distinct int
+
+Zombie :: struct {
+    id Id
+}
+
+ZombieDefault :: Zombie{id = cast<Id>(9)}
+
+T :: task <
+    defaultZombie Zombie[defaultZombie.id >= cast<Id>(0)],
+    player Id
+>() bool {
+    return defaultZombie.id == player
+}
+
+Main :: task() {
+    b := T<ZombieDefault, cast<Id>(5)>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericValueArgumentDistinctLiteral(t *testing.T) {
+	_, reporter := check(t, `
+Id :: distinct int
+
+Zombie :: struct {
+    id Id
+}
+
+ZombieDefault :: Zombie{id = cast<Id>(9)}
+
+T :: task <
+    defaultZombie Zombie,
+    player Id
+>() bool {
+    return defaultZombie.id == player
+}
+
+Main :: task() {
+    b := T<ZombieDefault, Id{5}>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "distinct type Id cannot be constructed with a literal") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectValueAsTypeGenericArgument(t *testing.T) {
+	_, reporter := check(t, `
+Zombie :: struct {
+    hp int
+}
+
+ZombieDefault :: Zombie{hp = 10}
+
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<ZombieDefault>
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `expected type argument, got value "ZombieDefault"`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

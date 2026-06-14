@@ -55,13 +55,31 @@ func (p *Parser) parseDecl() ast.Decl {
 		return nil
 	}
 
-	p.advance()
+	var name ast.Ident
+	var declHead ast.Type
+	operatorName := ""
+
+	if nameTok.Kind == token.Ident {
+		p.advance()
+
+		name = ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}
+		declHead = &ast.NamedType{
+			Parts: []ast.Ident{name},
+			Loc:   name.Span(),
+		}
+
+		if p.at(token.Lt) {
+			declHead = p.parseGenericTypeSuffix(declHead, start)
+		}
+	} else {
+		p.advance()
+		operatorName = nameTok.Lexeme
+	}
 
 	if !p.expect(token.ColonColon, "expected '::' after declaration name") {
 		return nil
 	}
 
-	name := ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}
 	mods := declModifiers{}
 
 	if p.match(token.At) {
@@ -76,13 +94,35 @@ func (p *Parser) parseDecl() ast.Decl {
 				return nil
 			}
 
-			return p.parseUnionDecl(name, start, true)
+			if operatorName != "" {
+				p.errorHere("@rawUnion cannot be used with operator declaration")
+				return nil
+			}
+
+			simpleName, ok := isSimpleNamedType(declHead)
+			if !ok {
+				p.errorHere("@rawUnion declaration name cannot be generic")
+				return nil
+			}
+
+			return p.parseUnionDecl(simpleName, start, true)
 
 		case "trusted_pure":
 			mods.TrustedPure = true
 
 		default:
-			return p.parseDirectiveDecl(name, dir, start)
+			if operatorName != "" {
+				p.errorHere("directive declaration name cannot be an operator")
+				return nil
+			}
+
+			simpleName, ok := isSimpleNamedType(declHead)
+			if !ok {
+				p.errorHere("directive declaration name cannot be generic")
+				return nil
+			}
+
+			return p.parseDirectiveDecl(simpleName, dir, start)
 		}
 	}
 
@@ -122,7 +162,18 @@ doneModifiers:
 			return nil
 		}
 
-		return p.parseExternTaskDecl(name, start, mods)
+		if operatorName != "" {
+			p.errorHere("extern task name cannot be an operator")
+			return nil
+		}
+
+		simpleName, ok := isSimpleNamedType(declHead)
+		if !ok {
+			p.errorHere("extern task name cannot be generic")
+			return nil
+		}
+
+		return p.parseExternTaskDecl(simpleName, start, mods)
 	}
 
 	if mods.TrustedPure {
@@ -130,13 +181,37 @@ doneModifiers:
 		return nil
 	}
 
+	if operatorName != "" {
+		if mods.Pure {
+			if !p.expect(token.KeywordTask, "expected 'task' after 'pure'") {
+				return nil
+			}
+
+			return p.parseTaskDecl(ast.Ident{Name: operatorName, Loc: nameTok.Span}, start, true, false)
+		}
+
+		if p.match(token.KeywordOverload) {
+			return p.parseOverloadDecl(operatorName, start)
+		}
+
+		p.errorHere("operator declaration must be overload or pure task")
+		return nil
+	}
+
+	simpleName, simple := isSimpleNamedType(declHead)
+
 	if mods.Intrinsic {
+		if !simple {
+			p.errorHere("intrinsic declaration name cannot be generic")
+			return nil
+		}
+
 		switch {
 		case p.match(token.KeywordTask):
-			return p.parseIntrinsicTaskDecl(name, start, mods)
+			return p.parseIntrinsicTaskDecl(simpleName, start, mods)
 
 		case p.match(token.KeywordStruct):
-			return p.parseStructDecl(name, start, true)
+			return p.parseStructDecl(simpleName, start, true)
 
 		default:
 			p.errorHere("expected 'task' or 'struct' after intrinsic")
@@ -145,54 +220,116 @@ doneModifiers:
 	}
 
 	if mods.Test {
+		if !simple {
+			p.errorHere("test task name cannot be generic")
+			return nil
+		}
+
 		if !p.expect(token.KeywordTask, "expected 'task' after 'test'") {
 			return nil
 		}
 
-		return p.parseTaskDecl(name, start, false, true)
+		return p.parseTaskDecl(simpleName, start, false, true)
 	}
 
 	if mods.Pure {
+		if !simple {
+			p.errorHere("pure task name cannot be generic")
+			return nil
+		}
+
 		if !p.expect(token.KeywordTask, "expected 'task' after 'pure'") {
 			return nil
 		}
 
-		return p.parseTaskDecl(name, start, true, false)
+		return p.parseTaskDecl(simpleName, start, true, false)
 	}
 
 	switch {
 	case p.match(token.KeywordDistinct):
-		return p.parseDistinctDecl(name, start)
+		if !simple {
+			p.errorHere("distinct declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseDistinctDecl(simpleName, start)
 
 	case p.match(token.KeywordTask):
-		return p.parseTaskDecl(name, start, false, false)
+		if !simple {
+			p.errorHere("task declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseTaskDecl(simpleName, start, false, false)
 
 	case p.match(token.KeywordStruct):
-		return p.parseStructDecl(name, start, false)
+		if !simple {
+			p.errorHere("struct declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseStructDecl(simpleName, start, false)
 
 	case p.match(token.KeywordEnum):
-		return p.parseEnumDecl(name, start)
+		if !simple {
+			p.errorHere("enum declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseEnumDecl(simpleName, start)
 
 	case p.match(token.KeywordUnion):
-		return p.parseUnionDecl(name, start, false)
+		if !simple {
+			p.errorHere("union declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseUnionDecl(simpleName, start, false)
+
+	case p.match(token.KeywordDyn):
+		if !simple {
+			p.errorHere("dyn interface declaration name cannot be generic")
+			return nil
+		}
+
+		if !p.expect(token.KeywordInterface, "expected 'interface' after 'dyn'") {
+			return nil
+		}
+
+		return p.parseInterfaceDecl(simpleName, start, true)
 
 	case p.match(token.KeywordInterface):
-		return p.parseInterfaceDecl(name, start)
+		if !simple {
+			p.errorHere("interface declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseInterfaceDecl(simpleName, start, false)
 
 	case p.match(token.KeywordImpl):
-		return p.parseImplDecl(name, start)
+		return p.parseImplDecl(declHead, start)
 
 	case p.match(token.KeywordOverload):
-		return p.parseOverloadDecl(nameTok.Lexeme, start)
+		if !simple {
+			p.errorHere("overload declaration name cannot be generic")
+			return nil
+		}
+
+		return p.parseOverloadDecl(simpleName.Name, start)
 
 	default:
+		if !simple {
+			p.errorHere("constant declaration name cannot be generic")
+			return nil
+		}
+
 		value := p.parseExpr(0)
 		if value == nil {
 			return nil
 		}
 
 		return &ast.ConstDecl{
-			Name:  name,
+			Name:  simpleName,
 			Value: value,
 			Loc:   p.span(start, value.Span().End),
 		}
@@ -235,7 +372,7 @@ func (p *Parser) parseDirectiveDecl(name ast.Ident, dir ast.Ident, start int) as
 }
 
 func (p *Parser) parseStructDecl(name ast.Ident, start int, intrinsic bool) ast.Decl {
-	params := p.parseGenericParamsIfPresent()
+	genericParams := p.parseGenericParamsIfPresent()
 
 	if !p.expect(token.LBrace, "expected '{' after struct declaration") {
 		return nil
@@ -266,11 +403,11 @@ func (p *Parser) parseStructDecl(name ast.Ident, start int, intrinsic bool) ast.
 	endTok := p.expectToken(token.RBrace, "expected '}' after struct fields")
 
 	return &ast.StructDecl{
-		Name:        name,
-		Params:      params,
-		Fields:      fields,
-		IsIntrinsic: intrinsic,
-		Loc:         p.span(start, endTok.Span.End),
+		Name:          name,
+		GenericParams: genericParams,
+		Fields:        fields,
+		IsIntrinsic:   intrinsic,
+		Loc:           p.span(start, endTok.Span.End),
 	}
 }
 
@@ -330,7 +467,9 @@ func (p *Parser) parseUnionDecl(name ast.Ident, start int, raw bool) ast.Decl {
 	}
 }
 
-func (p *Parser) parseInterfaceDecl(name ast.Ident, start int) ast.Decl {
+func (p *Parser) parseInterfaceDecl(name ast.Ident, start int, isDyn bool) ast.Decl {
+	genericParams := p.parseGenericParamsIfPresent()
+
 	if !p.expect(token.LBrace, "expected '{' after interface declaration") {
 		return nil
 	}
@@ -369,37 +508,83 @@ func (p *Parser) parseInterfaceDecl(name ast.Ident, start int) ast.Decl {
 	endTok := p.expectToken(token.RBrace, "expected '}' after interface body")
 
 	return &ast.InterfaceDecl{
-		Name:         name,
-		Requirements: requirements,
-		Loc:          p.span(start, endTok.Span.End),
+		Name:          name,
+		GenericParams: genericParams,
+		IsDyn:         isDyn,
+		Requirements:  requirements,
+		Loc:           p.span(start, endTok.Span.End),
 	}
 }
 
-func (p *Parser) parseImplDecl(typeName ast.Ident, start int) ast.Decl {
+func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 	if !p.expect(token.LBrace, "expected '{' after impl declaration") {
 		return nil
 	}
 
-	var interfaces []ast.Type
+	var entries []ast.ImplEntry
 
 	for !p.at(token.RBrace) && !p.at(token.EOF) {
-		t := p.parseType()
-		if t == nil {
-			p.errorHere("expected interface name in impl block")
+		entryStart := p.peek().Span.Start
+
+		name := p.expectIdent("expected impl entry name")
+		if name.Name == "" {
 			p.synchronizeDeclBody()
 			continue
 		}
 
-		interfaces = append(interfaces, t)
+		if !p.expect(token.ColonColon, "expected '::' after impl entry name") {
+			p.synchronizeDeclBody()
+			continue
+		}
+
+		if p.match(token.KeywordTask) {
+			params := p.parseParamList()
+			results := p.parseResultTypesUntilBodyOrDeclEnd()
+			body := p.parseBlock()
+			if body == nil {
+				p.synchronizeDeclBody()
+				continue
+			}
+
+			task := &ast.TaskDecl{
+				Name:    name,
+				Params:  params,
+				Results: results,
+				Body:    body,
+				Loc:     p.span(entryStart, body.Span().End),
+			}
+
+			entries = append(entries, ast.ImplEntry{
+				Name: name,
+				Task: task,
+				Loc:  task.Span(),
+			})
+
+			continue
+		}
+
+		alias := p.parseExpr(0)
+		if alias == nil {
+			p.errorHere("expected task alias or inline task implementation")
+			p.synchronizeDeclBody()
+			continue
+		}
+
+		entries = append(entries, ast.ImplEntry{
+			Name:  name,
+			Alias: alias,
+			Loc:   p.span(entryStart, alias.Span().End),
+		})
+
 		p.match(token.Comma)
 	}
 
 	endTok := p.expectToken(token.RBrace, "expected '}' after impl block")
 
 	return &ast.ImplDecl{
-		TypeName:   typeName,
-		Interfaces: interfaces,
-		Loc:        p.span(start, endTok.Span.End),
+		Interface: interfaceType,
+		Entries:   entries,
+		Loc:       p.span(start, endTok.Span.End),
 	}
 }
 
@@ -467,19 +652,21 @@ func (p *Parser) parseExternTaskDecl(name ast.Ident, start int, mods declModifie
 }
 
 func (p *Parser) parseIntrinsicTaskDecl(name ast.Ident, start int, mods declModifiers) ast.Decl {
+	genericParams := p.parseGenericParamsIfPresent()
 	params := p.parseParamList()
 	results := p.parseExternResultTypes()
 
 	end := p.previous().Span.End
 
 	return &ast.TaskDecl{
-		Name:        name,
-		IsPure:      mods.Pure,
-		IsIntrinsic: true,
-		Params:      params,
-		Results:     results,
-		Body:        nil,
-		Loc:         p.span(start, end),
+		Name:          name,
+		GenericParams: genericParams,
+		IsPure:        mods.Pure,
+		IsIntrinsic:   true,
+		Params:        params,
+		Results:       results,
+		Body:          nil,
+		Loc:           p.span(start, end),
 	}
 }
 
@@ -498,6 +685,7 @@ func (p *Parser) parseDistinctDecl(name ast.Ident, start int) ast.Decl {
 }
 
 func (p *Parser) parseTaskDecl(name ast.Ident, start int, isPure bool, isTest bool) ast.Decl {
+	genericParams := p.parseGenericParamsIfPresent()
 	params := p.parseParamList()
 	results := p.parseResultTypesUntilBodyOrDeclEnd()
 
@@ -507,42 +695,225 @@ func (p *Parser) parseTaskDecl(name ast.Ident, start int, isPure bool, isTest bo
 	}
 
 	return &ast.TaskDecl{
-		Name:    name,
-		IsPure:  isPure,
-		IsTest:  isTest,
-		Params:  params,
-		Results: results,
-		Body:    body,
-		Loc:     p.span(start, body.Span().End),
+		Name:          name,
+		GenericParams: genericParams,
+		IsPure:        isPure,
+		IsTest:        isTest,
+		Params:        params,
+		Results:       results,
+		Body:          body,
+		Loc:           p.span(start, body.Span().End),
 	}
 }
 
 func (p *Parser) parseGenericParamsIfPresent() []ast.GenericParam {
-	if !p.match(token.LParen) {
+	if !p.match(token.Lt) {
 		return nil
 	}
 
 	var params []ast.GenericParam
 
-	for !p.at(token.RParen) && !p.at(token.EOF) {
-		kind := ast.GenericTypeParam
-
-		if p.match(token.Dollar) {
-			kind = ast.GenericTypeParam
-		} else if p.match(token.Hash) {
-			kind = ast.GenericValueParam
-		} else {
-			p.errorHere("expected '$' or '#' in generic parameter")
-			p.synchronizeUntil(token.Comma, token.RParen)
-			p.match(token.Comma)
-			continue
+	for !p.at(token.Gt) && !p.at(token.EOF) {
+		param := p.parseGenericParam()
+		if param.Name.Name != "" {
+			params = append(params, param)
 		}
 
-		name := p.expectIdent("expected generic parameter name")
-		if name.Name != "" {
-			params = append(params, ast.GenericParam{
-				Kind: kind,
-				Name: name,
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	p.expect(token.Gt, "expected '>' after generic parameters")
+	return params
+}
+
+func (p *Parser) parseGenericParam() ast.GenericParam {
+	start := p.peek().Span.Start
+
+	name := p.expectIdent("expected generic parameter name")
+	if name.Name == "" {
+		p.synchronizeUntil(token.Comma, token.Gt)
+		return ast.GenericParam{}
+	}
+
+	category := ast.GenericParamInvalid
+	var paramType ast.Type
+
+	switch {
+	case p.match(token.KeywordType):
+		category = ast.GenericParamType
+
+	case p.match(token.KeywordEnum):
+		category = ast.GenericParamEnum
+
+	case p.match(token.KeywordUnion):
+		category = ast.GenericParamUnion
+
+	case p.match(token.KeywordTask):
+		category = ast.GenericParamTask
+
+	case p.at(token.Ident) && p.peek().Lexeme == "int":
+		p.advance()
+		category = ast.GenericParamInt
+
+	case p.at(token.Ident) && p.peek().Lexeme == "bool":
+		p.advance()
+		category = ast.GenericParamBool
+
+	case p.at(token.Ident) && p.peek().Lexeme == "string":
+		p.advance()
+		category = ast.GenericParamString
+
+	default:
+		paramType = p.parseType()
+		if paramType == nil {
+			p.errorHere("expected generic parameter category or comptime value type")
+			p.synchronizeUntil(token.Comma, token.Gt)
+			return ast.GenericParam{}
+		}
+
+		category = ast.GenericParamValue
+	}
+
+	constraints := p.parseGenericConstraintsIfPresent(category)
+
+	end := name.Span().End
+	if len(constraints) > 0 {
+		end = constraints[len(constraints)-1].Span().End
+	} else if paramType != nil {
+		end = paramType.Span().End
+	} else if p.pos > 0 {
+		end = p.previous().Span.End
+	}
+
+	return ast.GenericParam{
+		Name:        name,
+		Category:    category,
+		Type:        paramType,
+		Constraints: constraints,
+		Loc:         p.span(start, end),
+	}
+}
+
+func (p *Parser) parseGenericConstraintsIfPresent(category ast.GenericParamCategory) []ast.GenericConstraint {
+	if !p.match(token.LBracket) {
+		return nil
+	}
+
+	var constraints []ast.GenericConstraint
+
+	switch category {
+	case ast.GenericParamType:
+		constraints = p.parseTypeGenericConstraints()
+
+	case ast.GenericParamEnum:
+		constraints = p.parseEnumGenericConstraints()
+
+	case ast.GenericParamUnion:
+		constraints = p.parseUnionGenericConstraints()
+
+	case ast.GenericParamTask:
+		constraint := p.parseTaskGenericConstraint()
+		if constraint != nil {
+			constraints = append(constraints, constraint)
+		}
+
+	case ast.GenericParamInt,
+		ast.GenericParamBool,
+		ast.GenericParamString,
+		ast.GenericParamValue:
+		constraints = p.parseExprGenericConstraints()
+
+	default:
+		p.errorHere("invalid generic constraint category")
+		p.synchronizeUntil(token.RBracket)
+	}
+
+	p.expect(token.RBracket, "expected ']' after generic constraints")
+	return constraints
+}
+
+func (p *Parser) parseExprGenericConstraints() []ast.GenericConstraint {
+	var constraints []ast.GenericConstraint
+
+	for !p.at(token.RBracket) && !p.at(token.EOF) {
+		start := p.peek().Span.Start
+		expr := p.parseExpr(0)
+		if expr == nil {
+			break
+		}
+
+		constraints = append(constraints, &ast.GenericExprConstraint{
+			Expr: expr,
+			Loc:  p.span(start, expr.Span().End),
+		})
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return constraints
+}
+
+func (p *Parser) parseTypeGenericConstraints() []ast.GenericConstraint {
+	var constraints []ast.GenericConstraint
+
+	for !p.at(token.RBracket) && !p.at(token.EOF) {
+		start := p.peek().Span.Start
+
+		name := p.expectIdent("expected field or interface requirement")
+		if name.Name == "" {
+			break
+		}
+
+		if p.at(token.Lt) {
+			base := &ast.NamedType{
+				Parts: []ast.Ident{name},
+				Loc:   name.Span(),
+			}
+
+			iface := p.parseGenericTypeSuffix(base, start)
+
+			if p.expect(token.LParen, "expected '(' after interface requirement") {
+				p.expect(token.RParen, "expected ')' after interface requirement")
+			}
+
+			constraints = append(constraints, &ast.GenericImplConstraint{
+				Interface: iface,
+				Loc:       p.span(start, p.previous().Span.End),
+			})
+		} else if p.match(token.LParen) {
+			p.expect(token.RParen, "expected ')' after interface requirement")
+
+			iface := &ast.NamedType{
+				Parts: []ast.Ident{name},
+				Loc:   name.Span(),
+			}
+
+			constraints = append(constraints, &ast.GenericImplConstraint{
+				Interface: iface,
+				Loc:       p.span(start, p.previous().Span.End),
+			})
+		} else {
+			hasType := false
+			var fieldType ast.Type
+			end := name.Span().End
+
+			if !p.at(token.Comma) && !p.at(token.RBracket) {
+				fieldType = p.parseType()
+				if fieldType != nil {
+					hasType = true
+					end = fieldType.Span().End
+				}
+			}
+
+			constraints = append(constraints, &ast.GenericFieldConstraint{
+				Name:    name,
+				Type:    fieldType,
+				HasType: hasType,
+				Loc:     p.span(start, end),
 			})
 		}
 
@@ -551,8 +922,162 @@ func (p *Parser) parseGenericParamsIfPresent() []ast.GenericParam {
 		}
 	}
 
-	p.expect(token.RParen, "expected ')' after generic parameters")
-	return params
+	return constraints
+}
+
+func (p *Parser) parseEnumGenericConstraints() []ast.GenericConstraint {
+	var constraints []ast.GenericConstraint
+
+	for !p.at(token.RBracket) && !p.at(token.EOF) {
+		name := p.expectIdent("expected enum variant requirement")
+		if name.Name == "" {
+			break
+		}
+
+		constraints = append(constraints, &ast.GenericEnumVariantConstraint{
+			Name: name,
+			Loc:  name.Span(),
+		})
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return constraints
+}
+
+func (p *Parser) parseUnionGenericConstraints() []ast.GenericConstraint {
+	var constraints []ast.GenericConstraint
+
+	for !p.at(token.RBracket) && !p.at(token.EOF) {
+		start := p.peek().Span.Start
+
+		member := p.parseType()
+		if member == nil {
+			p.errorHere("expected union member type requirement")
+			break
+		}
+
+		constraints = append(constraints, &ast.GenericUnionMemberConstraint{
+			Member: member,
+			Loc:    p.span(start, member.Span().End),
+		})
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return constraints
+}
+
+func (p *Parser) parseTaskGenericConstraint() ast.GenericConstraint {
+	start := p.peek().Span.Start
+
+	if !p.expect(token.LParen, "expected '(' before task constraint parameters") {
+		return nil
+	}
+
+	var params []ast.Type
+
+	for !p.at(token.RParen) && !p.at(token.EOF) {
+		param := p.parseType()
+		if param == nil {
+			p.errorHere("expected task constraint parameter type")
+			break
+		}
+
+		params = append(params, param)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	p.expect(token.RParen, "expected ')' after task constraint parameters")
+
+	var results []ast.Type
+
+	for !p.at(token.RBracket) && !p.at(token.EOF) {
+		result := p.parseType()
+		if result == nil {
+			break
+		}
+
+		results = append(results, result)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return &ast.GenericTaskConstraint{
+		Params:  params,
+		Results: results,
+		Loc:     p.span(start, p.previous().Span.End),
+	}
+}
+
+func (p *Parser) parseGenericArgsUntil(end token.Kind) []ast.GenericArg {
+	var args []ast.GenericArg
+
+	for !p.at(end) && !p.at(token.EOF) {
+		arg := p.parseGenericArg()
+		if arg.Kind != ast.GenericArgInvalid {
+			args = append(args, arg)
+		}
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	return args
+}
+
+func (p *Parser) parseGenericArg() ast.GenericArg {
+	start := p.peek().Span.Start
+
+	switch p.peek().Kind {
+	case token.Star, token.LBracket:
+		t := p.parseType()
+		if t == nil {
+			return ast.GenericArg{}
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgType,
+			Type: t,
+			Loc:  p.span(start, t.Span().End),
+		}
+
+	case token.Ident:
+		if isBuiltinGenericTypeName(p.peek().Lexeme) {
+			t := p.parseType()
+			if t == nil {
+				return ast.GenericArg{}
+			}
+
+			return ast.GenericArg{
+				Kind: ast.GenericArgType,
+				Type: t,
+				Loc:  p.span(start, t.Span().End),
+			}
+		}
+	}
+
+	expr := p.parseExpr(0)
+	if expr == nil {
+		p.errorHere("expected generic argument")
+		return ast.GenericArg{}
+	}
+
+	return ast.GenericArg{
+		Kind: ast.GenericArgExpr,
+		Expr: expr,
+		Loc:  p.span(start, expr.Span().End),
+	}
 }
 
 func (p *Parser) parseParamList() []ast.Param {
@@ -715,17 +1240,6 @@ func (p *Parser) parseType() ast.Type {
 			Loc:      p.span(start, elem.Span().End),
 		}
 
-	case p.match(token.Dollar):
-		name := p.expectIdent("expected type parameter name after '$'")
-		if name.Name == "" {
-			return nil
-		}
-
-		t = &ast.NamedType{
-			Parts: []ast.Ident{name},
-			Loc:   p.span(start, name.Span().End),
-		}
-
 	case p.at(token.Ident):
 		parts := []ast.Ident{p.expectIdent("expected type name")}
 
@@ -747,33 +1261,25 @@ func (p *Parser) parseType() ast.Type {
 		return nil
 	}
 
-	if p.match(token.Lt) {
-		var args []ast.Expr
-
-		for !p.at(token.Gt) && !p.at(token.EOF) {
-			arg := p.parseExpr(0)
-			if arg == nil {
-				p.errorHere("expected compile-time argument")
-				break
-			}
-
-			args = append(args, arg)
-
-			if !p.match(token.Comma) {
-				break
-			}
-		}
-
-		gt := p.expectToken(token.Gt, "expected '>' after compile-time arguments")
-
-		t = &ast.GenericType{
-			Base: t,
-			Args: args,
-			Loc:  p.span(start, gt.Span.End),
-		}
+	if p.at(token.Lt) {
+		t = p.parseGenericTypeSuffix(t, start)
 	}
 
 	return t
+}
+
+func (p *Parser) parseGenericTypeSuffix(base ast.Type, start int) ast.Type {
+	p.expect(token.Lt, "expected '<' before generic arguments")
+
+	args := p.parseGenericArgsUntil(token.Gt)
+
+	gt := p.expectToken(token.Gt, "expected '>' after generic arguments")
+
+	return &ast.GenericType{
+		Base: base,
+		Args: args,
+		Loc:  p.span(start, gt.Span.End),
+	}
 }
 
 func (p *Parser) parseBlock() *ast.BlockStmt {
@@ -1322,13 +1828,25 @@ func (p *Parser) parsePrefix() ast.Expr {
 			Loc:  p.previous().Span,
 		}
 
-		baseType := &ast.NamedType{
+		baseType := ast.Type(&ast.NamedType{
 			Parts: []ast.Ident{id},
 			Loc:   id.Span(),
+		})
+
+		if p.at(token.Lt) {
+			baseType = p.parseGenericTypeSuffix(baseType, start)
 		}
 
 		if p.at(token.LBrace) {
 			return p.parseCompoundLiteral(baseType, start)
+		}
+
+		if genericType, ok := baseType.(*ast.GenericType); ok {
+			return &ast.GenericExpr{
+				Base: &ast.IdentExpr{Name: id},
+				Args: genericType.Args,
+				Loc:  genericType.Loc,
+			}
 		}
 
 		return &ast.IdentExpr{Name: id}
@@ -1455,21 +1973,7 @@ func (p *Parser) parseGenericExpr(base ast.Expr) ast.Expr {
 
 	p.expect(token.Lt, "expected '<' before generic arguments")
 
-	var args []ast.Type
-
-	for !p.at(token.Gt) && !p.at(token.EOF) {
-		arg := p.parseType()
-		if arg == nil {
-			p.errorHere("expected type argument")
-			break
-		}
-
-		args = append(args, arg)
-
-		if !p.match(token.Comma) {
-			break
-		}
-	}
+	args := p.parseGenericArgsUntil(token.Gt)
 
 	gt := p.expectToken(token.Gt, "expected '>' after generic arguments")
 
@@ -1691,6 +2195,34 @@ func (p *Parser) isAssignOp(kind token.Kind) bool {
 	default:
 		return false
 	}
+}
+
+func isBuiltinGenericTypeName(name string) bool {
+	switch name {
+	case "bool",
+		"int", "uint",
+		"i8", "i16", "i32", "i64",
+		"u8", "u16", "u32", "u64",
+		"f32", "f64",
+		"char",
+		"rawptr",
+		"any",
+		"string",
+		"cstring":
+		return true
+
+	default:
+		return false
+	}
+}
+
+func isSimpleNamedType(t ast.Type) (ast.Ident, bool) {
+	named, ok := t.(*ast.NamedType)
+	if !ok || len(named.Parts) != 1 {
+		return ast.Ident{}, false
+	}
+
+	return named.Parts[0], true
 }
 
 func (p *Parser) isDeclName(kind token.Kind) bool {

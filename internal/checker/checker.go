@@ -95,6 +95,9 @@ type Type struct {
 	IsTrustedPure bool
 
 	Underlying *Type
+
+	GenericParams  []ast.GenericParam
+	IsDynInterface bool
 }
 
 type EnumVariantInfo struct {
@@ -303,6 +306,7 @@ type Symbol struct {
 	Span     source.Span
 	Node     ast.Node
 	Overload *OverloadInfo
+	Builtin  bool
 
 	Package *PackageInfo
 }
@@ -736,9 +740,10 @@ func (c *Checker) resultTypeFromCall(taskType *Type, span source.Span) *Type {
 func (c *Checker) declareBuiltins(scope *Scope) {
 	for name, typ := range checkerBuiltinTypes {
 		scope.Declare(&Symbol{
-			Name: name,
-			Kind: SymbolType,
-			Type: typ,
+			Name:    name,
+			Kind:    SymbolType,
+			Type:    typ,
+			Builtin: true,
 		})
 	}
 }
@@ -943,12 +948,11 @@ func (c *Checker) prepareDistinctDecl(scope *Scope, d *ast.DistinctDecl) {
 
 func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
 	sym := parent.LookupLocal(d.Name.Name)
-	if sym == nil {
+	if sym == nil || sym.Type == nil {
 		return
 	}
 
-	scope := NewScope(parent)
-	c.declareGenericParams(scope, d.Params)
+	scope := c.scopeWithGenericParams(parent, d.GenericParams)
 
 	var fields []FieldInfo
 
@@ -963,6 +967,7 @@ func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
 	}
 
 	sym.Type.Fields = fields
+	sym.Type.GenericParams = d.GenericParams
 }
 
 func (c *Checker) prepareInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
@@ -971,17 +976,7 @@ func (c *Checker) prepareInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 		return
 	}
 
-	scope := NewScope(parent)
-
-	scope.Declare(&Symbol{
-		Name: "T",
-		Kind: SymbolType,
-		Type: &Type{
-			Kind: TypeTypeParam,
-			Name: "T",
-		},
-		Span: d.Name.Span(),
-	})
+	scope := c.scopeWithGenericParams(parent, d.GenericParams)
 
 	var requirements []InterfaceRequirementInfo
 
@@ -1006,32 +1001,174 @@ func (c *Checker) prepareInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 	}
 
 	sym.Type.InterfaceRequirements = requirements
+	sym.Type.GenericParams = d.GenericParams
+	sym.Type.IsDynInterface = d.IsDyn
+}
+
+func (c *Checker) scopeWithGenericParams(parent *Scope, params []ast.GenericParam) *Scope {
+	if len(params) == 0 {
+		return parent
+	}
+
+	scope := NewScope(parent)
+	c.declareGenericParams(scope, params)
+	return scope
 }
 
 func (c *Checker) declareGenericParams(scope *Scope, params []ast.GenericParam) {
 	for _, param := range params {
-		switch param.Kind {
-		case ast.GenericTypeParam:
-			scope.Declare(&Symbol{
-				Name: param.Name.Name,
-				Kind: SymbolType,
-				Type: &Type{
-					Kind: TypeTypeParam,
-					Name: param.Name.Name,
-				},
-				Span: param.Name.Span(),
-			})
+		c.declareGenericParamSymbol(scope, param)
+	}
 
-		case ast.GenericValueParam:
-			scope.Declare(&Symbol{
-				Name: param.Name.Name,
-				Kind: SymbolConst,
-				Type: &Type{
-					Kind: TypeValueParam,
-					Name: param.Name.Name,
-				},
-				Span: param.Name.Span(),
-			})
+	for _, param := range params {
+		c.checkGenericParamConstraints(scope, param)
+	}
+}
+
+func (c *Checker) declareGenericParamSymbol(scope *Scope, param ast.GenericParam) {
+	if param.Name.Name == "" {
+		return
+	}
+
+	switch param.Category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolType,
+			Type: &Type{
+				Kind:          TypeTypeParam,
+				Name:          param.Name.Name,
+				GenericParams: nil,
+			},
+			Span: param.Name.Span(),
+		})
+
+	case ast.GenericParamTask:
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolTask,
+			Type: c.taskTypeFromGenericTaskParam(scope, param),
+			Span: param.Name.Span(),
+		})
+
+	case ast.GenericParamInt:
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolConst,
+			Type: IntType,
+			Span: param.Name.Span(),
+		})
+
+	case ast.GenericParamBool:
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolConst,
+			Type: BoolType,
+			Span: param.Name.Span(),
+		})
+
+	case ast.GenericParamString:
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolConst,
+			Type: StringType,
+			Span: param.Name.Span(),
+		})
+
+	case ast.GenericParamValue:
+		typ := InvalidType
+		if param.Type != nil {
+			typ = c.typeFromAst(scope, param.Type)
+		}
+
+		scope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolConst,
+			Type: typ,
+			Span: param.Name.Span(),
+		})
+	}
+}
+
+func (c *Checker) taskTypeFromGenericTaskParam(scope *Scope, param ast.GenericParam) *Type {
+	taskType := &Type{
+		Kind: TypeTask,
+		Name: param.Name.Name,
+	}
+
+	for _, constraint := range param.Constraints {
+		taskConstraint, ok := constraint.(*ast.GenericTaskConstraint)
+		if !ok {
+			continue
+		}
+
+		for _, p := range taskConstraint.Params {
+			taskType.Params = append(taskType.Params, c.typeFromAst(scope, p))
+		}
+
+		for _, r := range taskConstraint.Results {
+			taskType.Results = append(taskType.Results, c.typeFromAst(scope, r))
+		}
+
+		taskType.RequiredParams = len(taskType.Params)
+		return taskType
+	}
+
+	return taskType
+}
+
+func (c *Checker) checkGenericParamConstraints(scope *Scope, param ast.GenericParam) {
+	if param.Category == ast.GenericParamTask {
+		taskConstraints := 0
+
+		for _, constraint := range param.Constraints {
+			if _, ok := constraint.(*ast.GenericTaskConstraint); ok {
+				taskConstraints++
+			}
+		}
+
+		if taskConstraints == 0 {
+			c.diags.Add(param.Name.Span(), fmt.Sprintf("generic task parameter %q requires a task signature constraint", param.Name.Name))
+		}
+
+		if taskConstraints > 1 {
+			c.diags.Add(param.Name.Span(), fmt.Sprintf("generic task parameter %q can have only one task signature constraint", param.Name.Name))
+		}
+	}
+
+	for _, constraint := range param.Constraints {
+		switch x := constraint.(type) {
+		case *ast.GenericExprConstraint:
+			t := c.checkExpr(scope, x.Expr)
+			c.checkBoolCondition(t, x.Expr.Span(), "generic constraint must be bool")
+
+		case *ast.GenericFieldConstraint:
+			if x.HasType && x.Type != nil {
+				c.typeFromAst(scope, x.Type)
+			}
+
+		case *ast.GenericImplConstraint:
+			iface := c.typeFromAst(scope, x.Interface)
+			if iface.Kind != TypeInterface && iface.Kind != TypeTypeParam && iface.Kind != TypeInvalid {
+				c.diags.Add(x.Interface.Span(), fmt.Sprintf("generic implementation constraint must name an interface, got %s", iface.String()))
+			}
+
+		case *ast.GenericEnumVariantConstraint:
+			// Name-only constraint. Checked at instantiation.
+
+		case *ast.GenericUnionMemberConstraint:
+			c.typeFromAst(scope, x.Member)
+
+		case *ast.GenericTaskConstraint:
+			for _, p := range x.Params {
+				c.typeFromAst(scope, p)
+			}
+
+			for _, r := range x.Results {
+				c.typeFromAst(scope, r)
+			}
 		}
 	}
 }
@@ -1153,80 +1290,155 @@ func sameParamSignature(c *Checker, a *Type, b *Type) bool {
 }
 
 func (c *Checker) checkImplDecl(scope *Scope, d *ast.ImplDecl) {
-	typeSym := scope.Lookup(d.TypeName.Name)
-	if typeSym == nil || typeSym.Kind != SymbolType {
-		c.diags.Add(d.TypeName.Span(), fmt.Sprintf("undefined implementation type %q", d.TypeName.Name))
+	ifaceType, concreteType, subst, ok := c.implTypesFromDecl(scope, d)
+	if !ok {
 		return
 	}
 
-	concreteType := typeSym.Type
+	if ifaceType.Kind != TypeInterface {
+		c.diags.Add(d.Interface.Span(), fmt.Sprintf("%s is not an interface", ifaceType.String()))
+		return
+	}
+
+	c.checkImplEntries(scope, d, ifaceType, concreteType, subst)
+
+	if !c.typeImplementsInterface(concreteType, ifaceType) {
+		concreteType.Implements = append(concreteType.Implements, ifaceType)
+	}
+}
+
+func (c *Checker) implTypesFromDecl(scope *Scope, d *ast.ImplDecl) (*Type, *Type, map[string]*Type, bool) {
+	gen, ok := d.Interface.(*ast.GenericType)
+	if !ok {
+		c.diags.Add(d.Interface.Span(), "impl must specialize an interface, for example: Drawable<Sprite> :: impl")
+		return InvalidType, InvalidType, nil, false
+	}
+
+	ifaceType := c.typeFromAst(scope, gen.Base)
+	if ifaceType.Kind != TypeInterface {
+		c.diags.Add(gen.Base.Span(), fmt.Sprintf("%s is not an interface", ifaceType.String()))
+		return InvalidType, InvalidType, nil, false
+	}
+
+	if len(ifaceType.GenericParams) == 0 {
+		c.diags.Add(gen.Span(), fmt.Sprintf("interface %s has no generic parameters", ifaceType.String()))
+		return InvalidType, InvalidType, nil, false
+	}
+
+	if len(gen.Args) != len(ifaceType.GenericParams) {
+		c.diags.Add(
+			gen.Span(),
+			fmt.Sprintf("interface %s expects %d generic argument(s), got %d", ifaceType.String(), len(ifaceType.GenericParams), len(gen.Args)),
+		)
+		return InvalidType, InvalidType, nil, false
+	}
+
+	subst := map[string]*Type{}
+	var concreteType *Type
+
+	for i, param := range ifaceType.GenericParams {
+		argType := c.typeFromGenericArg(scope, gen.Args[i])
+		subst[param.Name.Name] = argType
+
+		if i == 0 {
+			concreteType = argType
+		}
+	}
+
 	if concreteType == nil || concreteType.Kind == TypeInvalid {
-		return
+		return InvalidType, InvalidType, nil, false
 	}
 
-	for _, ifaceAst := range d.Interfaces {
-		ifaceType := c.typeFromAst(scope, ifaceAst)
+	if concreteType.Kind == TypeInterface {
+		c.diags.Add(gen.Args[0].Span(), "generic interface implementation target cannot be an interface")
+		return InvalidType, InvalidType, nil, false
+	}
 
-		if ifaceType.Kind != TypeInterface {
-			c.diags.Add(ifaceAst.Span(), fmt.Sprintf("%s is not an interface", ifaceType.String()))
+	return ifaceType, concreteType, subst, true
+}
+
+func (c *Checker) checkImplEntries(scope *Scope, d *ast.ImplDecl, ifaceType *Type, concreteType *Type, subst map[string]*Type) {
+	entries := map[string]ast.ImplEntry{}
+
+	for _, entry := range d.Entries {
+		if _, exists := entries[entry.Name.Name]; exists {
+			c.diags.Add(entry.Name.Span(), fmt.Sprintf("duplicate impl entry %q", entry.Name.Name))
 			continue
 		}
 
-		c.checkConcreteImplementsInterface(scope, concreteType, ifaceType, ifaceAst.Span())
-
-		if !c.typeImplementsInterface(concreteType, ifaceType) {
-			concreteType.Implements = append(concreteType.Implements, ifaceType)
-		}
+		entries[entry.Name.Name] = entry
 	}
-}
 
-func (c *Checker) checkConcreteImplementsInterface(scope *Scope, concreteType *Type, ifaceType *Type, span source.Span) {
 	for _, req := range ifaceType.InterfaceRequirements {
-		expectedParams := make([]*Type, 0, len(req.Params))
-
-		for _, param := range req.Params {
-			expectedParams = append(expectedParams, c.substituteInterfaceSelfType(param, concreteType))
-		}
-
-		task := c.findInterfaceImplementationTask(scope, req.Name, expectedParams, req.Results)
-		if task == nil {
+		entry, ok := entries[req.Name]
+		if !ok {
 			c.diags.Add(
-				span,
-				fmt.Sprintf("type %s does not implement %s: missing task %s",
+				d.Interface.Span(),
+				fmt.Sprintf("type %s does not implement %s: missing requirement %q",
 					concreteType.String(),
 					ifaceType.String(),
-					c.formatTaskSignature(req.Name, expectedParams, req.Results),
+					req.Name,
 				),
 			)
-		}
-	}
-}
-
-func (c *Checker) findInterfaceImplementationTask(scope *Scope, name string, expectedParams []*Type, expectedResults []*Type) *Symbol {
-	sym := scope.Lookup(name)
-	if sym == nil {
-		return nil
-	}
-
-	switch sym.Kind {
-	case SymbolTask:
-		if c.taskSignatureMatches(sym.Type, expectedParams, expectedResults) {
-			return sym
+			continue
 		}
 
-	case SymbolOverload:
-		if sym.Overload == nil {
-			return nil
+		expectedParams := make([]*Type, 0, len(req.Params))
+		for _, p := range req.Params {
+			expectedParams = append(expectedParams, c.substituteGenericTypes(p, subst))
 		}
 
-		for _, candidate := range sym.Overload.Candidates {
-			if c.taskSignatureMatches(candidate.Type, expectedParams, expectedResults) {
-				return candidate
+		expectedResults := make([]*Type, 0, len(req.Results))
+		for _, r := range req.Results {
+			expectedResults = append(expectedResults, c.substituteGenericTypes(r, subst))
+		}
+
+		if entry.Task != nil {
+			taskType := c.taskTypeFromDecl(scope, entry.Task)
+
+			if !c.taskSignatureMatches(taskType, expectedParams, expectedResults) {
+				c.diags.Add(entry.Name.Span(), fmt.Sprintf("impl entry %q has wrong signature; expected %s", entry.Name.Name, c.formatTaskSignature(req.Name, expectedParams, expectedResults)))
+				continue
+			}
+
+			c.checkInlineImplTask(scope, entry.Task, taskType)
+			continue
+		}
+
+		if entry.Alias != nil {
+			aliasType := c.checkExpr(scope, entry.Alias)
+
+			if !c.taskSignatureMatches(aliasType, expectedParams, expectedResults) {
+				c.diags.Add(entry.Alias.Span(), fmt.Sprintf("impl entry %q has wrong signature; expected %s", entry.Name.Name, c.formatTaskSignature(req.Name, expectedParams, expectedResults)))
 			}
 		}
 	}
+}
 
-	return nil
+func (c *Checker) checkInlineImplTask(parent *Scope, d *ast.TaskDecl, taskType *Type) {
+	taskScope := NewScope(parent)
+
+	for i, param := range d.Params {
+		paramType := InvalidType
+		if i < len(taskType.Params) {
+			paramType = taskType.Params[i]
+		}
+
+		taskScope.Declare(&Symbol{
+			Name: param.Name.Name,
+			Kind: SymbolParam,
+			Type: paramType,
+			Span: param.Name.Span(),
+			Node: d,
+		})
+	}
+
+	oldResults := c.currentResults
+	c.currentResults = taskType.Results
+
+	c.checkBlockInScope(taskScope, d.Body, false)
+
+	c.currentResults = oldResults
 }
 
 func (c *Checker) taskSignatureMatches(taskType *Type, expectedParams []*Type, expectedResults []*Type) bool {
@@ -1251,46 +1463,6 @@ func (c *Checker) taskSignatureMatches(taskType *Type, expectedParams []*Type, e
 	}
 
 	return true
-}
-
-func (c *Checker) substituteInterfaceSelfType(t *Type, concreteType *Type) *Type {
-	if t == nil {
-		return InvalidType
-	}
-
-	switch t.Kind {
-	case TypeTypeParam:
-		if t.Name == "T" {
-			return concreteType
-		}
-
-		return t
-
-	case TypePointer:
-		return &Type{
-			Kind: TypePointer,
-			Elem: c.substituteInterfaceSelfType(t.Elem, concreteType),
-		}
-
-	case TypeArray:
-		return &Type{
-			Kind:     TypeArray,
-			Name:     t.Name,
-			Elem:     c.substituteInterfaceSelfType(t.Elem, concreteType),
-			Len:      t.Len,
-			Inferred: t.Inferred,
-		}
-
-	case TypeVariadic:
-		return &Type{
-			Kind: TypeVariadic,
-			Name: t.Name,
-			Elem: c.substituteInterfaceSelfType(t.Elem, concreteType),
-		}
-
-	default:
-		return t
-	}
 }
 
 func (c *Checker) typeImplementsInterface(concreteType *Type, ifaceType *Type) bool {
@@ -1326,14 +1498,25 @@ func (c *Checker) formatTaskSignature(name string, params []*Type, results []*Ty
 }
 
 func (c *Checker) checkInterfaceDecl(scope *Scope, d *ast.InterfaceDecl) {
+	if len(d.GenericParams) == 0 {
+		c.diags.Add(d.Name.Span(), fmt.Sprintf("interface %q must declare its concrete type parameter, for example: interface <T type>", d.Name.Name))
+		return
+	}
+
+	selfName := d.GenericParams[0].Name.Name
+
+	if d.GenericParams[0].Category != ast.GenericParamType {
+		c.diags.Add(d.GenericParams[0].Name.Span(), "first interface generic parameter must be a type parameter")
+	}
+
 	for _, req := range d.Requirements {
 		if len(req.Params) == 0 {
-			c.diags.Add(req.Name.Span(), fmt.Sprintf("interface requirement %q must have a self parameter *$T", req.Name.Name))
+			c.diags.Add(req.Name.Span(), fmt.Sprintf("interface requirement %q must have a self parameter *%s", req.Name.Name, selfName))
 			continue
 		}
 
-		if !isInterfaceSelfParam(req.Params[0].Type) {
-			c.diags.Add(req.Params[0].Name.Span(), fmt.Sprintf("first parameter of interface requirement %q must be *$T", req.Name.Name))
+		if !isInterfaceSelfParam(req.Params[0].Type, selfName) {
+			c.diags.Add(req.Params[0].Name.Span(), fmt.Sprintf("first parameter of interface requirement %q must be *%s", req.Name.Name, selfName))
 		}
 
 		for _, param := range req.Params {
@@ -1345,6 +1528,20 @@ func (c *Checker) checkInterfaceDecl(scope *Scope, d *ast.InterfaceDecl) {
 			}
 		}
 	}
+}
+
+func isInterfaceSelfParam(t ast.Type, selfName string) bool {
+	ptr, ok := t.(*ast.PointerType)
+	if !ok {
+		return false
+	}
+
+	named, ok := ptr.Elem.(*ast.NamedType)
+	if !ok {
+		return false
+	}
+
+	return len(named.Parts) == 1 && named.Parts[0].Name == selfName
 }
 
 func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
@@ -1359,7 +1556,9 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		taskSym.Type = taskType
 	}
 
-	c.checkTaskDefaultParameters(parent, d, taskType)
+	genericScope := c.scopeWithGenericParams(parent, d.GenericParams)
+
+	c.checkTaskDefaultParameters(genericScope, d, taskType)
 
 	if d.IsExtern {
 		if d.IsPure && !d.IsTrustedPure {
@@ -1381,7 +1580,7 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 		return
 	}
 
-	taskScope := NewScope(parent)
+	taskScope := NewScope(genericScope)
 
 	for i, param := range d.Params {
 		paramType := InvalidType
@@ -1415,6 +1614,8 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 }
 
 func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
+	genericScope := c.scopeWithGenericParams(scope, d.GenericParams)
+
 	var params []*Type
 	var paramDefaults []ast.Expr
 	var paramHasDefault []bool
@@ -1424,7 +1625,7 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	isVariadic := false
 
 	for i, param := range d.Params {
-		params = append(params, c.typeFromAst(scope, param.Type))
+		params = append(params, c.typeFromAst(genericScope, param.Type))
 		paramDefaults = append(paramDefaults, param.Default)
 		paramHasDefault = append(paramHasDefault, param.HasDefault)
 		paramIsVariadic = append(paramIsVariadic, param.IsVariadic)
@@ -1443,7 +1644,7 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 
 	var results []*Type
 	for _, result := range d.Results {
-		results = append(results, c.typeFromAst(scope, result))
+		results = append(results, c.typeFromAst(genericScope, result))
 	}
 
 	return &Type{
@@ -1461,6 +1662,7 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 		IsPure:          d.IsPure,
 		IsIntrinsic:     d.IsIntrinsic,
 		IsTrustedPure:   d.IsTrustedPure,
+		GenericParams:   d.GenericParams,
 	}
 }
 
@@ -2001,6 +2203,10 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 		return InvalidType
 
 	case token.Lt, token.Gt, token.LtEq, token.GtEq:
+		if c.distinctComparable(left, right) {
+			return BoolType
+		}
+
 		if c.isNumeric(left) && c.isNumeric(right) {
 			if c.numericComparable(left, right) {
 				return BoolType
@@ -2233,8 +2439,7 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	}
 
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		result := c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
-		return []*Type{result}
+		return c.checkGenericCallResultTypes(scope, gen, argTypes, argSpans, e.Args, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2301,6 +2506,54 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	return calleeType.Results
 }
 
+func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) *Type {
+	results := c.checkGenericCallResultTypes(scope, gen, argTypes, argSpans, args, span)
+
+	if len(results) == 0 {
+		return VoidType
+	}
+
+	if len(results) == 1 {
+		return results[0]
+	}
+
+	c.diags.Add(span, "multi-result generic task call cannot be used as a single expression; destructure it with a, b :=")
+	return InvalidType
+}
+
+func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) []*Type {
+	if id, ok := gen.Base.(*ast.IdentExpr); ok {
+		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
+			result := c.checkGenericIntrinsicCall(scope, gen, argTypes, args, span)
+			return []*Type{result}
+		}
+
+		sym := scope.Lookup(id.Name.Name)
+		if sym == nil {
+			c.diags.Add(id.Span(), fmt.Sprintf("undefined generic task %q", id.Name.Name))
+			return []*Type{InvalidType}
+		}
+
+		if sym.Kind != SymbolTask {
+			c.diags.Add(id.Span(), fmt.Sprintf("%q is not a generic task", id.Name.Name))
+			return []*Type{InvalidType}
+		}
+
+		if sym.Type == nil || sym.Type.Kind != TypeTask {
+			c.diags.Add(id.Span(), fmt.Sprintf("%q is not a valid task", id.Name.Name))
+			return []*Type{InvalidType}
+		}
+
+		c.checkGenericArgsAgainstParams(scope, gen.Args, sym.Type.GenericParams, gen.Span())
+		c.checkTaskTypeCallArguments(sym.Type, argTypes, argSpans, span)
+
+		return sym.Type.Results
+	}
+
+	c.diags.Add(gen.Base.Span(), "unsupported generic callee")
+	return []*Type{InvalidType}
+}
+
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
 
@@ -2309,7 +2562,7 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return c.checkGenericIntrinsicCall(scope, gen, argTypes, e.Args, e.Span())
+		return c.checkGenericCallExpr(scope, gen, argTypes, argSpans, e.Args, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2545,7 +2798,7 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 		return InvalidType
 	}
 
-	targetType := c.typeFromAst(scope, gen.Args[0])
+	targetType := c.typeFromGenericArg(scope, gen.Args[0])
 
 	switch task.Kind {
 	case builtin.TaskAnyAs:
@@ -2762,6 +3015,20 @@ func (c *Checker) checkArrayLiteralExpr(scope *Scope, e *ast.ArrayLiteralExpr) *
 func (c *Checker) checkCompoundLiteralExpr(scope *Scope, e *ast.CompoundLiteralExpr) *Type {
 	litType := c.typeFromAst(scope, e.Type)
 
+	if litType.Kind == TypeDistinct {
+		c.diags.Add(e.Span(), fmt.Sprintf("distinct type %s cannot be constructed with a literal; use cast<%s>(value)", litType.String(), litType.String()))
+
+		for _, field := range e.Fields {
+			c.checkExpr(scope, field.Value)
+		}
+
+		for _, value := range e.Values {
+			c.checkExpr(scope, value)
+		}
+
+		return InvalidType
+	}
+
 	if litType.Kind != TypeStruct {
 		for _, field := range e.Fields {
 			c.checkExpr(scope, field.Value)
@@ -2908,11 +3175,268 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 		}
 
 	case *ast.GenericType:
-		// Full generic type instantiation comes in a later phase.
-		return c.typeFromAst(scope, t.Base)
+		baseType := c.typeFromAst(scope, t.Base)
+
+		if baseType.Kind == TypeInvalid {
+			return InvalidType
+		}
+
+		c.checkGenericArgsAgainstParams(scope, t.Args, baseType.GenericParams, t.Span())
+
+		// Full type monomorphization comes later.
+		// For now, keep the base type so old checker/codegen paths stay alive.
+		return baseType
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) substituteGenericTypes(t *Type, subst map[string]*Type) *Type {
+	if t == nil {
+		return InvalidType
+	}
+
+	switch t.Kind {
+	case TypeTypeParam:
+		if replacement := subst[t.Name]; replacement != nil {
+			return replacement
+		}
+
+		return t
+
+	case TypePointer:
+		return &Type{
+			Kind: TypePointer,
+			Elem: c.substituteGenericTypes(t.Elem, subst),
+		}
+
+	case TypeArray:
+		return &Type{
+			Kind:     TypeArray,
+			Name:     t.Name,
+			Elem:     c.substituteGenericTypes(t.Elem, subst),
+			Len:      t.Len,
+			Inferred: t.Inferred,
+		}
+
+	case TypeVariadic:
+		return &Type{
+			Kind: TypeVariadic,
+			Name: t.Name,
+			Elem: c.substituteGenericTypes(t.Elem, subst),
+		}
+
+	default:
+		return t
+	}
+}
+
+func (c *Checker) checkGenericArgsAgainstParams(scope *Scope, args []ast.GenericArg, params []ast.GenericParam, span source.Span) {
+	if len(params) == 0 {
+		if len(args) > 0 {
+			c.diags.Add(span, "non-generic symbol cannot receive generic arguments")
+		}
+		return
+	}
+
+	if len(args) != len(params) {
+		c.diags.Add(span, fmt.Sprintf("generic argument count mismatch: expected %d, got %d", len(params), len(args)))
+		return
+	}
+
+	for i := range args {
+		c.checkGenericArgAgainstParam(scope, args[i], params[i])
+	}
+}
+
+func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, param ast.GenericParam) {
+	switch param.Category {
+	case ast.GenericParamType:
+		argType := c.typeFromGenericArg(scope, arg)
+
+		switch argType.Kind {
+		case TypeInvalid:
+			return
+
+		case TypeEnum, TypeUnion, TypeInterface, TypeTask, TypePackage:
+			c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q expects concrete stored data type, got %s", param.Name.Name, argType.String()))
+
+		default:
+			return
+		}
+
+	case ast.GenericParamEnum:
+		argType := c.typeFromGenericArg(scope, arg)
+		if argType.Kind != TypeEnum && argType.Kind != TypeInvalid {
+			c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q expects enum type, got %s", param.Name.Name, argType.String()))
+		}
+
+	case ast.GenericParamUnion:
+		argType := c.typeFromGenericArg(scope, arg)
+		if argType.Kind != TypeUnion && argType.Kind != TypeInvalid {
+			c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q expects union type, got %s", param.Name.Name, argType.String()))
+		}
+
+	case ast.GenericParamTask:
+		argType := c.taskFromGenericArg(scope, arg)
+		if argType.Kind != TypeTask && argType.Kind != TypeInvalid {
+			c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q expects task, got %s", param.Name.Name, argType.String()))
+		}
+
+	case ast.GenericParamInt:
+		got := c.valueFromGenericArg(scope, arg)
+		c.checkAssignable(IntType, got, arg.Span())
+
+	case ast.GenericParamBool:
+		got := c.valueFromGenericArg(scope, arg)
+		c.checkAssignable(BoolType, got, arg.Span())
+
+	case ast.GenericParamString:
+		got := c.valueFromGenericArg(scope, arg)
+		c.checkAssignable(StringType, got, arg.Span())
+
+	case ast.GenericParamValue:
+		expected := InvalidType
+		if param.Type != nil {
+			expected = c.typeFromAst(scope, param.Type)
+		}
+
+		got := c.valueFromGenericArg(scope, arg)
+		c.checkAssignable(expected, got, arg.Span())
+	}
+}
+
+func (c *Checker) exprFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		c.diags.Add(arg.Span(), "expected compile-time value argument")
+		return InvalidType
+	}
+
+	return c.checkExpr(scope, arg.Expr)
+}
+
+func (c *Checker) typeFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		if arg.Type == nil {
+			return InvalidType
+		}
+
+		return c.typeFromAst(scope, arg.Type)
+
+	case ast.GenericArgExpr:
+		switch e := arg.Expr.(type) {
+		case *ast.IdentExpr:
+			sym := scope.Lookup(e.Name.Name)
+			if sym == nil {
+				c.diags.Add(e.Span(), fmt.Sprintf("undefined generic argument %q", e.Name.Name))
+				return InvalidType
+			}
+
+			if sym.Kind == SymbolType {
+				return sym.Type
+			}
+
+			c.diags.Add(e.Span(), fmt.Sprintf("expected type argument, got value %q", e.Name.Name))
+			return InvalidType
+
+		case *ast.SelectorExpr:
+			if id, ok := e.Left.(*ast.IdentExpr); ok {
+				pkgSym := scope.Lookup(id.Name.Name)
+				if pkgSym != nil && pkgSym.Kind == SymbolPackage {
+					if pkgSym.Package == nil {
+						c.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
+						return InvalidType
+					}
+
+					member := pkgSym.Package.Symbols[e.Name.Name]
+					if member == nil {
+						c.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
+						return InvalidType
+					}
+
+					if member.Kind == SymbolType {
+						return member.Type
+					}
+
+					c.diags.Add(e.Name.Span(), fmt.Sprintf("package symbol %s.%s is not a type", id.Name.Name, e.Name.Name))
+					return InvalidType
+				}
+			}
+
+			c.diags.Add(e.Span(), "expected type argument")
+			return InvalidType
+
+		default:
+			c.diags.Add(arg.Span(), "expected type argument")
+			return InvalidType
+		}
+	}
+
+	return InvalidType
+}
+
+func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		c.diags.Add(arg.Span(), "expected task argument")
+		return InvalidType
+	}
+
+	switch e := arg.Expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		if sym == nil {
+			c.diags.Add(e.Span(), fmt.Sprintf("undefined task argument %q", e.Name.Name))
+			return InvalidType
+		}
+
+		if sym.Kind != SymbolTask {
+			c.diags.Add(e.Span(), fmt.Sprintf("expected task argument, got %q", e.Name.Name))
+			return InvalidType
+		}
+
+		if sym.Type == nil {
+			return InvalidType
+		}
+
+		return sym.Type
+
+	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
+			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
+				if pkgSym.Package == nil {
+					c.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
+					return InvalidType
+				}
+
+				member := pkgSym.Package.Symbols[e.Name.Name]
+				if member == nil {
+					c.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
+					return InvalidType
+				}
+
+				if member.Kind != SymbolTask {
+					c.diags.Add(e.Name.Span(), fmt.Sprintf("package symbol %s.%s is not a task", id.Name.Name, e.Name.Name))
+					return InvalidType
+				}
+
+				return member.Type
+			}
+		}
+	}
+
+	c.diags.Add(arg.Span(), "expected task argument")
+	return InvalidType
+}
+
+func (c *Checker) valueFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		c.diags.Add(arg.Span(), "expected compile-time value argument")
+		return InvalidType
+	}
+
+	return c.checkExpr(scope, arg.Expr)
 }
 
 func (c *Checker) checkMultiVarDeclStmt(scope *Scope, s *ast.MultiVarDeclStmt) {
@@ -3315,20 +3839,6 @@ func (c *Checker) isValidDistinctUnderlying(t *Type) bool {
 	}
 }
 
-func isInterfaceSelfParam(t ast.Type) bool {
-	ptr, ok := t.(*ast.PointerType)
-	if !ok {
-		return false
-	}
-
-	named, ok := ptr.Elem.(*ast.NamedType)
-	if !ok {
-		return false
-	}
-
-	return len(named.Parts) == 1 && named.Parts[0].Name == "T"
-}
-
 func (c *Checker) numericResultType(a *Type, b *Type) (*Type, bool) {
 	if a.Kind == TypeInvalid || b.Kind == TypeInvalid {
 		return InvalidType, true
@@ -3447,6 +3957,22 @@ func (c *Checker) enumHasVariant(enumType *Type, name string) bool {
 	}
 
 	return false
+}
+
+func (c *Checker) distinctComparable(a *Type, b *Type) bool {
+	if a == nil || b == nil {
+		return false
+	}
+
+	if a.Kind != TypeDistinct || b.Kind != TypeDistinct {
+		return false
+	}
+
+	if !c.sameType(a, b) {
+		return false
+	}
+
+	return c.isNumeric(a.Underlying) || c.isIntegerLike(a.Underlying)
 }
 
 func (c *Checker) unionHasMember(unionType *Type, memberType *Type) bool {
@@ -3846,7 +4372,8 @@ func (c *Checker) isBuiltinPrimitiveForOperator(t *Type) bool {
 }
 
 func (c *Checker) isShadowedPrimitive(scope *Scope, name string) bool {
-	return scope.Lookup(name) != nil
+	sym := scope.Lookup(name)
+	return sym != nil && !sym.Builtin
 }
 
 func (c *Checker) primitiveTaskKind(scope *Scope, name string) (builtin.TaskKind, bool) {
