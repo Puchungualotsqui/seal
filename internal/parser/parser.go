@@ -839,7 +839,7 @@ func (p *Parser) parseExprGenericConstraints() []ast.GenericConstraint {
 
 	for !p.at(token.RBracket) && !p.at(token.EOF) {
 		start := p.peek().Span.Start
-		expr := p.parseExpr(0)
+		expr := p.parseExprUntil(0, token.Comma, token.RBracket)
 		if expr == nil {
 			break
 		}
@@ -1067,7 +1067,7 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 		}
 	}
 
-	expr := p.parseExpr(0)
+	expr := p.parseExprUntil(0, token.Comma, token.Gt)
 	if expr == nil {
 		p.errorHere("expected generic argument")
 		return ast.GenericArg{}
@@ -1779,14 +1779,33 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 }
 
 func (p *Parser) parseExpr(minPrec int) ast.Expr {
+	return p.parseExprUntil(minPrec)
+}
+
+func (p *Parser) parseExprUntil(minPrec int, stops ...token.Kind) ast.Expr {
 	left := p.parsePrefix()
 	if left == nil {
 		return nil
 	}
 
 	for {
+		if p.atAny(stops...) {
+			break
+		}
+
 		if p.at(token.Lt) && p.looksLikeGenericExpr(left) {
 			left = p.parseGenericExpr(left)
+			continue
+		}
+
+		// `{` is only postfix when the left side can become a type.
+		// Otherwise it belongs to an if/for/switch/block.
+		if p.at(token.LBrace) {
+			if p.typeFromExprForLiteral(left) == nil {
+				break
+			}
+
+			left = p.parsePostfix(left)
 			continue
 		}
 
@@ -1801,7 +1820,7 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 		}
 
 		op := p.advance()
-		right := p.parseExpr(prec + 1)
+		right := p.parseExprUntil(prec+1, stops...)
 		if right == nil {
 			p.errorHere("expected expression after binary operator")
 			return left
@@ -1816,6 +1835,16 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 	}
 
 	return left
+}
+
+func (p *Parser) atAny(kinds ...token.Kind) bool {
+	for _, kind := range kinds {
+		if p.at(kind) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (p *Parser) parsePrefix() ast.Expr {
@@ -2213,7 +2242,7 @@ func (p *Parser) isUnaryOp(kind token.Kind) bool {
 
 func (p *Parser) isPostfixStart(kind token.Kind) bool {
 	switch kind {
-	case token.LParen, token.Dot, token.LBracket, token.LBrace:
+	case token.LParen, token.Dot, token.LBracket:
 		return true
 	default:
 		return false

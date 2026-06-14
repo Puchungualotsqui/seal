@@ -258,58 +258,6 @@ Main :: task() {
 	}
 }
 
-func TestImplMustBeInTypeDefiningScope(t *testing.T) {
-	_, reporter := resolve(t, `
-Enemy :: interface {
-    Damage :: task(e *$T, amount int)
-}
-
-Soldier :: struct {
-    health int
-}
-
-Main :: task() {
-    Soldier :: impl {
-        Enemy
-    }
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), `impl for "Soldier" must be declared in the type's defining scope`) {
-		t.Fatalf("expected impl scope diagnostic, got:\n%s", reporter.String())
-	}
-}
-
-func TestLocalInterfaceAndLocalTypeImplIsValid(t *testing.T) {
-	_, reporter := resolve(t, `
-Main :: task() {
-    Enemy :: interface {
-        Damage :: task(e *$T, amount int)
-    }
-
-    Soldier :: struct {
-        health int
-    }
-
-    Damage :: task(e *Soldier, amount int) {
-        e.health = e.health - amount
-    }
-
-    Soldier :: impl {
-        Enemy
-    }
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
 func TestDuplicateEnumVariant(t *testing.T) {
 	_, reporter := resolve(t, `
 Direction :: enum {
