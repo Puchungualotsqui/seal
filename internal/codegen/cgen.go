@@ -385,6 +385,12 @@ func (g *Generator) collectGenericStructInstancesFromDecl(decl ast.Decl) {
 		g.collectGenericStructInstancesFromExpr(d.Value)
 
 	case *ast.StructDecl:
+		// Generic structs are templates. Do not collect their field types as
+		// concrete instantiations until the template itself is specialized.
+		if len(d.GenericParams) > 0 {
+			return
+		}
+
 		for _, field := range d.Fields {
 			g.collectGenericStructInstancesFromType(field.Type)
 		}
@@ -1066,6 +1072,15 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 
 			g.error(e.Span(), "expected type argument")
 			return CInvalid
+
+		case *ast.GenericExpr:
+			typ := typeAstFromExprForCGen(e)
+			if typ == nil {
+				g.error(e.Span(), "expected type argument")
+				return CInvalid
+			}
+
+			return g.cTypeFromAst(typ)
 
 		default:
 			g.error(arg.Span(), "expected type argument")
@@ -4639,15 +4654,26 @@ func (g *Generator) primitiveTaskKind(name string) (builtin.TaskKind, bool) {
 }
 
 func (g *Generator) lookupStructFieldType(structName string, fieldName string) CType {
-	d := g.structs[structName]
-	if d == nil {
+	if d := g.structs[structName]; d != nil {
+		for _, field := range d.Fields {
+			if field.Name.Name == fieldName {
+				return g.cTypeFromAst(field.Type)
+			}
+		}
+
 		return CInvalid
 	}
 
-	for _, field := range d.Fields {
-		if field.Name.Name == fieldName {
-			return g.cTypeFromAst(field.Type)
+	if info := g.genericStructs[structName]; info != nil {
+		subst := genericArgSubstForCGen(info.Decl.GenericParams, info.Args)
+
+		for _, field := range info.Decl.Fields {
+			if field.Name.Name == fieldName {
+				return g.cTypeFromAstWithGenericArgs(field.Type, subst)
+			}
 		}
+
+		return CInvalid
 	}
 
 	return CInvalid
