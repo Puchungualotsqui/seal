@@ -17,11 +17,12 @@ type CType struct {
 	Name     string
 	SealName string
 
-	IsArray     bool
-	IsVariadic  bool
-	IsInterface bool
-	ArrayLen    string
-	Elem        *CType
+	IsArray        bool
+	IsVariadic     bool
+	IsInterface    bool
+	IsDynInterface bool
+	ArrayLen       string
+	Elem           *CType
 }
 
 func (t CType) String() string {
@@ -263,6 +264,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitImportedTaskPrototypes()
 	g.emitTaskPrototypes(file)
 	g.emitImplVTables()
+	g.emitStaticInterfaceDispatchers()
 	g.emitTasks(file)
 
 	return g.out.String()
@@ -1054,8 +1056,13 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 				return CType{Name: name, SealName: name}
 			}
 
-			if _, ok := g.interfaces[name]; ok {
-				return CType{Name: name, SealName: name, IsInterface: true}
+			if iface := g.interfaces[name]; iface != nil {
+				return CType{
+					Name:           name,
+					SealName:       name,
+					IsInterface:    true,
+					IsDynInterface: iface.IsDyn,
+				}
 			}
 
 			g.error(e.Span(), fmt.Sprintf("expected type argument, got %q", name))
@@ -1655,35 +1662,86 @@ func (g *Generator) emitInterfaces() {
 	for _, name := range names {
 		d := g.interfaces[name]
 
-		g.linef("typedef struct %s_vtable {", d.Name.Name)
-		g.indent++
+		if d.IsDyn {
+			g.emitDynInterface(d)
+		} else {
+			g.emitStaticInterface(d)
+		}
+	}
+}
 
-		for _, req := range d.Requirements {
-			ret := g.interfaceRequirementReturnType(req)
+func (g *Generator) emitDynInterface(d *ast.InterfaceDecl) {
+	g.linef("typedef struct %s_vtable {", d.Name.Name)
+	g.indent++
 
-			var params []string
-			params = append(params, "void *data")
+	for _, req := range d.Requirements {
+		ret := g.interfaceRequirementReturnType(req)
 
-			for i := 1; i < len(req.Params); i++ {
-				paramType := g.cTypeFromAst(req.Params[i].Type)
-				params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
-			}
+		var params []string
+		params = append(params, "void *data")
 
-			g.linef("%s (*%s)(%s);", ret.Name, sanitizeCName(req.Name.Name), strings.Join(params, ", "))
+		for i := 1; i < len(req.Params); i++ {
+			paramType := g.cTypeFromAst(req.Params[i].Type)
+			params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
 		}
 
-		g.indent--
-		g.linef("} %s_vtable;", d.Name.Name)
-		g.line("")
-
-		g.linef("typedef struct %s {", d.Name.Name)
-		g.indent++
-		g.line("void *data;")
-		g.linef("%s_vtable *vtable;", d.Name.Name)
-		g.indent--
-		g.linef("} %s;", d.Name.Name)
-		g.line("")
+		g.linef("%s (*%s)(%s);", ret.Name, sanitizeCName(req.Name.Name), strings.Join(params, ", "))
 	}
+
+	g.indent--
+	g.linef("} %s_vtable;", d.Name.Name)
+	g.line("")
+
+	g.linef("typedef struct %s {", d.Name.Name)
+	g.indent++
+	g.line("void *data;")
+	g.linef("%s_vtable *vtable;", d.Name.Name)
+	g.indent--
+	g.linef("} %s;", d.Name.Name)
+	g.line("")
+}
+
+func (g *Generator) emitStaticInterface(d *ast.InterfaceDecl) {
+	iface := d.Name.Name
+	concretes := g.staticInterfaceConcreteTypes(iface)
+
+	g.linef("typedef enum %s_Tag {", iface)
+	g.indent++
+	g.linef("%s,", staticInterfaceTagName(iface, ""))
+
+	for i, concrete := range concretes {
+		comma := ","
+		if i == len(concretes)-1 {
+			comma = ""
+		}
+
+		g.linef("%s%s", staticInterfaceTagName(iface, concrete), comma)
+	}
+
+	g.indent--
+	g.linef("} %s_Tag;", iface)
+	g.line("")
+
+	g.linef("typedef struct %s {", iface)
+	g.indent++
+	g.linef("%s_Tag tag;", iface)
+	g.line("union {")
+	g.indent++
+
+	if len(concretes) == 0 {
+		g.line("char _empty;")
+	} else {
+		for _, concrete := range concretes {
+			field := sanitizeCName(concrete)
+			g.linef("%s *%s;", concrete, field)
+		}
+	}
+
+	g.indent--
+	g.line("} as;")
+	g.indent--
+	g.linef("} %s;", iface)
+	g.line("")
 }
 
 func (g *Generator) interfaceRequirementReturnType(req *ast.TaskSignature) CType {
@@ -1715,6 +1773,14 @@ func (g *Generator) lookupInterfaceRequirement(iface string, name string) (*ast.
 }
 
 func (g *Generator) emitInterfaceDispatchCall(iface CType, taskName string, args []ast.Expr, preparedArgs []string) string {
+	if g.isDynInterfaceName(iface.SealName) {
+		return g.emitDynInterfaceDispatchCall(iface, taskName, args, preparedArgs)
+	}
+
+	return g.emitStaticInterfaceDispatchCall(iface, taskName, args, preparedArgs)
+}
+
+func (g *Generator) emitDynInterfaceDispatchCall(iface CType, taskName string, args []ast.Expr, preparedArgs []string) string {
 	req, ok := g.lookupInterfaceRequirement(iface.SealName, taskName)
 	if !ok {
 		g.error(argsSpan(args), fmt.Sprintf("interface %s has no requirement %q", iface.SealName, taskName))
@@ -1754,6 +1820,45 @@ func (g *Generator) emitInterfaceDispatchCall(iface CType, taskName string, args
 	)
 }
 
+func (g *Generator) emitStaticInterfaceDispatchCall(iface CType, taskName string, args []ast.Expr, preparedArgs []string) string {
+	req, ok := g.lookupInterfaceRequirement(iface.SealName, taskName)
+	if !ok {
+		g.error(argsSpan(args), fmt.Sprintf("interface %s has no requirement %q", iface.SealName, taskName))
+		return "0"
+	}
+
+	receiver := ""
+	if len(preparedArgs) > 0 {
+		receiver = preparedArgs[0]
+	} else {
+		receiver = g.emitExpr(args[0], nil)
+	}
+
+	var outArgs []string
+	outArgs = append(outArgs, receiver)
+
+	for i := 1; i < len(args); i++ {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := (*CType)(nil)
+		if i < len(req.Params) {
+			paramType := g.cTypeFromAst(req.Params[i].Type)
+			expected = &paramType
+		}
+
+		outArgs = append(outArgs, g.emitExpr(args[i], expected))
+	}
+
+	return fmt.Sprintf(
+		"%s(%s)",
+		staticInterfaceDispatcherName(iface.SealName, taskName),
+		strings.Join(outArgs, ", "),
+	)
+}
+
 func (g *Generator) emitImplVTables() {
 	if len(g.implInfos) == 0 {
 		return
@@ -1778,6 +1883,90 @@ func (g *Generator) emitImplVTables() {
 	}
 }
 
+func (g *Generator) emitStaticInterfaceDispatchers() {
+	if len(g.interfaces) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(g.interfaces))
+	for name := range g.interfaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ifaceDecl := g.interfaces[name]
+		if ifaceDecl == nil || ifaceDecl.IsDyn {
+			continue
+		}
+
+		for _, req := range ifaceDecl.Requirements {
+			g.emitStaticInterfaceDispatcher(ifaceDecl, req)
+		}
+	}
+}
+
+func (g *Generator) emitStaticInterfaceDispatcher(ifaceDecl *ast.InterfaceDecl, req *ast.TaskSignature) {
+	iface := ifaceDecl.Name.Name
+	ret := g.interfaceRequirementReturnType(req)
+	name := staticInterfaceDispatcherName(iface, req.Name.Name)
+
+	var params []string
+	params = append(params, CType{Name: iface, SealName: iface, IsInterface: true}.Decl("receiver"))
+
+	for i := 1; i < len(req.Params); i++ {
+		paramType := g.cTypeFromAst(req.Params[i].Type)
+		params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
+	}
+
+	g.linef("static %s %s(%s) {", ret.Name, name, strings.Join(params, ", "))
+	g.indent++
+
+	g.line("switch (receiver.tag) {")
+	g.indent++
+
+	for _, concrete := range g.staticInterfaceConcreteTypes(iface) {
+		field := sanitizeCName(concrete)
+		wrapper := interfaceWrapperName(iface, concrete, req.Name.Name)
+
+		g.linef("case %s:", staticInterfaceTagName(iface, concrete))
+		g.indent++
+
+		var args []string
+		args = append(args, fmt.Sprintf("(void *)(receiver).as.%s", field))
+
+		for i := 1; i < len(req.Params); i++ {
+			args = append(args, fmt.Sprintf("arg%d", i))
+		}
+
+		if ret.SealName == "void" {
+			g.linef("%s(%s);", wrapper, strings.Join(args, ", "))
+			g.line("return;")
+		} else {
+			g.linef("return %s(%s);", wrapper, strings.Join(args, ", "))
+		}
+
+		g.indent--
+	}
+
+	g.line("default:")
+	g.indent++
+	g.line("seal_panic_cstring(\"static interface dispatch on nil or invalid tag\");")
+
+	if ret.SealName != "void" {
+		g.line("return 0;")
+	}
+
+	g.indent--
+
+	g.indent--
+	g.line("}")
+
+	g.indent--
+	g.line("}")
+	g.line("")
+}
+
 func (g *Generator) emitImplVTable(info *ImplInfo) {
 	if info == nil {
 		return
@@ -1790,6 +1979,10 @@ func (g *Generator) emitImplVTable(info *ImplInfo) {
 
 	for _, req := range ifaceDecl.Requirements {
 		g.emitInterfaceWrapper(info, req)
+	}
+
+	if !ifaceDecl.IsDyn {
+		return
 	}
 
 	vtableName := interfaceVTableName(info.Interface, info.Concrete)
@@ -4188,6 +4381,36 @@ func (g *Generator) isInterfaceCType(t CType) bool {
 	return ok
 }
 
+func (g *Generator) isDynInterfaceName(name string) bool {
+	d := g.interfaces[name]
+	return d != nil && d.IsDyn
+}
+
+func (g *Generator) staticInterfaceConcreteTypes(iface string) []string {
+	var names []string
+
+	for concrete, impls := range g.implInfos {
+		if _, ok := impls[iface]; ok {
+			names = append(names, concrete)
+		}
+	}
+
+	sort.Strings(names)
+	return names
+}
+
+func staticInterfaceTagName(iface string, concrete string) string {
+	if concrete == "" {
+		return sanitizeCName(iface) + "_Tag_nil"
+	}
+
+	return sanitizeCName(iface) + "_Tag_" + sanitizeCName(concrete)
+}
+
+func staticInterfaceDispatcherName(iface string, req string) string {
+	return sanitizeCName(iface) + "_" + sanitizeCName(req)
+}
+
 func (g *Generator) tryEmitInterfaceConversion(expected CType, expr ast.Expr) (string, bool) {
 	if !g.isInterfaceCType(expected) {
 		return "", false
@@ -4200,7 +4423,11 @@ func (g *Generator) tryEmitInterfaceConversion(expected CType, expr ast.Expr) (s
 	}
 
 	if src.SealName == "nil" {
-		return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+		if g.isDynInterfaceName(expected.SealName) {
+			return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+		}
+
+		return fmt.Sprintf("(%s){.tag = %s}", expected.Name, staticInterfaceTagName(expected.SealName, "")), true
 	}
 
 	if strings.HasPrefix(src.SealName, "*") {
@@ -4208,16 +4435,30 @@ func (g *Generator) tryEmitInterfaceConversion(expected CType, expr ast.Expr) (s
 
 		if !g.typeImplementsInterface(concrete, expected.SealName) {
 			g.error(expr.Span(), fmt.Sprintf("%s does not implement %s", concrete, expected.SealName))
-			return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+			if g.isDynInterfaceName(expected.SealName) {
+				return fmt.Sprintf("(%s){.data = NULL, .vtable = NULL}", expected.Name), true
+			}
+
+			return fmt.Sprintf("(%s){.tag = %s}", expected.Name, staticInterfaceTagName(expected.SealName, "")), true
 		}
 
 		value := g.emitExpr(expr, nil)
 
+		if g.isDynInterfaceName(expected.SealName) {
+			return fmt.Sprintf(
+				"(%s){.data = (void *)%s, .vtable = &%s}",
+				expected.Name,
+				value,
+				interfaceVTableName(expected.SealName, concrete),
+			), true
+		}
+
 		return fmt.Sprintf(
-			"(%s){.data = (void *)%s, .vtable = &%s}",
+			"(%s){.tag = %s, .as.%s = %s}",
 			expected.Name,
+			staticInterfaceTagName(expected.SealName, concrete),
+			sanitizeCName(concrete),
 			value,
-			interfaceVTableName(expected.SealName, concrete),
 		), true
 	}
 
@@ -4291,11 +4532,12 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			}
 		}
 
-		if _, ok := g.interfaces[name]; ok {
+		if iface := g.interfaces[name]; iface != nil {
 			return CType{
-				Name:        name,
-				SealName:    name,
-				IsInterface: true,
+				Name:           name,
+				SealName:       name,
+				IsInterface:    true,
+				IsDynInterface: iface.IsDyn,
 			}
 		}
 

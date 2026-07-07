@@ -996,24 +996,28 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "typedef struct Enemy_vtable") {
-		t.Fatalf("expected Enemy_vtable, got:\n%s", out)
+	if !strings.Contains(out, "typedef enum Enemy_Tag") {
+		t.Fatalf("expected Enemy_Tag enum, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Enemy_Tag_Goblin") {
+		t.Fatalf("expected Goblin tag, got:\n%s", out)
 	}
 
 	if !strings.Contains(out, "typedef struct Enemy") {
-		t.Fatalf("expected Enemy interface struct, got:\n%s", out)
+		t.Fatalf("expected Enemy interface union struct, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "Enemy_Goblin_vtable") {
-		t.Fatalf("expected Goblin vtable, got:\n%s", out)
+	if !strings.Contains(out, "Goblin *Goblin;") {
+		t.Fatalf("expected Goblin pointer payload, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "(Enemy){.data = (void *)(&g), .vtable = &Enemy_Goblin_vtable}") {
-		t.Fatalf("expected interface boxing, got:\n%s", out)
+	if !strings.Contains(out, "(Enemy){.tag = Enemy_Tag_Goblin, .as.Goblin = (&g)}") {
+		t.Fatalf("expected static interface boxing, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "(e).vtable->Health((e).data)") {
-		t.Fatalf("expected interface dispatch, got:\n%s", out)
+	if !strings.Contains(out, "Enemy_Health(e)") {
+		t.Fatalf("expected static interface dispatcher call, got:\n%s", out)
 	}
 }
 
@@ -1346,5 +1350,51 @@ Main :: task() {
 
 	if !strings.Contains(out, "Pair_int_string p = (b).value;") {
 		t.Fatalf("expected nested generic field access, got:\n%s", out)
+	}
+}
+
+func TestGenerateDynInterfaceAssignmentAndDispatch(t *testing.T) {
+	out, reporter := generate(t, `
+Enemy :: dyn interface <T type> {
+    Health :: task(e *T) int
+}
+
+Goblin :: struct {
+    hp int
+}
+
+Health :: task(g *Goblin) int {
+    return g.hp
+}
+
+Enemy<Goblin> :: impl {
+    Health :: Health
+}
+
+Main :: task() {
+    g := Goblin{hp = 10}
+    e: Enemy<Goblin> = &g
+    hp := Health(e)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Enemy_vtable") {
+		t.Fatalf("expected Enemy_vtable, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Enemy_Goblin_vtable") {
+		t.Fatalf("expected Goblin vtable, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(Enemy){.data = (void *)(&g), .vtable = &Enemy_Goblin_vtable}") {
+		t.Fatalf("expected dyn interface boxing, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "(e).vtable->Health((e).data)") {
+		t.Fatalf("expected dyn interface dispatch, got:\n%s", out)
 	}
 }
