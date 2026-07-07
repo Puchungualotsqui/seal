@@ -359,6 +359,8 @@ type Checker struct {
 	global   *Scope
 	packages map[string]*PackageInfo
 
+	specializedTypes map[string]*Type
+
 	currentResults []*Type
 }
 
@@ -368,8 +370,9 @@ func New(diags *diag.Reporter) *Checker {
 
 func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Checker {
 	c := &Checker{
-		diags:    diags,
-		packages: packages,
+		diags:            diags,
+		packages:         packages,
+		specializedTypes: map[string]*Type{},
 	}
 
 	c.global = NewScope(nil)
@@ -3175,20 +3178,468 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 		}
 
 	case *ast.GenericType:
-		baseType := c.typeFromAst(scope, t.Base)
-
-		if baseType.Kind == TypeInvalid {
-			return InvalidType
-		}
-
-		c.checkGenericArgsAgainstParams(scope, t.Args, baseType.GenericParams, t.Span())
-
-		// Full type monomorphization comes later.
-		// For now, keep the base type so old checker/codegen paths stay alive.
-		return baseType
+		return c.typeFromGenericTypeAst(scope, t)
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) typeFromGenericTypeAst(scope *Scope, t *ast.GenericType) *Type {
+	baseType := c.typeFromAst(scope, t.Base)
+
+	if baseType.Kind == TypeInvalid {
+		return InvalidType
+	}
+
+	c.checkGenericArgsAgainstParams(scope, t.Args, baseType.GenericParams, t.Span())
+
+	if len(baseType.GenericParams) == 0 {
+		return baseType
+	}
+
+	switch baseType.Kind {
+	case TypeStruct:
+		decl := c.structDeclForGenericBase(scope, t.Base)
+		if decl == nil {
+			return baseType
+		}
+
+		return c.specializeStructType(scope, t, baseType, decl)
+
+	case TypeInterface:
+		// Runtime generic interfaces still use the base interface representation
+		// for now. The important part of this pass is concrete generic structs.
+		return baseType
+
+	default:
+		return baseType
+	}
+}
+
+func (c *Checker) structDeclForGenericBase(scope *Scope, typ ast.Type) *ast.StructDecl {
+	named, ok := typ.(*ast.NamedType)
+	if !ok || len(named.Parts) != 1 {
+		return nil
+	}
+
+	sym := scope.Lookup(named.Parts[0].Name)
+	if sym == nil {
+		return nil
+	}
+
+	decl, _ := sym.Node.(*ast.StructDecl)
+	return decl
+}
+
+func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseType *Type, decl *ast.StructDecl) *Type {
+	if len(gen.Args) != len(baseType.GenericParams) {
+		return InvalidType
+	}
+
+	name := c.specializedTypeName(baseType.Name, gen.Args)
+
+	if cached := c.specializedTypes[name]; cached != nil {
+		return cached
+	}
+
+	subst := genericArgSubst(baseType.GenericParams, gen.Args)
+
+	typ := &Type{
+		Kind:          TypeStruct,
+		Name:          name,
+		GenericParams: nil,
+	}
+
+	// Store before fields so recursive generic structs do not loop forever.
+	c.specializedTypes[name] = typ
+
+	for _, field := range decl.Fields {
+		fieldType := c.typeFromAstWithGenericArgs(scope, field.Type, subst)
+
+		typ.Fields = append(typ.Fields, FieldInfo{
+			Name: field.Name.Name,
+			Type: fieldType,
+			Span: field.Name.Span(),
+		})
+	}
+
+	return typ
+}
+
+func genericArgSubst(params []ast.GenericParam, args []ast.GenericArg) map[string]ast.GenericArg {
+	subst := map[string]ast.GenericArg{}
+
+	for i, param := range params {
+		if i >= len(args) {
+			break
+		}
+
+		subst[param.Name.Name] = args[i]
+	}
+
+	return subst
+}
+
+func (c *Checker) typeFromAstWithGenericArgs(scope *Scope, typ ast.Type, subst map[string]ast.GenericArg) *Type {
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) == 1 {
+			if arg, ok := subst[t.Parts[0].Name]; ok {
+				return c.typeFromGenericArg(scope, arg)
+			}
+		}
+
+		return c.typeFromAst(scope, t)
+
+	case *ast.PointerType:
+		return &Type{
+			Kind: TypePointer,
+			Elem: c.typeFromAstWithGenericArgs(scope, t.Elem, subst),
+		}
+
+	case *ast.ArrayType:
+		lenValue := -1
+
+		if !t.Inferred && t.Len != nil {
+			lenExpr := c.substituteGenericExpr(t.Len, subst)
+
+			if lit, ok := lenExpr.(*ast.IntLitExpr); ok {
+				parsed, err := strconv.Atoi(lit.Value)
+				if err == nil {
+					lenValue = parsed
+				}
+			}
+
+			lenType := c.checkExpr(scope, lenExpr)
+			if !c.isIntegerLike(lenType) {
+				c.diags.Add(lenExpr.Span(), fmt.Sprintf("array length must be integer, got %s", lenType.String()))
+			}
+		}
+
+		return &Type{
+			Kind:     TypeArray,
+			Len:      lenValue,
+			Inferred: t.Inferred,
+			Elem:     c.typeFromAstWithGenericArgs(scope, t.Elem, subst),
+		}
+
+	case *ast.GenericType:
+		args := make([]ast.GenericArg, 0, len(t.Args))
+		for _, arg := range t.Args {
+			args = append(args, c.substituteGenericArg(arg, subst))
+		}
+
+		return c.typeFromAst(scope, &ast.GenericType{
+			Base: t.Base,
+			Args: args,
+			Loc:  t.Loc,
+		})
+	}
+
+	return c.typeFromAst(scope, typ)
+}
+
+func (c *Checker) substituteGenericArg(arg ast.GenericArg, subst map[string]ast.GenericArg) ast.GenericArg {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		return ast.GenericArg{
+			Kind: ast.GenericArgType,
+			Type: c.substituteTypeAst(arg.Type, subst),
+			Loc:  arg.Loc,
+		}
+
+	case ast.GenericArgExpr:
+		if id, ok := arg.Expr.(*ast.IdentExpr); ok {
+			if replacement, exists := subst[id.Name.Name]; exists {
+				return replacement
+			}
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: c.substituteGenericExpr(arg.Expr, subst),
+			Loc:  arg.Loc,
+		}
+	}
+
+	return arg
+}
+
+func (c *Checker) substituteTypeAst(typ ast.Type, subst map[string]ast.GenericArg) ast.Type {
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) == 1 {
+			if arg, ok := subst[t.Parts[0].Name]; ok {
+				if argType := genericArgAsTypeAst(arg); argType != nil {
+					return argType
+				}
+			}
+		}
+
+		return t
+
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem: c.substituteTypeAst(t.Elem, subst),
+			Loc:  t.Loc,
+		}
+
+	case *ast.ArrayType:
+		return &ast.ArrayType{
+			Len:      c.substituteGenericExpr(t.Len, subst),
+			Inferred: t.Inferred,
+			Elem:     c.substituteTypeAst(t.Elem, subst),
+			Loc:      t.Loc,
+		}
+
+	case *ast.GenericType:
+		args := make([]ast.GenericArg, 0, len(t.Args))
+		for _, arg := range t.Args {
+			args = append(args, c.substituteGenericArg(arg, subst))
+		}
+
+		return &ast.GenericType{
+			Base: c.substituteTypeAst(t.Base, subst),
+			Args: args,
+			Loc:  t.Loc,
+		}
+	}
+
+	return typ
+}
+
+func genericArgAsTypeAst(arg ast.GenericArg) ast.Type {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		return arg.Type
+
+	case ast.GenericArgExpr:
+		return typeAstFromExpr(arg.Expr)
+	}
+
+	return nil
+}
+
+func typeAstFromExpr(expr ast.Expr) ast.Type {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return &ast.NamedType{
+			Parts: []ast.Ident{e.Name},
+			Loc:   e.Name.Span(),
+		}
+
+	case *ast.SelectorExpr:
+		var parts []ast.Ident
+
+		current := expr
+		for {
+			switch x := current.(type) {
+			case *ast.SelectorExpr:
+				parts = append([]ast.Ident{x.Name}, parts...)
+				current = x.Left
+
+			case *ast.IdentExpr:
+				parts = append([]ast.Ident{x.Name}, parts...)
+				return &ast.NamedType{
+					Parts: parts,
+					Loc:   expr.Span(),
+				}
+
+			default:
+				return nil
+			}
+		}
+
+	case *ast.GenericExpr:
+		base := typeAstFromExpr(e.Base)
+		if base == nil {
+			return nil
+		}
+
+		return &ast.GenericType{
+			Base: base,
+			Args: e.Args,
+			Loc:  e.Loc,
+		}
+	}
+
+	return nil
+}
+
+func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.GenericArg) ast.Expr {
+	if expr == nil {
+		return nil
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if arg, ok := subst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
+			return arg.Expr
+		}
+
+		return e
+
+	case *ast.UnaryExpr:
+		return &ast.UnaryExpr{
+			Op:   e.Op,
+			Expr: c.substituteGenericExpr(e.Expr, subst),
+			Loc:  e.Loc,
+		}
+
+	case *ast.BinaryExpr:
+		return &ast.BinaryExpr{
+			Left:  c.substituteGenericExpr(e.Left, subst),
+			Op:    e.Op,
+			Right: c.substituteGenericExpr(e.Right, subst),
+			Loc:   e.Loc,
+		}
+
+	case *ast.CallExpr:
+		args := make([]ast.Expr, 0, len(e.Args))
+		for _, arg := range e.Args {
+			args = append(args, c.substituteGenericExpr(arg, subst))
+		}
+
+		return &ast.CallExpr{
+			Callee: c.substituteGenericExpr(e.Callee, subst),
+			Args:   args,
+			Loc:    e.Loc,
+		}
+
+	case *ast.GenericExpr:
+		args := make([]ast.GenericArg, 0, len(e.Args))
+		for _, arg := range e.Args {
+			args = append(args, c.substituteGenericArg(arg, subst))
+		}
+
+		return &ast.GenericExpr{
+			Base: c.substituteGenericExpr(e.Base, subst),
+			Args: args,
+			Loc:  e.Loc,
+		}
+	}
+
+	return expr
+}
+
+func (c *Checker) specializedTypeName(base string, args []ast.GenericArg) string {
+	var parts []string
+
+	for _, arg := range args {
+		parts = append(parts, genericArgDisplay(arg))
+	}
+
+	return fmt.Sprintf("%s<%s>", base, strings.Join(parts, ", "))
+}
+
+func genericArgDisplay(arg ast.GenericArg) string {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		return typeDisplay(arg.Type)
+
+	case ast.GenericArgExpr:
+		return exprDisplay(arg.Expr)
+	}
+
+	return "<invalid>"
+}
+
+func typeDisplay(typ ast.Type) string {
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		var parts []string
+		for _, part := range t.Parts {
+			parts = append(parts, part.Name)
+		}
+
+		return strings.Join(parts, ".")
+
+	case *ast.PointerType:
+		return "*" + typeDisplay(t.Elem)
+
+	case *ast.ArrayType:
+		if t.Inferred {
+			return "[]" + typeDisplay(t.Elem)
+		}
+
+		return "[" + exprDisplay(t.Len) + "]" + typeDisplay(t.Elem)
+
+	case *ast.GenericType:
+		var args []string
+		for _, arg := range t.Args {
+			args = append(args, genericArgDisplay(arg))
+		}
+
+		return typeDisplay(t.Base) + "<" + strings.Join(args, ", ") + ">"
+	}
+
+	return "<type>"
+}
+
+func exprDisplay(expr ast.Expr) string {
+	if expr == nil {
+		return ""
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name.Name
+
+	case *ast.SelectorExpr:
+		return exprDisplay(e.Left) + "." + e.Name.Name
+
+	case *ast.IntLitExpr:
+		return e.Value
+
+	case *ast.FloatLitExpr:
+		return e.Value
+
+	case *ast.StringLitExpr:
+		return e.Value
+
+	case *ast.CStringLitExpr:
+		return e.Value
+
+	case *ast.CharLitExpr:
+		return e.Value
+
+	case *ast.BoolLitExpr:
+		if e.Value {
+			return "true"
+		}
+
+		return "false"
+
+	case *ast.NilLitExpr:
+		return "nil"
+
+	case *ast.UnaryExpr:
+		return e.Op.String() + exprDisplay(e.Expr)
+
+	case *ast.BinaryExpr:
+		return exprDisplay(e.Left) + " " + e.Op.String() + " " + exprDisplay(e.Right)
+
+	case *ast.CallExpr:
+		var args []string
+		for _, arg := range e.Args {
+			args = append(args, exprDisplay(arg))
+		}
+
+		return exprDisplay(e.Callee) + "(" + strings.Join(args, ", ") + ")"
+
+	case *ast.GenericExpr:
+		var args []string
+		for _, arg := range e.Args {
+			args = append(args, genericArgDisplay(arg))
+		}
+
+		return exprDisplay(e.Base) + "<" + strings.Join(args, ", ") + ">"
+
+	case *ast.CompoundLiteralExpr:
+		return typeDisplay(e.Type) + "{...}"
+	}
+
+	return "<expr>"
 }
 
 func (c *Checker) substituteGenericTypes(t *Type, subst map[string]*Type) *Type {

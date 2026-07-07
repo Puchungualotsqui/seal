@@ -2392,3 +2392,56 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestGenericStructSpecialization(t *testing.T) {
+	_, reporter := check(t, `
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<int> = Box<int>{value = 10}
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericStructValueArgumentSpecialization(t *testing.T) {
+	_, reporter := check(t, `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+
+Main :: task() {
+    b: Buffer<int, 32>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestNestedGenericStructSpecialization(t *testing.T) {
+	_, reporter := check(t, `
+Pair :: struct <A type, B type> {
+    a A
+    b B
+}
+
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<Pair<int, string>>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

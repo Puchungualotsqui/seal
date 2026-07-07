@@ -1053,7 +1053,18 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 		}
 
 	case token.Ident:
-		if isBuiltinGenericTypeName(p.peek().Lexeme) {
+		// Builtin type arguments:
+		//
+		//     Box<int>
+		//
+		// Nested generic type arguments:
+		//
+		//     Box<Pair<int, string>>
+		//
+		// Non-builtin bare identifiers stay expressions, so value args still work:
+		//
+		//     T<ZombieDefault>
+		if isBuiltinGenericTypeName(p.peek().Lexeme) || p.looksLikeNestedGenericTypeArg() {
 			t := p.parseType()
 			if t == nil {
 				return ast.GenericArg{}
@@ -1961,11 +1972,51 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 		case token.Gt:
 			depth--
 			if depth == 0 {
-				if i+1 < len(p.tokens) && p.tokens[i+1].Kind == token.LParen {
+				if i+1 < len(p.tokens) &&
+					(p.tokens[i+1].Kind == token.LParen || p.tokens[i+1].Kind == token.LBrace) {
 					return true
 				}
 
 				return false
+			}
+
+		case token.EOF:
+			return false
+		}
+	}
+
+	return false
+}
+
+func (p *Parser) looksLikeNestedGenericTypeArg() bool {
+	if !p.at(token.Ident) || p.peekNext().Kind != token.Lt {
+		return false
+	}
+
+	depth := 0
+
+	for i := p.pos + 1; i < len(p.tokens); i++ {
+		switch p.tokens[i].Kind {
+		case token.Lt:
+			depth++
+
+		case token.Gt:
+			depth--
+			if depth == 0 {
+				if i+1 >= len(p.tokens) {
+					return true
+				}
+
+				switch p.tokens[i+1].Kind {
+				case token.Comma, token.Gt, token.RBracket, token.RParen, token.LBrace:
+					return true
+
+				case token.LParen:
+					return false
+
+				default:
+					return true
+				}
 			}
 
 		case token.EOF:

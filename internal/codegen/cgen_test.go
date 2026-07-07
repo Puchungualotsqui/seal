@@ -1196,3 +1196,92 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestGenerateGenericStructSpecialization(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<int> = Box<int>{value = 10}
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Box_int") {
+		t.Fatalf("expected specialized Box_int struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t value;") {
+		t.Fatalf("expected int field in Box_int, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Box_int b = (Box_int){.value = 10};") {
+		t.Fatalf("expected Box_int variable initialization, got:\n%s", out)
+	}
+}
+
+func TestGenerateGenericStructValueArgumentSpecialization(t *testing.T) {
+	out, reporter := generate(t, `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+
+Main :: task() {
+    b: Buffer<int, 32>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Buffer_int_32") {
+		t.Fatalf("expected Buffer_int_32 struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t data[32];") {
+		t.Fatalf("expected [32]int field, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Buffer_int_32 b;") {
+		t.Fatalf("expected Buffer_int_32 variable, got:\n%s", out)
+	}
+}
+
+func TestGenerateNestedGenericStructSpecialization(t *testing.T) {
+	out, reporter := generate(t, `
+Pair :: struct <A type, B type> {
+    a A
+    b B
+}
+
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<Pair<int, string>>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Pair_int_string") {
+		t.Fatalf("expected Pair_int_string struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "typedef struct Box_Pair_int_string") {
+		t.Fatalf("expected Box_Pair_int_string struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Pair_int_string value;") {
+		t.Fatalf("expected nested Pair_int_string field, got:\n%s", out)
+	}
+}
