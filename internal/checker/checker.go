@@ -1616,6 +1616,80 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	c.currentResults = oldResults
 }
 
+func (c *Checker) taskTypeFromGenericCall(scope *Scope, d *ast.TaskDecl, args []ast.GenericArg) *Type {
+	if d == nil {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    "<invalid>",
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	if len(args) != len(d.GenericParams) {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    d.Name.Name,
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	subst := genericArgSubst(d.GenericParams, args)
+
+	var params []*Type
+	var paramDefaults []ast.Expr
+	var paramHasDefault []bool
+	var paramIsVariadic []bool
+
+	requiredParams := len(d.Params)
+	isVariadic := false
+
+	for i, param := range d.Params {
+		params = append(params, c.typeFromAstWithGenericArgs(scope, param.Type, subst))
+
+		defaultExpr := param.Default
+		if param.HasDefault {
+			defaultExpr = c.substituteGenericExpr(param.Default, subst)
+		}
+
+		paramDefaults = append(paramDefaults, defaultExpr)
+		paramHasDefault = append(paramHasDefault, param.HasDefault)
+		paramIsVariadic = append(paramIsVariadic, param.IsVariadic)
+
+		if param.IsVariadic {
+			isVariadic = true
+			if requiredParams == len(d.Params) {
+				requiredParams = i
+			}
+		}
+
+		if param.HasDefault && requiredParams == len(d.Params) {
+			requiredParams = i
+		}
+	}
+
+	var results []*Type
+	for _, result := range d.Results {
+		results = append(results, c.typeFromAstWithGenericArgs(scope, result, subst))
+	}
+
+	return &Type{
+		Kind:            TypeTask,
+		Name:            c.specializedTypeName(d.Name.Name, args),
+		Params:          params,
+		Results:         results,
+		RequiredParams:  requiredParams,
+		ParamDefaults:   paramDefaults,
+		ParamHasDefault: paramHasDefault,
+		ParamIsVariadic: paramIsVariadic,
+		IsVariadic:      isVariadic,
+		IsExtern:        d.IsExtern,
+		ExternName:      d.ExternName,
+		IsPure:          d.IsPure,
+		IsIntrinsic:     d.IsIntrinsic,
+		IsTrustedPure:   d.IsTrustedPure,
+	}
+}
+
 func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	genericScope := c.scopeWithGenericParams(scope, d.GenericParams)
 
@@ -2435,14 +2509,14 @@ func (c *Checker) lookupInterfaceRequirement(ifaceType *Type, name string) *Inte
 }
 
 func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return c.checkGenericCallResultTypes(scope, gen, nil, nil, e.Args, e.Span())
+	}
+
 	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
 
 	if results, ok := c.checkInterfaceDispatchCallResultTypes(scope, e, argTypes, argSpans); ok {
 		return results
-	}
-
-	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return c.checkGenericCallResultTypes(scope, gen, argTypes, argSpans, e.Args, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -2525,47 +2599,178 @@ func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTy
 }
 
 func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) []*Type {
-	if id, ok := gen.Base.(*ast.IdentExpr); ok {
-		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
-			result := c.checkGenericIntrinsicCall(scope, gen, argTypes, args, span)
-			return []*Type{result}
-		}
-
-		sym := scope.Lookup(id.Name.Name)
-		if sym == nil {
-			c.diags.Add(id.Span(), fmt.Sprintf("undefined generic task %q", id.Name.Name))
-			return []*Type{InvalidType}
-		}
-
-		if sym.Kind != SymbolTask {
-			c.diags.Add(id.Span(), fmt.Sprintf("%q is not a generic task", id.Name.Name))
-			return []*Type{InvalidType}
-		}
-
-		if sym.Type == nil || sym.Type.Kind != TypeTask {
-			c.diags.Add(id.Span(), fmt.Sprintf("%q is not a valid task", id.Name.Name))
-			return []*Type{InvalidType}
-		}
-
-		c.checkGenericArgsAgainstParams(scope, gen.Args, sym.Type.GenericParams, gen.Span())
-		c.checkTaskTypeCallArguments(sym.Type, argTypes, argSpans, span)
-
-		return sym.Type.Results
+	id, ok := gen.Base.(*ast.IdentExpr)
+	if !ok {
+		c.diags.Add(gen.Base.Span(), "unsupported generic callee")
+		return []*Type{InvalidType}
 	}
 
-	c.diags.Add(gen.Base.Span(), "unsupported generic callee")
-	return []*Type{InvalidType}
+	if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
+		actualTypes, _ := c.checkCallArgumentTypes(scope, args)
+		result := c.checkGenericIntrinsicCall(scope, gen, actualTypes, args, span)
+		return []*Type{result}
+	}
+
+	sym := scope.Lookup(id.Name.Name)
+	if sym == nil {
+		c.diags.Add(id.Span(), fmt.Sprintf("undefined generic task %q", id.Name.Name))
+		return []*Type{InvalidType}
+	}
+
+	if sym.Kind != SymbolTask {
+		c.diags.Add(id.Span(), fmt.Sprintf("%q is not a generic task", id.Name.Name))
+		return []*Type{InvalidType}
+	}
+
+	if sym.Type == nil || sym.Type.Kind != TypeTask {
+		c.diags.Add(id.Span(), fmt.Sprintf("%q is not a valid task", id.Name.Name))
+		return []*Type{InvalidType}
+	}
+
+	c.checkGenericArgsAgainstParams(scope, gen.Args, sym.Type.GenericParams, gen.Span())
+
+	taskDecl, _ := sym.Node.(*ast.TaskDecl)
+	if taskDecl == nil {
+		c.diags.Add(id.Span(), fmt.Sprintf("%q has no task declaration", id.Name.Name))
+		return []*Type{InvalidType}
+	}
+
+	instantiated := c.taskTypeFromGenericCall(scope, taskDecl, gen.Args)
+
+	c.checkGenericTaskCallArguments(scope, instantiated, args, span)
+
+	return instantiated.Results
+}
+
+func (c *Checker) checkGenericTaskCallArguments(scope *Scope, taskType *Type, args []ast.Expr, span source.Span) {
+	if taskType == nil || taskType.Kind != TypeTask {
+		for _, arg := range args {
+			c.checkExpr(scope, arg)
+		}
+		return
+	}
+
+	required := taskType.RequiredParams
+	total := len(taskType.Params)
+
+	if required == 0 && total > 0 && len(taskType.ParamHasDefault) == 0 && !taskType.IsVariadic {
+		required = total
+	}
+
+	if taskType.IsVariadic {
+		fixedCount := total - 1
+		variadicElem := InvalidType
+		if total > 0 {
+			variadicElem = taskType.Params[total-1]
+		}
+
+		if len(args) < required {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected at least %d, got %d", required, len(args)),
+			)
+		}
+
+		count := len(args)
+		if count > fixedCount {
+			count = fixedCount
+		}
+
+		for i := 0; i < count; i++ {
+			if spread, ok := args[i].(*ast.SpreadExpr); ok {
+				c.diags.Add(spread.Span(), "spread variadic argument cannot be used for fixed parameter")
+				c.checkExpr(scope, spread.Expr)
+				continue
+			}
+
+			expected := InvalidType
+			if i < len(taskType.Params) {
+				expected = taskType.Params[i]
+			}
+
+			c.checkExprWithExpected(scope, args[i], expected)
+		}
+
+		for i := fixedCount; i < len(args); i++ {
+			if spread, ok := args[i].(*ast.SpreadExpr); ok {
+				c.checkGenericVariadicSpreadArgument(scope, spread, variadicElem)
+				continue
+			}
+
+			c.checkExprWithExpected(scope, args[i], variadicElem)
+		}
+
+		return
+	}
+
+	if len(args) < required || len(args) > total {
+		if required == total {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected %d, got %d", total, len(args)),
+			)
+		} else {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("task call argument count mismatch: expected %d to %d, got %d", required, total, len(args)),
+			)
+		}
+	}
+
+	count := len(args)
+	if total < count {
+		count = total
+	}
+
+	for i := 0; i < count; i++ {
+		if spread, ok := args[i].(*ast.SpreadExpr); ok {
+			c.diags.Add(spread.Span(), "cannot spread variadic argument into non-variadic task")
+			c.checkExpr(scope, spread.Expr)
+			continue
+		}
+
+		c.checkExprWithExpected(scope, args[i], taskType.Params[i])
+	}
+
+	for i := count; i < len(args); i++ {
+		c.checkExpr(scope, args[i])
+	}
+}
+
+func (c *Checker) checkGenericVariadicSpreadArgument(scope *Scope, spread *ast.SpreadExpr, expectedElem *Type) {
+	spreadType := c.checkExpr(scope, spread.Expr)
+
+	switch spreadType.Kind {
+	case TypeArray:
+		if spreadType.Elem == nil {
+			c.diags.Add(spread.Span(), "cannot spread invalid array")
+			return
+		}
+
+		c.checkAssignable(expectedElem, spreadType.Elem, spread.Span())
+
+	case TypeVariadic:
+		if spreadType.Elem == nil {
+			c.diags.Add(spread.Span(), "cannot spread invalid variadic value")
+			return
+		}
+
+		c.checkAssignable(expectedElem, spreadType.Elem, spread.Span())
+
+	default:
+		c.diags.Add(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", spreadType.String()))
+	}
 }
 
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return c.checkGenericCallExpr(scope, gen, nil, nil, e.Args, e.Span())
+	}
+
 	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
 
 	if result, ok := c.checkInterfaceDispatchCall(scope, e, argTypes, argSpans); ok {
 		return result
-	}
-
-	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return c.checkGenericCallExpr(scope, gen, argTypes, argSpans, e.Args, e.Span())
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {

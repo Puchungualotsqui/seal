@@ -1398,3 +1398,122 @@ Main :: task() {
 		t.Fatalf("expected dyn interface dispatch, got:\n%s", out)
 	}
 }
+
+func TestGenerateGenericTaskIdentity(t *testing.T) {
+	out, reporter := generate(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Main :: task() {
+    a := Identity<int>(10)
+    b := Identity<string>("hello")
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "intptr_t Identity_int(intptr_t value);") {
+		t.Fatalf("expected Identity_int prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealString Identity_string(sealString value);") {
+		t.Fatalf("expected Identity_string prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t Identity_int(intptr_t value) {") {
+		t.Fatalf("expected Identity_int body, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealString Identity_string(sealString value) {") {
+		t.Fatalf("expected Identity_string body, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t a = Identity_int(10);") {
+		t.Fatalf("expected Identity_int call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "sealString b = Identity_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});") {
+		t.Fatalf("expected Identity_string call, got:\n%s", out)
+	}
+}
+
+func TestGenerateGenericTaskReturnsGenericStruct(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+    value T
+}
+
+MakeBox :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+
+Main :: task() {
+    b := MakeBox<int>(10)
+    x := b.value
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Box_int") {
+		t.Fatalf("expected Box_int struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Box_int MakeBox_int(intptr_t value);") {
+		t.Fatalf("expected MakeBox_int prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Box_int MakeBox_int(intptr_t value) {") {
+		t.Fatalf("expected MakeBox_int body, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Box_int b = MakeBox_int(10);") {
+		t.Fatalf("expected MakeBox_int call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t x = (b).value;") {
+		t.Fatalf("expected Box_int field access, got:\n%s", out)
+	}
+}
+
+func TestGenerateGenericTaskWithValueGenericArg(t *testing.T) {
+	out, reporter := generate(t, `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+
+MakeBuffer :: task <T type, N int>(value T) Buffer<T, N> {
+    return Buffer<T, N>{data = [value, value, value]}
+}
+
+Main :: task() {
+    b := MakeBuffer<int, 3>(9)
+    x := b.data[0]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if !strings.Contains(out, "typedef struct Buffer_int_3") {
+		t.Fatalf("expected Buffer_int_3 struct, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Buffer_int_3 MakeBuffer_int_3(intptr_t value);") {
+		t.Fatalf("expected MakeBuffer_int_3 prototype, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "Buffer_int_3 b = MakeBuffer_int_3(9);") {
+		t.Fatalf("expected MakeBuffer_int_3 call, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "intptr_t x = (b).data[0];") {
+		t.Fatalf("expected generic buffer index access, got:\n%s", out)
+	}
+}
