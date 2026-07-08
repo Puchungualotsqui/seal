@@ -190,8 +190,9 @@ type Generator struct {
 	scope     *scope
 	taskScope *scope
 
-	currentTask    *ast.TaskDecl
-	currentResults []CType
+	currentTask            *ast.TaskDecl
+	currentGenericTaskName string
+	currentResults         []CType
 
 	tempCounter int
 
@@ -274,6 +275,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitConstants(file)
 	g.emitImportedResultStructs()
 	g.emitResultStructs(file)
+	g.emitGenericResultStructs()
 	g.emitImportedTaskPrototypes()
 	g.emitTaskPrototypes(file)
 	g.emitGenericTaskPrototypes()
@@ -1725,6 +1727,43 @@ func (g *Generator) emitImportedResultStructs() {
 	}
 }
 
+func (g *Generator) emitGenericResultStructs() {
+	names := make([]string, 0, len(g.genericTasks))
+	for name := range g.genericTasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	emitted := false
+
+	for _, name := range names {
+		info := g.genericTasks[name]
+		if info == nil || info.Decl == nil || len(info.Decl.Results) <= 1 {
+			continue
+		}
+
+		resultTypes := g.genericTaskReturnTypes(info)
+		resultName := g.genericTaskResultStructName(info.Name)
+
+		g.linef("typedef struct %s {", resultName)
+		g.indent++
+
+		for i, resultType := range resultTypes {
+			g.linef("%s;", resultType.Decl(fmt.Sprintf("_%d", i)))
+		}
+
+		g.indent--
+		g.linef("} %s;", resultName)
+		g.line("")
+
+		emitted = true
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
 func (g *Generator) emitResultStructs(file *ast.File) {
 	emitted := false
 
@@ -1896,10 +1935,12 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 
 	oldSubst := g.genericSubst
 	oldTask := g.currentTask
+	oldGenericTaskName := g.currentGenericTaskName
 	oldResults := g.currentResults
 
 	g.genericSubst = subst
 	g.currentTask = decl
+	g.currentGenericTaskName = name
 	g.currentResults = nil
 
 	for _, result := range decl.Results {
@@ -1932,6 +1973,7 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 
 	g.genericSubst = oldSubst
 	g.currentTask = oldTask
+	g.currentGenericTaskName = oldGenericTaskName
 	g.currentResults = oldResults
 }
 
@@ -1939,20 +1981,7 @@ func (g *Generator) genericTaskSignature(info *GenericTaskInstance, definition b
 	decl := info.Decl
 	subst := genericTaskSubstForCGen(decl.GenericParams, info.Args)
 
-	ret := CVoid
-	var results []CType
-
-	for _, result := range decl.Results {
-		results = append(results, g.cTypeFromAstWithGenericArgs(result, subst))
-	}
-
-	if len(results) == 1 {
-		ret = results[0]
-	} else if len(results) > 1 {
-		// Multi-return generic tasks can be added later.
-		g.error(decl.Name.Span(), fmt.Sprintf("generic task %q with multiple return values is not supported by C codegen yet", decl.Name.Name))
-		ret = CInvalid
-	}
+	ret := g.genericTaskReturnType(info)
 
 	if len(decl.Params) == 0 {
 		return fmt.Sprintf("%s %s(void)", ret.Name, info.Name)
@@ -2000,6 +2029,7 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 
 	g.currentTask = d
 	g.currentResults = nil
+	g.currentGenericTaskName = ""
 
 	for _, result := range d.Results {
 		g.currentResults = append(g.currentResults, g.cTypeFromAst(result))
@@ -2110,6 +2140,76 @@ func (g *Generator) taskResultStructName(taskName string) string {
 
 func packageTaskResultStructName(packageName string, taskName string) string {
 	return sanitizeCName(packageName) + "_" + sanitizeCName(taskName) + "_Result"
+}
+
+func (g *Generator) genericTaskResultStructName(instanceName string) string {
+	return instanceName + "_Result"
+}
+
+func (g *Generator) genericTaskReturnTypes(info *GenericTaskInstance) []CType {
+	if info == nil || info.Decl == nil {
+		return nil
+	}
+
+	subst := genericTaskSubstForCGen(info.Decl.GenericParams, info.Args)
+
+	results := make([]CType, 0, len(info.Decl.Results))
+	for _, result := range info.Decl.Results {
+		results = append(results, g.cTypeFromAstWithGenericArgs(result, subst))
+	}
+
+	return results
+}
+
+func (g *Generator) genericTaskReturnType(info *GenericTaskInstance) CType {
+	results := g.genericTaskReturnTypes(info)
+
+	if len(results) == 0 {
+		return CVoid
+	}
+
+	if len(results) == 1 {
+		return results[0]
+	}
+
+	name := g.genericTaskResultStructName(info.Name)
+
+	return CType{
+		Name:     name,
+		SealName: name,
+	}
+}
+
+func (g *Generator) currentReturnStructType() CType {
+	if g.currentGenericTaskName != "" {
+		name := g.genericTaskResultStructName(g.currentGenericTaskName)
+
+		return CType{
+			Name:     name,
+			SealName: name,
+		}
+	}
+
+	if g.currentTask != nil {
+		if info, ok := g.tasks[g.currentTask.Name.Name]; ok {
+			return info.ReturnType
+		}
+	}
+
+	return CInvalid
+}
+
+func (g *Generator) genericArgsInContext(args []ast.GenericArg) []ast.GenericArg {
+	if g.genericSubst == nil {
+		return args
+	}
+
+	out := make([]ast.GenericArg, 0, len(args))
+	for _, arg := range args {
+		out = append(out, g.substituteGenericArgForCGen(arg, g.genericSubst))
+	}
+
+	return out
 }
 
 func (g *Generator) cTaskName(name string) string {
@@ -2756,10 +2856,10 @@ func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 			return
 		}
 
-		info := g.tasks[g.currentTask.Name.Name]
+		resultType := g.currentReturnStructType()
 		resultTemp := g.newTemp("return_value")
 
-		g.linef("%s = {0};", info.ReturnType.Decl(resultTemp))
+		g.linef("%s = {0};", resultType.Decl(resultTemp))
 
 		count := len(s.Values)
 		if len(g.currentResults) < count {
@@ -3197,22 +3297,13 @@ func (g *Generator) taskReturnTypeFromGenericArg(arg ast.GenericArg) (CType, boo
 			}
 		}
 
-		if len(info.Decl.Results) == 0 {
-			return CVoid, true
-		}
-
-		if len(info.Decl.Results) == 1 {
-			subst := genericTaskSubstForCGen(info.GenericParams, callArgs)
-			return g.cTypeFromAstWithGenericArgs(info.Decl.Results[0], subst), true
-		}
-
 		name := g.registerGenericTaskInstance(info.Decl, callArgs)
-		resultName := name + "_Result"
+		instance := g.genericTasks[name]
+		if instance == nil {
+			return CInvalid, false
+		}
 
-		return CType{
-			Name:     resultName,
-			SealName: resultName,
-		}, true
+		return g.genericTaskReturnType(instance), true
 	}
 
 	return CInvalid, false
@@ -4633,6 +4724,22 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 		return []CType{g.inferExprType(expr, nil)}
 	}
 
+	if gen, ok := call.Callee.(*ast.GenericExpr); ok {
+		if id, ok := gen.Base.(*ast.IdentExpr); ok {
+			info, ok := g.tasks[id.Name.Name]
+			if ok && len(info.GenericParams) > 0 {
+				callArgs := g.genericArgsInContext(gen.Args)
+				name := g.registerGenericTaskInstance(info.Decl, callArgs)
+				instance := g.genericTasks[name]
+				if instance == nil {
+					return []CType{CInvalid}
+				}
+
+				return g.genericTaskReturnTypes(instance)
+			}
+		}
+	}
+
 	if id, ok := call.Callee.(*ast.IdentExpr); ok {
 		if id.Name.Name == "len" {
 			return []CType{CUint}
@@ -4864,16 +4971,14 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 				return CInvalid
 			}
 
-			if len(info.Decl.Results) == 0 {
-				return CVoid
-			}
-
-			if len(info.Decl.Results) > 1 {
+			callArgs := g.genericArgsInContext(gen.Args)
+			name := g.registerGenericTaskInstance(info.Decl, callArgs)
+			instance := g.genericTasks[name]
+			if instance == nil {
 				return CInvalid
 			}
 
-			subst := genericTaskSubstForCGen(info.GenericParams, gen.Args)
-			return g.cTypeFromAstWithGenericArgs(info.Decl.Results[0], subst)
+			return g.genericTaskReturnType(instance)
 		}
 
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && len(e.Args) > 0 {

@@ -1788,3 +1788,98 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenerateGenericMultiReturnTask(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+	return b, a
+}
+
+Main :: task() {
+	x, y := Swap<int>(1, 2)
+
+	assert(x == 2)
+	assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} Swap_int_Result;",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b);",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b) {",
+		"Swap_int_Result __seal_return_value_",
+		"__seal_return_value_",
+		"._0 = b;",
+		"._1 = a;",
+		"return __seal_return_value_",
+		"Swap_int_Result __seal_multi_result_",
+		"= Swap_int(1, 2);",
+		"intptr_t x = __seal_multi_result_",
+		"._0;",
+		"intptr_t y = __seal_multi_result_",
+		"._1;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericMultiReturnTaskWithGenericStruct(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+	value T
+}
+
+PairBoxes :: task <T type>(a T, b T) Box<T>, Box<T> {
+	return Box<T>{value = a}, Box<T>{value = b}
+}
+
+Main :: task() {
+	left, right := PairBoxes<int>(1, 2)
+
+	x := left.value
+	y := right.value
+
+	assert(x == 1)
+	assert(y == 2)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Box_int {",
+		"intptr_t value;",
+		"} Box_int;",
+		"typedef struct PairBoxes_int_Result {",
+		"Box_int _0;",
+		"Box_int _1;",
+		"} PairBoxes_int_Result;",
+		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b);",
+		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b) {",
+		"Box_int left = __seal_multi_result_",
+		"._0;",
+		"Box_int right = __seal_multi_result_",
+		"._1;",
+		"intptr_t x = (left).value;",
+		"intptr_t y = (right).value;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
