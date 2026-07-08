@@ -967,3 +967,105 @@ Main :: task() {
 		t.Fatalf("expected 2 generic args, got %d", len(gen.Args))
 	}
 }
+
+func TestParseGenericTaskArgumentSpecialization(t *testing.T) {
+	file, reporter := parse(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<Identity<int>>(10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+
+	if file == nil {
+		t.Fatalf("expected file")
+	}
+}
+
+func TestParseNestedGenericTypeArgumentStillWorks(t *testing.T) {
+	file, reporter := parse(t, `
+Pair :: struct <A type, B type> {
+    first A
+    second B
+}
+
+Box :: struct <T type> {
+    value T
+}
+
+Main :: task() {
+    b: Box<Pair<int, string>> = Box<Pair<int, string>>{
+        value = Pair<int, string>{
+            first = 1,
+            second = "x",
+        },
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+
+	if file == nil {
+		t.Fatalf("expected file")
+	}
+}
+
+func TestParseGenericValueConstraintExpression(t *testing.T) {
+	file, reporter := parse(t, `
+Buffer :: struct <T type, N int[N > 0]> {
+    data [N]T
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+
+	if file == nil {
+		t.Fatalf("expected file")
+	}
+}
+
+func TestParseGenericFieldConstraint(t *testing.T) {
+	file, reporter := parse(t, `
+GetHealth :: task <T type[health int]>(value T) int {
+    return value.health
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+
+	if file == nil {
+		t.Fatalf("expected file")
+	}
+}
+
+func TestParseGenericTaskParamConstraintDependingOnTypeParam(t *testing.T) {
+	file, reporter := parse(t, `
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+
+	if file == nil {
+		t.Fatalf("expected file")
+	}
+}

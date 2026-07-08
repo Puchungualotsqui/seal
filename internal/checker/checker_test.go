@@ -2445,3 +2445,368 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestGenericTaskCallsAnotherGenericTask(t *testing.T) {
+	_, reporter := check(t, `
+Box :: struct <T type> {
+    value T
+}
+
+MakeBox :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+
+Wrap :: task <T type>(value T) Box<T> {
+    return MakeBox<T>(value)
+}
+
+Main :: task() {
+    b := Wrap<int>(10)
+    x := b.value
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTaskParameterCanBeCalled(t *testing.T) {
+	_, reporter := check(t, `
+Double :: task(x int) int {
+    return x * 2
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<Double>(10)
+    assert(x == 20)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTaskParameterSignatureCanDependOnTypeParam(t *testing.T) {
+	_, reporter := check(t, `
+IdentityInt :: task(value int) int {
+    return value
+}
+
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, IdentityInt>(10)
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericTaskParameterWrongSignature(t *testing.T) {
+	_, reporter := check(t, `
+ToString :: task(value int) string {
+    return "x"
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<ToString>(10)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic task parameter "F" expects task(int) int, got task(int) string`) {
+		t.Fatalf("expected wrong generic task signature diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectUnspecializedGenericTaskArgument(t *testing.T) {
+	_, reporter := check(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<Identity>(10)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic task argument "Identity" requires specialization`) {
+		t.Fatalf("expected unspecialized generic task argument diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTaskArgumentSpecialization(t *testing.T) {
+	_, reporter := check(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<Identity<int>>(10)
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericIntConstraintAcceptsTrueExpression(t *testing.T) {
+	_, reporter := check(t, `
+Buffer :: struct <T type, N int[N > 0]> {
+    data [N]T
+}
+
+Main :: task() {
+    b: Buffer<int, 3> = Buffer<int, 3>{
+        data = [1, 2, 3],
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericIntConstraintFalseExpression(t *testing.T) {
+	_, reporter := check(t, `
+Buffer :: struct <T type, N int[N > 0]> {
+    data [N]T
+}
+
+Main :: task() {
+    b: Buffer<int, 0>
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed: 0 > 0`) {
+		t.Fatalf("expected generic constraint failure diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectRuntimeValueAsGenericIntArgument(t *testing.T) {
+	_, reporter := check(t, `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+
+Main :: task() {
+    n := 3
+    b: Buffer<int, n>
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic parameter "N" requires a compile-time value argument`) {
+		t.Fatalf("expected compile-time value diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestGenericFieldConstraintAllowsFieldAccess(t *testing.T) {
+	_, reporter := check(t, `
+Actor :: struct {
+    health int
+}
+
+GetHealth :: task <T type[health int]>(value T) int {
+    return value.health
+}
+
+Main :: task() {
+    actor := Actor{health = 10}
+    health := GetHealth<Actor>(actor)
+    assert(health == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericFieldConstraintMissingField(t *testing.T) {
+	_, reporter := check(t, `
+Actor :: struct {
+    name string
+}
+
+GetHealth :: task <T type[health int]>(value T) int {
+    return value.health
+}
+
+Main :: task() {
+    actor := Actor{name = "bob"}
+    health := GetHealth<Actor>(actor)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `must have field "health"`) {
+		t.Fatalf("expected missing field constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericFieldConstraintWrongFieldType(t *testing.T) {
+	_, reporter := check(t, `
+Actor :: struct {
+    health string
+}
+
+GetHealth :: task <T type[health int]>(value T) int {
+    return value.health
+}
+
+Main :: task() {
+    actor := Actor{health = "full"}
+    health := GetHealth<Actor>(actor)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `field "health" must have type int, got string`) {
+		t.Fatalf("expected wrong field type diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestGenericEnumVariantConstraintAcceptsVariant(t *testing.T) {
+	_, reporter := check(t, `
+Status :: enum {
+    Ready,
+    Failed,
+}
+
+UseStatus :: task <E enum[Ready]>() {
+}
+
+Main :: task() {
+    UseStatus<Status>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericEnumVariantConstraintMissingVariant(t *testing.T) {
+	_, reporter := check(t, `
+Status :: enum {
+    Failed,
+}
+
+UseStatus :: task <E enum[Ready]>() {
+}
+
+Main :: task() {
+    UseStatus<Status>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `must contain variant .Ready`) {
+		t.Fatalf("expected missing enum variant diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestGenericUnionMemberConstraintAcceptsMember(t *testing.T) {
+	_, reporter := check(t, `
+Failure :: struct {
+    code int
+}
+
+Result :: union {
+    Failure,
+}
+
+UseResult :: task <U union[Failure]>() {
+}
+
+Main :: task() {
+    UseResult<Result>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestRejectGenericUnionMemberConstraintMissingMember(t *testing.T) {
+	_, reporter := check(t, `
+Failure :: struct {
+    code int
+}
+
+Other :: struct {
+    code int
+}
+
+Result :: union {
+    Other,
+}
+
+UseResult :: task <U union[Failure]>() {
+}
+
+Main :: task() {
+    UseResult<Result>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected checker diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `must contain member Failure`) {
+		t.Fatalf("expected missing union member diagnostic, got:\n%s", reporter.String())
+	}
+}

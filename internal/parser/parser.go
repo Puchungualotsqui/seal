@@ -1057,14 +1057,15 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 		//
 		//     Box<int>
 		//
-		// Nested generic type arguments:
+		// User-defined generic names are intentionally parsed as expressions:
 		//
 		//     Box<Pair<int, string>>
+		//     UseTask<Identity<int>>
 		//
-		// Non-builtin bare identifiers stay expressions, so value args still work:
-		//
-		//     T<ZombieDefault>
-		if isBuiltinGenericTypeName(p.peek().Lexeme) || p.looksLikeNestedGenericTypeArg() {
+		// The checker later decides whether the expression is a type
+		// specialization or a task specialization from the expected generic
+		// parameter category.
+		if isBuiltinGenericTypeName(p.peek().Lexeme) {
 			t := p.parseType()
 			if t == nil {
 				return ast.GenericArg{}
@@ -1074,6 +1075,19 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 				Kind: ast.GenericArgType,
 				Type: t,
 				Loc:  p.span(start, t.Span().End),
+			}
+		}
+
+		if p.genericArgHasGenericSuffix() {
+			expr := p.parseGenericArgNameExpr()
+			if expr == nil {
+				return ast.GenericArg{}
+			}
+
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: expr,
+				Loc:  p.span(start, expr.Span().End),
 			}
 		}
 	}
@@ -1988,43 +2002,58 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 	return false
 }
 
-func (p *Parser) looksLikeNestedGenericTypeArg() bool {
-	if !p.at(token.Ident) || p.peekNext().Kind != token.Lt {
+func (p *Parser) genericArgHasGenericSuffix() bool {
+	if !p.at(token.Ident) {
 		return false
 	}
 
-	depth := 0
+	i := p.pos + 1
 
-	for i := p.pos + 1; i < len(p.tokens); i++ {
-		switch p.tokens[i].Kind {
-		case token.Lt:
-			depth++
+	for i+1 < len(p.tokens) &&
+		p.tokens[i].Kind == token.Dot &&
+		p.tokens[i+1].Kind == token.Ident {
+		i += 2
+	}
 
-		case token.Gt:
-			depth--
-			if depth == 0 {
-				if i+1 >= len(p.tokens) {
-					return true
-				}
+	return i < len(p.tokens) && p.tokens[i].Kind == token.Lt
+}
 
-				switch p.tokens[i+1].Kind {
-				case token.Comma, token.Gt, token.RBracket, token.RParen, token.LBrace:
-					return true
+func (p *Parser) parseGenericArgNameExpr() ast.Expr {
+	start := p.peek().Span.Start
 
-				case token.LParen:
-					return false
+	name := p.expectIdent("expected generic argument name")
+	if name.Name == "" {
+		return nil
+	}
 
-				default:
-					return true
-				}
-			}
+	var expr ast.Expr = &ast.IdentExpr{Name: name}
 
-		case token.EOF:
-			return false
+	for p.match(token.Dot) {
+		part := p.expectIdent("expected name after '.'")
+		if part.Name == "" {
+			return expr
+		}
+
+		expr = &ast.SelectorExpr{
+			Left: expr,
+			Name: part,
+			Loc:  p.span(start, part.Span().End),
 		}
 	}
 
-	return false
+	if p.at(token.Lt) {
+		expr = p.parseGenericExpr(expr)
+	}
+
+	for {
+		switch p.peek().Kind {
+		case token.LParen, token.Dot, token.LBracket:
+			expr = p.parsePostfix(expr)
+
+		default:
+			return expr
+		}
+	}
 }
 
 func (p *Parser) parseGenericExpr(base ast.Expr) ast.Expr {

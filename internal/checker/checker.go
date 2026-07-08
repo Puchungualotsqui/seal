@@ -1148,14 +1148,23 @@ func (c *Checker) checkGenericParamConstraints(scope *Scope, param ast.GenericPa
 			c.checkBoolCondition(t, x.Expr.Span(), "generic constraint must be bool")
 
 		case *ast.GenericFieldConstraint:
+			fieldType := InvalidType
 			if x.HasType && x.Type != nil {
-				c.typeFromAst(scope, x.Type)
+				fieldType = c.typeFromAst(scope, x.Type)
+			}
+
+			if param.Category == ast.GenericParamType {
+				c.addFieldConstraintToTypeParam(scope, param, x, fieldType)
 			}
 
 		case *ast.GenericImplConstraint:
 			iface := c.typeFromAst(scope, x.Interface)
 			if iface.Kind != TypeInterface && iface.Kind != TypeTypeParam && iface.Kind != TypeInvalid {
 				c.diags.Add(x.Interface.Span(), fmt.Sprintf("generic implementation constraint must name an interface, got %s", iface.String()))
+			}
+
+			if param.Category == ast.GenericParamType {
+				c.addImplConstraintToTypeParam(scope, param, iface)
 			}
 
 		case *ast.GenericEnumVariantConstraint:
@@ -1174,6 +1183,48 @@ func (c *Checker) checkGenericParamConstraints(scope *Scope, param ast.GenericPa
 			}
 		}
 	}
+}
+
+func (c *Checker) addFieldConstraintToTypeParam(scope *Scope, param ast.GenericParam, constraint *ast.GenericFieldConstraint, fieldType *Type) {
+	sym := scope.LookupLocal(param.Name.Name)
+	if sym == nil || sym.Type == nil || sym.Type.Kind != TypeTypeParam {
+		return
+	}
+
+	for i := range sym.Type.Fields {
+		if sym.Type.Fields[i].Name == constraint.Name.Name {
+			if constraint.HasType {
+				sym.Type.Fields[i].Type = fieldType
+			}
+
+			return
+		}
+	}
+
+	sym.Type.Fields = append(sym.Type.Fields, FieldInfo{
+		Name: constraint.Name.Name,
+		Type: fieldType,
+		Span: constraint.Name.Span(),
+	})
+}
+
+func (c *Checker) addImplConstraintToTypeParam(scope *Scope, param ast.GenericParam, iface *Type) {
+	if iface == nil || iface.Kind == TypeInvalid {
+		return
+	}
+
+	sym := scope.LookupLocal(param.Name.Name)
+	if sym == nil || sym.Type == nil || sym.Type.Kind != TypeTypeParam {
+		return
+	}
+
+	for _, existing := range sym.Type.Implements {
+		if c.sameType(existing, iface) {
+			return
+		}
+	}
+
+	sym.Type.Implements = append(sym.Type.Implements, iface)
 }
 
 func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
@@ -2891,6 +2942,11 @@ func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, argSpans []
 		return InvalidType
 	}
 
+	if len(sym.Type.GenericParams) > 0 {
+		c.diags.Add(span, fmt.Sprintf("generic task %q requires generic arguments", sym.Name))
+		return InvalidType
+	}
+
 	return c.checkTaskTypeCall(sym.Type, argTypes, argSpans, span)
 }
 
@@ -3132,7 +3188,7 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 		leftType = leftType.Elem
 	}
 
-	if leftType.Kind != TypeStruct {
+	if leftType.Kind != TypeStruct && leftType.Kind != TypeTypeParam {
 		c.diags.Add(e.Span(), fmt.Sprintf("cannot access field %q on non-struct type %s", e.Name.Name, leftType.String()))
 		return InvalidType
 	}
@@ -3900,12 +3956,18 @@ func (c *Checker) checkGenericArgsAgainstParams(scope *Scope, args []ast.Generic
 		return
 	}
 
+	subst := genericArgSubst(params, args)
+
 	for i := range args {
-		c.checkGenericArgAgainstParam(scope, args[i], params[i])
+		c.checkGenericArgAgainstParam(scope, args[i], params[i], subst)
+	}
+
+	for i := range args {
+		c.checkGenericArgConstraintsAgainstParam(scope, args[i], params[i], subst)
 	}
 }
 
-func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, param ast.GenericParam) {
+func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, param ast.GenericParam, subst map[string]ast.GenericArg) {
 	switch param.Category {
 	case ast.GenericParamType:
 		argType := c.typeFromGenericArg(scope, arg)
@@ -3937,28 +3999,43 @@ func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, 
 		argType := c.taskFromGenericArg(scope, arg)
 		if argType.Kind != TypeTask && argType.Kind != TypeInvalid {
 			c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q expects task, got %s", param.Name.Name, argType.String()))
+			return
+		}
+
+		expected := c.taskTypeFromGenericTaskParamWithGenericArgs(scope, param, subst)
+		if c.genericTaskParamHasSignatureConstraint(param) &&
+			argType.Kind != TypeInvalid &&
+			!c.sameType(argType, expected) {
+			c.diags.Add(
+				arg.Span(),
+				fmt.Sprintf("generic task parameter %q expects %s, got %s", param.Name.Name, expected.String(), argType.String()),
+			)
 		}
 
 	case ast.GenericParamInt:
 		got := c.valueFromGenericArg(scope, arg)
 		c.checkAssignable(IntType, got, arg.Span())
+		c.checkGenericArgIsCompileTimeValue(scope, arg, param)
 
 	case ast.GenericParamBool:
 		got := c.valueFromGenericArg(scope, arg)
 		c.checkAssignable(BoolType, got, arg.Span())
+		c.checkGenericArgIsCompileTimeValue(scope, arg, param)
 
 	case ast.GenericParamString:
 		got := c.valueFromGenericArg(scope, arg)
 		c.checkAssignable(StringType, got, arg.Span())
+		c.checkGenericArgIsCompileTimeValue(scope, arg, param)
 
 	case ast.GenericParamValue:
 		expected := InvalidType
 		if param.Type != nil {
-			expected = c.typeFromAst(scope, param.Type)
+			expected = c.typeFromAstWithGenericArgs(scope, param.Type, subst)
 		}
 
 		got := c.valueFromGenericArg(scope, arg)
 		c.checkAssignable(expected, got, arg.Span())
+		c.checkGenericArgIsCompileTimeValue(scope, arg, param)
 	}
 }
 
@@ -3969,6 +4046,147 @@ func (c *Checker) exprFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 	}
 
 	return c.checkExpr(scope, arg.Expr)
+}
+
+func (c *Checker) genericTaskParamHasSignatureConstraint(param ast.GenericParam) bool {
+	for _, constraint := range param.Constraints {
+		if _, ok := constraint.(*ast.GenericTaskConstraint); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Checker) taskTypeFromGenericTaskParamWithGenericArgs(scope *Scope, param ast.GenericParam, subst map[string]ast.GenericArg) *Type {
+	taskType := &Type{
+		Kind: TypeTask,
+		Name: param.Name.Name,
+	}
+
+	for _, constraint := range param.Constraints {
+		taskConstraint, ok := constraint.(*ast.GenericTaskConstraint)
+		if !ok {
+			continue
+		}
+
+		for _, p := range taskConstraint.Params {
+			taskType.Params = append(taskType.Params, c.typeFromAstWithGenericArgs(scope, p, subst))
+		}
+
+		for _, r := range taskConstraint.Results {
+			taskType.Results = append(taskType.Results, c.typeFromAstWithGenericArgs(scope, r, subst))
+		}
+
+		taskType.RequiredParams = len(taskType.Params)
+		return taskType
+	}
+
+	return taskType
+}
+
+func (c *Checker) checkGenericArgConstraintsAgainstParam(scope *Scope, arg ast.GenericArg, param ast.GenericParam, subst map[string]ast.GenericArg) {
+	for _, constraint := range param.Constraints {
+		switch x := constraint.(type) {
+		case *ast.GenericExprConstraint:
+			expr := c.substituteGenericExpr(x.Expr, subst)
+			typ := c.checkExpr(scope, expr)
+			c.checkBoolCondition(typ, expr.Span(), "generic constraint must be bool")
+
+			if typ == nil || typ.Kind == TypeInvalid {
+				continue
+			}
+
+			value, ok := c.evalGenericConstBool(scope, expr)
+			if !ok {
+				c.diags.Add(expr.Span(), "generic constraint must be evaluable at compile time")
+				continue
+			}
+
+			if !value {
+				c.diags.Add(arg.Span(), fmt.Sprintf("generic constraint failed: %s", exprDisplay(expr)))
+			}
+
+		case *ast.GenericFieldConstraint:
+			actual := c.typeFromGenericArg(scope, arg)
+			if actual == nil || actual.Kind == TypeInvalid {
+				continue
+			}
+
+			fieldType := c.lookupField(actual, x.Name.Name)
+			if fieldType == nil {
+				c.diags.Add(arg.Span(), fmt.Sprintf("generic argument %s for %q must have field %q", actual.String(), param.Name.Name, x.Name.Name))
+				continue
+			}
+
+			if x.HasType && x.Type != nil {
+				expected := c.typeFromAstWithGenericArgs(scope, x.Type, subst)
+				if !c.sameType(fieldType, expected) {
+					c.diags.Add(
+						arg.Span(),
+						fmt.Sprintf("generic argument %s field %q must have type %s, got %s", actual.String(), x.Name.Name, expected.String(), fieldType.String()),
+					)
+				}
+			}
+
+		case *ast.GenericImplConstraint:
+			actual := c.typeFromGenericArg(scope, arg)
+			if actual == nil || actual.Kind == TypeInvalid {
+				continue
+			}
+
+			iface := c.typeFromAstWithGenericArgs(scope, x.Interface, subst)
+			if iface == nil || iface.Kind == TypeInvalid {
+				continue
+			}
+
+			if iface.Kind != TypeInterface && iface.Kind != TypeTypeParam {
+				c.diags.Add(x.Interface.Span(), fmt.Sprintf("generic implementation constraint must name an interface, got %s", iface.String()))
+				continue
+			}
+
+			if !c.typeImplementsInterface(actual, iface) {
+				c.diags.Add(arg.Span(), fmt.Sprintf("generic argument %s for %q must implement %s", actual.String(), param.Name.Name, iface.String()))
+			}
+
+		case *ast.GenericEnumVariantConstraint:
+			actual := c.typeFromGenericArg(scope, arg)
+			if actual == nil || actual.Kind == TypeInvalid || actual.Kind == TypeTypeParam {
+				continue
+			}
+
+			if actual.Kind != TypeEnum {
+				continue
+			}
+
+			if !c.enumHasVariant(actual, x.Name.Name) {
+				c.diags.Add(arg.Span(), fmt.Sprintf("generic enum argument %s for %q must contain variant .%s", actual.String(), param.Name.Name, x.Name.Name))
+			}
+
+		case *ast.GenericUnionMemberConstraint:
+			actual := c.typeFromGenericArg(scope, arg)
+			if actual == nil || actual.Kind == TypeInvalid || actual.Kind == TypeTypeParam {
+				continue
+			}
+
+			if actual.Kind != TypeUnion {
+				continue
+			}
+
+			member := c.typeFromAstWithGenericArgs(scope, x.Member, subst)
+			if member == nil || member.Kind == TypeInvalid {
+				continue
+			}
+
+			if !c.unionHasMember(actual, member) {
+				c.diags.Add(arg.Span(), fmt.Sprintf("generic union argument %s for %q must contain member %s", actual.String(), param.Name.Name, member.String()))
+			}
+
+		case *ast.GenericTaskConstraint:
+			// Checked in checkGenericArgAgainstParam, because task signature
+			// constraints are part of category compatibility.
+		}
+	}
 }
 
 func (c *Checker) typeFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
@@ -4023,6 +4241,15 @@ func (c *Checker) typeFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 			c.diags.Add(e.Span(), "expected type argument")
 			return InvalidType
 
+		case *ast.GenericExpr:
+			typ := typeAstFromExpr(e)
+			if typ == nil {
+				c.diags.Add(e.Span(), "expected type argument")
+				return InvalidType
+			}
+
+			return c.typeFromAst(scope, typ)
+
 		default:
 			c.diags.Add(arg.Span(), "expected type argument")
 			return InvalidType
@@ -4055,35 +4282,451 @@ func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 			return InvalidType
 		}
 
+		if len(sym.Type.GenericParams) > 0 {
+			c.diags.Add(e.Span(), fmt.Sprintf("generic task argument %q requires specialization", e.Name.Name))
+			return InvalidType
+		}
+
 		return sym.Type
 
 	case *ast.SelectorExpr:
-		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			pkgSym := scope.Lookup(id.Name.Name)
-			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
-				if pkgSym.Package == nil {
-					c.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
-					return InvalidType
-				}
-
-				member := pkgSym.Package.Symbols[e.Name.Name]
-				if member == nil {
-					c.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
-					return InvalidType
-				}
-
-				if member.Kind != SymbolTask {
-					c.diags.Add(e.Name.Span(), fmt.Sprintf("package symbol %s.%s is not a task", id.Name.Name, e.Name.Name))
-					return InvalidType
-				}
-
-				return member.Type
-			}
+		sym := c.packageTaskSymbolFromSelector(scope, e)
+		if sym == nil {
+			return InvalidType
 		}
+
+		if sym.Type == nil {
+			return InvalidType
+		}
+
+		if len(sym.Type.GenericParams) > 0 {
+			c.diags.Add(e.Span(), fmt.Sprintf("generic task argument %q requires specialization", e.Name.Name))
+			return InvalidType
+		}
+
+		return sym.Type
+
+	case *ast.GenericExpr:
+		sym := c.taskSymbolFromGenericExprBase(scope, e.Base)
+		if sym == nil {
+			return InvalidType
+		}
+
+		if sym.Type == nil || sym.Type.Kind != TypeTask {
+			c.diags.Add(e.Base.Span(), "generic task argument has invalid task type")
+			return InvalidType
+		}
+
+		c.checkGenericArgsAgainstParams(scope, e.Args, sym.Type.GenericParams, e.Span())
+
+		taskDecl, _ := sym.Node.(*ast.TaskDecl)
+		if taskDecl == nil {
+			if len(sym.Type.GenericParams) > 0 {
+				c.diags.Add(e.Base.Span(), fmt.Sprintf("cannot specialize imported generic task %q without its declaration", sym.Name))
+				return InvalidType
+			}
+
+			return sym.Type
+		}
+
+		return c.taskTypeFromGenericCall(scope, taskDecl, e.Args)
 	}
 
 	c.diags.Add(arg.Span(), "expected task argument")
 	return InvalidType
+}
+
+func (c *Checker) packageTaskSymbolFromSelector(scope *Scope, e *ast.SelectorExpr) *Symbol {
+	id, ok := e.Left.(*ast.IdentExpr)
+	if !ok {
+		c.diags.Add(e.Span(), "expected task argument")
+		return nil
+	}
+
+	pkgSym := scope.Lookup(id.Name.Name)
+	if pkgSym == nil {
+		c.diags.Add(id.Span(), fmt.Sprintf("undefined package %q", id.Name.Name))
+		return nil
+	}
+
+	if pkgSym.Kind != SymbolPackage {
+		c.diags.Add(id.Span(), fmt.Sprintf("%q is not a package", id.Name.Name))
+		return nil
+	}
+
+	if pkgSym.Package == nil {
+		c.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
+		return nil
+	}
+
+	member := pkgSym.Package.Symbols[e.Name.Name]
+	if member == nil {
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
+		return nil
+	}
+
+	if member.Kind != SymbolTask {
+		c.diags.Add(e.Name.Span(), fmt.Sprintf("package symbol %s.%s is not a task", id.Name.Name, e.Name.Name))
+		return nil
+	}
+
+	return member
+}
+
+func (c *Checker) taskSymbolFromGenericExprBase(scope *Scope, base ast.Expr) *Symbol {
+	switch b := base.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(b.Name.Name)
+		if sym == nil {
+			c.diags.Add(b.Span(), fmt.Sprintf("undefined task argument %q", b.Name.Name))
+			return nil
+		}
+
+		if sym.Kind != SymbolTask {
+			c.diags.Add(b.Span(), fmt.Sprintf("expected task argument, got %q", b.Name.Name))
+			return nil
+		}
+
+		return sym
+
+	case *ast.SelectorExpr:
+		return c.packageTaskSymbolFromSelector(scope, b)
+
+	default:
+		c.diags.Add(base.Span(), "expected generic task name")
+		return nil
+	}
+}
+
+func (c *Checker) checkGenericArgIsCompileTimeValue(scope *Scope, arg ast.GenericArg, param ast.GenericParam) {
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		return
+	}
+
+	if !c.isCompileTimeGenericExpr(scope, arg.Expr) {
+		c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q requires a compile-time value argument", param.Name.Name))
+	}
+}
+
+func (c *Checker) isCompileTimeGenericExpr(scope *Scope, expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch e := expr.(type) {
+	case *ast.IntLitExpr,
+		*ast.FloatLitExpr,
+		*ast.StringLitExpr,
+		*ast.CStringLitExpr,
+		*ast.CharLitExpr,
+		*ast.BoolLitExpr,
+		*ast.NilLitExpr,
+		*ast.DotIdentExpr:
+		return true
+
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		return sym != nil && sym.Kind == SymbolConst
+
+	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
+			if pkgSym != nil && pkgSym.Kind == SymbolPackage && pkgSym.Package != nil {
+				member := pkgSym.Package.Symbols[e.Name.Name]
+				return member != nil && member.Kind == SymbolConst
+			}
+		}
+
+		return false
+
+	case *ast.UnaryExpr:
+		return c.isCompileTimeGenericExpr(scope, e.Expr)
+
+	case *ast.BinaryExpr:
+		return c.isCompileTimeGenericExpr(scope, e.Left) &&
+			c.isCompileTimeGenericExpr(scope, e.Right)
+
+	case *ast.CallExpr:
+		gen, ok := e.Callee.(*ast.GenericExpr)
+		if !ok {
+			return false
+		}
+
+		id, ok := gen.Base.(*ast.IdentExpr)
+		if !ok || id.Name.Name != "cast" {
+			return false
+		}
+
+		return len(e.Args) == 1 && c.isCompileTimeGenericExpr(scope, e.Args[0])
+
+	case *ast.ArrayLiteralExpr:
+		for _, value := range e.Values {
+			if !c.isCompileTimeGenericExpr(scope, value) {
+				return false
+			}
+		}
+
+		return true
+
+	case *ast.CompoundLiteralExpr:
+		for _, field := range e.Fields {
+			if !c.isCompileTimeGenericExpr(scope, field.Value) {
+				return false
+			}
+		}
+
+		for _, value := range e.Values {
+			if !c.isCompileTimeGenericExpr(scope, value) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	return false
+}
+
+type genericConstKind int
+
+const (
+	genericConstInvalid genericConstKind = iota
+	genericConstBool
+	genericConstInt
+	genericConstString
+)
+
+type genericConstValue struct {
+	Kind        genericConstKind
+	BoolValue   bool
+	IntValue    int64
+	StringValue string
+}
+
+func (c *Checker) evalGenericConstBool(scope *Scope, expr ast.Expr) (bool, bool) {
+	value, ok := c.evalGenericConstExpr(scope, expr)
+	if !ok || value.Kind != genericConstBool {
+		return false, false
+	}
+
+	return value.BoolValue, true
+}
+
+func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericConstValue, bool) {
+	if expr == nil {
+		return genericConstValue{}, false
+	}
+
+	switch e := expr.(type) {
+	case *ast.BoolLitExpr:
+		return genericConstValue{Kind: genericConstBool, BoolValue: e.Value}, true
+
+	case *ast.IntLitExpr:
+		value, err := strconv.ParseInt(e.Value, 10, 64)
+		if err != nil {
+			return genericConstValue{}, false
+		}
+
+		return genericConstValue{Kind: genericConstInt, IntValue: value}, true
+
+	case *ast.StringLitExpr:
+		value, err := strconv.Unquote(e.Value)
+		if err != nil {
+			return genericConstValue{}, false
+		}
+
+		return genericConstValue{Kind: genericConstString, StringValue: value}, true
+
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		if sym == nil || sym.Kind != SymbolConst {
+			return genericConstValue{}, false
+		}
+
+		decl, ok := sym.Node.(*ast.ConstDecl)
+		if !ok || decl.Value == nil {
+			return genericConstValue{}, false
+		}
+
+		return c.evalGenericConstExpr(scope, decl.Value)
+
+	case *ast.SelectorExpr:
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
+			if pkgSym != nil && pkgSym.Kind == SymbolPackage && pkgSym.Package != nil {
+				member := pkgSym.Package.Symbols[e.Name.Name]
+				if member == nil || member.Kind != SymbolConst {
+					return genericConstValue{}, false
+				}
+
+				decl, ok := member.Node.(*ast.ConstDecl)
+				if !ok || decl.Value == nil {
+					return genericConstValue{}, false
+				}
+
+				return c.evalGenericConstExpr(scope, decl.Value)
+			}
+		}
+
+		return genericConstValue{}, false
+
+	case *ast.UnaryExpr:
+		value, ok := c.evalGenericConstExpr(scope, e.Expr)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		switch e.Op {
+		case token.Bang:
+			if value.Kind != genericConstBool {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{Kind: genericConstBool, BoolValue: !value.BoolValue}, true
+
+		case token.Minus:
+			if value.Kind != genericConstInt {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{Kind: genericConstInt, IntValue: -value.IntValue}, true
+		}
+
+		return genericConstValue{}, false
+
+	case *ast.BinaryExpr:
+		left, ok := c.evalGenericConstExpr(scope, e.Left)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		right, ok := c.evalGenericConstExpr(scope, e.Right)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		return evalGenericConstBinary(e.Op, left, right)
+
+	case *ast.CallExpr:
+		if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+			if id, ok := gen.Base.(*ast.IdentExpr); ok && id.Name.Name == "cast" && len(e.Args) == 1 {
+				return c.evalGenericConstExpr(scope, e.Args[0])
+			}
+		}
+
+		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && len(e.Args) == 1 {
+			value, ok := c.evalGenericConstExpr(scope, e.Args[0])
+			if !ok || value.Kind != genericConstString {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{Kind: genericConstInt, IntValue: int64(len(value.StringValue))}, true
+		}
+
+		return genericConstValue{}, false
+	}
+
+	return genericConstValue{}, false
+}
+
+func evalGenericConstBinary(op token.Kind, left genericConstValue, right genericConstValue) (genericConstValue, bool) {
+	switch op {
+	case token.AndAnd:
+		if left.Kind == genericConstBool && right.Kind == genericConstBool {
+			return genericConstValue{Kind: genericConstBool, BoolValue: left.BoolValue && right.BoolValue}, true
+		}
+
+	case token.OrOr:
+		if left.Kind == genericConstBool && right.Kind == genericConstBool {
+			return genericConstValue{Kind: genericConstBool, BoolValue: left.BoolValue || right.BoolValue}, true
+		}
+
+	case token.EqEq, token.NotEq:
+		value, ok := genericConstEqual(left, right)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		if op == token.NotEq {
+			value = !value
+		}
+
+		return genericConstValue{Kind: genericConstBool, BoolValue: value}, true
+
+	case token.Lt, token.LtEq, token.Gt, token.GtEq:
+		if left.Kind == genericConstInt && right.Kind == genericConstInt {
+			switch op {
+			case token.Lt:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue < right.IntValue}, true
+			case token.LtEq:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue <= right.IntValue}, true
+			case token.Gt:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue > right.IntValue}, true
+			case token.GtEq:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue >= right.IntValue}, true
+			}
+		}
+
+		if left.Kind == genericConstString && right.Kind == genericConstString {
+			switch op {
+			case token.Lt:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue < right.StringValue}, true
+			case token.LtEq:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue <= right.StringValue}, true
+			case token.Gt:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue > right.StringValue}, true
+			case token.GtEq:
+				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue >= right.StringValue}, true
+			}
+		}
+
+	case token.Plus, token.Minus, token.Star, token.Slash, token.Percent:
+		if left.Kind != genericConstInt || right.Kind != genericConstInt {
+			return genericConstValue{}, false
+		}
+
+		switch op {
+		case token.Plus:
+			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue + right.IntValue}, true
+		case token.Minus:
+			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue - right.IntValue}, true
+		case token.Star:
+			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue * right.IntValue}, true
+		case token.Slash:
+			if right.IntValue == 0 {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue / right.IntValue}, true
+		case token.Percent:
+			if right.IntValue == 0 {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue % right.IntValue}, true
+		}
+	}
+
+	return genericConstValue{}, false
+}
+
+func genericConstEqual(left genericConstValue, right genericConstValue) (bool, bool) {
+	if left.Kind != right.Kind {
+		return false, false
+	}
+
+	switch left.Kind {
+	case genericConstBool:
+		return left.BoolValue == right.BoolValue, true
+
+	case genericConstInt:
+		return left.IntValue == right.IntValue, true
+
+	case genericConstString:
+		return left.StringValue == right.StringValue, true
+	}
+
+	return false, false
 }
 
 func (c *Checker) valueFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
@@ -4775,6 +5418,11 @@ func (c *Checker) checkAssertCall(args []ast.Expr, argTypes []*Type, span source
 func (c *Checker) checkDirectTaskCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
+		return []*Type{InvalidType}
+	}
+
+	if len(sym.Type.GenericParams) > 0 {
+		c.diags.Add(span, fmt.Sprintf("generic task %q requires generic arguments", sym.Name))
 		return []*Type{InvalidType}
 	}
 
