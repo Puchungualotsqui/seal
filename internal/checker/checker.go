@@ -3740,6 +3740,26 @@ func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.Gene
 
 		return e
 
+	case *ast.SelectorExpr:
+		return &ast.SelectorExpr{
+			Left: c.substituteGenericExpr(e.Left, subst),
+			Name: e.Name,
+			Loc:  e.Loc,
+		}
+
+	case *ast.IndexExpr:
+		return &ast.IndexExpr{
+			Left:  c.substituteGenericExpr(e.Left, subst),
+			Index: c.substituteGenericExpr(e.Index, subst),
+			Loc:   e.Loc,
+		}
+
+	case *ast.SpreadExpr:
+		return &ast.SpreadExpr{
+			Expr: c.substituteGenericExpr(e.Expr, subst),
+			Loc:  e.Loc,
+		}
+
 	case *ast.UnaryExpr:
 		return &ast.UnaryExpr{
 			Op:   e.Op,
@@ -3777,6 +3797,38 @@ func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.Gene
 			Base: c.substituteGenericExpr(e.Base, subst),
 			Args: args,
 			Loc:  e.Loc,
+		}
+
+	case *ast.ArrayLiteralExpr:
+		values := make([]ast.Expr, 0, len(e.Values))
+		for _, value := range e.Values {
+			values = append(values, c.substituteGenericExpr(value, subst))
+		}
+
+		return &ast.ArrayLiteralExpr{
+			Values: values,
+			Loc:    e.Loc,
+		}
+
+	case *ast.CompoundLiteralExpr:
+		fields := make([]ast.LiteralField, 0, len(e.Fields))
+		for _, field := range e.Fields {
+			fields = append(fields, ast.LiteralField{
+				Name:  field.Name,
+				Value: c.substituteGenericExpr(field.Value, subst),
+			})
+		}
+
+		values := make([]ast.Expr, 0, len(e.Values))
+		for _, value := range e.Values {
+			values = append(values, c.substituteGenericExpr(value, subst))
+		}
+
+		return &ast.CompoundLiteralExpr{
+			Type:   c.substituteTypeAst(e.Type, subst),
+			Fields: fields,
+			Values: values,
+			Loc:    e.Loc,
 		}
 	}
 
@@ -4551,24 +4603,7 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 		return c.evalGenericConstExpr(scope, decl.Value)
 
 	case *ast.SelectorExpr:
-		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			pkgSym := scope.Lookup(id.Name.Name)
-			if pkgSym != nil && pkgSym.Kind == SymbolPackage && pkgSym.Package != nil {
-				member := pkgSym.Package.Symbols[e.Name.Name]
-				if member == nil || member.Kind != SymbolConst {
-					return genericConstValue{}, false
-				}
-
-				decl, ok := member.Node.(*ast.ConstDecl)
-				if !ok || decl.Value == nil {
-					return genericConstValue{}, false
-				}
-
-				return c.evalGenericConstExpr(scope, decl.Value)
-			}
-		}
-
-		return genericConstValue{}, false
+		return c.evalGenericConstSelector(scope, e.Left, e.Name)
 
 	case *ast.UnaryExpr:
 		value, ok := c.evalGenericConstExpr(scope, e.Expr)
@@ -4623,6 +4658,77 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 			return genericConstValue{Kind: genericConstInt, IntValue: int64(len(value.StringValue))}, true
 		}
 
+		return genericConstValue{}, false
+	}
+
+	return genericConstValue{}, false
+}
+
+func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
+	if receiver == nil {
+		return genericConstValue{}, false
+	}
+
+	switch r := receiver.(type) {
+	case *ast.CompoundLiteralExpr:
+		for _, literalField := range r.Fields {
+			if literalField.Name.Name == field.Name {
+				return c.evalGenericConstExpr(scope, literalField.Value)
+			}
+		}
+
+		litType := c.typeFromAst(scope, r.Type)
+		if litType != nil && litType.Kind == TypeStruct {
+			for i, structField := range litType.Fields {
+				if structField.Name == field.Name && i < len(r.Values) {
+					return c.evalGenericConstExpr(scope, r.Values[i])
+				}
+			}
+		}
+
+		return genericConstValue{}, false
+
+	case *ast.IdentExpr:
+		sym := scope.Lookup(r.Name.Name)
+		if sym == nil {
+			return genericConstValue{}, false
+		}
+
+		if sym.Kind == SymbolConst {
+			decl, ok := sym.Node.(*ast.ConstDecl)
+			if !ok || decl.Value == nil {
+				return genericConstValue{}, false
+			}
+
+			return c.evalGenericConstSelector(scope, decl.Value, field)
+		}
+
+		if sym.Kind == SymbolPackage && sym.Package != nil {
+			member := sym.Package.Symbols[field.Name]
+			if member == nil || member.Kind != SymbolConst {
+				return genericConstValue{}, false
+			}
+
+			decl, ok := member.Node.(*ast.ConstDecl)
+			if !ok || decl.Value == nil {
+				return genericConstValue{}, false
+			}
+
+			return c.evalGenericConstExpr(scope, decl.Value)
+		}
+
+		return genericConstValue{}, false
+
+	case *ast.SelectorExpr:
+		value, ok := c.evalGenericConstSelector(scope, r.Left, r.Name)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		// For now, nested field selection can only continue through named
+		// constants or compound literals, not through already-flattened scalar
+		// values.
+		_ = value
 		return genericConstValue{}, false
 	}
 
