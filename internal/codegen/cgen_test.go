@@ -1718,3 +1718,73 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenerateGenericTaskParameterValueCall(t *testing.T) {
+	out, reporter := generate(t, `
+Double :: task(value int) int {
+	return value * 2
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+	return F(value)
+}
+
+Main :: task() {
+	x := Apply<Double>(10)
+	assert(x == 20)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t Double(intptr_t value);",
+		"intptr_t Apply_Double(intptr_t value);",
+		"intptr_t Apply_Double(intptr_t value) {",
+		"Double(value)",
+		"intptr_t x = Apply_Double(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericTaskParameterSpecializedGenericTaskValueCall(t *testing.T) {
+	out, reporter := generate(t, `
+Identity :: task <T type>(value T) T {
+	return value
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+	return F(value)
+}
+
+Main :: task() {
+	x := Apply<Identity<int>>(10)
+	assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t Identity_int(intptr_t value);",
+		"intptr_t Apply_Identity_int(intptr_t value);",
+		"intptr_t Apply_Identity_int(intptr_t value) {",
+		"Identity_int(value)",
+		"intptr_t x = Apply_Identity_int(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}

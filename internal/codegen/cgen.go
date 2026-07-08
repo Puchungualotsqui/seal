@@ -1446,9 +1446,11 @@ func (g *Generator) specializedTaskCName(decl *ast.TaskDecl, args []ast.GenericA
 		switch paramCategory {
 		case ast.GenericParamType,
 			ast.GenericParamEnum,
-			ast.GenericParamUnion,
-			ast.GenericParamTask:
+			ast.GenericParamUnion:
 			parts = append(parts, g.genericTypeArgCName(arg))
+
+		case ast.GenericParamTask:
+			parts = append(parts, g.genericTaskArgCName(arg))
 
 		default:
 			parts = append(parts, genericValueArgCName(arg))
@@ -3127,6 +3129,188 @@ func (g *Generator) emitUnionSwitchStmt(s *ast.SwitchStmt) {
 	g.line("}")
 }
 
+func (g *Generator) genericTaskParamReturnType(name string) (CType, bool) {
+	if g.genericSubst == nil {
+		return CInvalid, false
+	}
+
+	arg, ok := g.genericSubst[name]
+	if !ok {
+		return CInvalid, false
+	}
+
+	return g.taskReturnTypeFromGenericArg(arg)
+}
+
+func (g *Generator) taskReturnTypeFromGenericArg(arg ast.GenericArg) (CType, bool) {
+	if g.genericSubst != nil {
+		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
+	}
+
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		return CInvalid, false
+	}
+
+	switch e := arg.Expr.(type) {
+	case *ast.IdentExpr:
+		info, ok := g.tasks[e.Name.Name]
+		if !ok {
+			return CInvalid, false
+		}
+
+		return info.ReturnType, true
+
+	case *ast.SelectorExpr:
+		id, ok := e.Left.(*ast.IdentExpr)
+		if !ok {
+			return CInvalid, false
+		}
+
+		pkg := g.packages[id.Name.Name]
+		if pkg == nil {
+			return CInvalid, false
+		}
+
+		info, ok := pkg.Tasks[e.Name.Name]
+		if !ok {
+			return CInvalid, false
+		}
+
+		return info.ReturnType, true
+
+	case *ast.GenericExpr:
+		id, ok := e.Base.(*ast.IdentExpr)
+		if !ok {
+			return CInvalid, false
+		}
+
+		info, ok := g.tasks[id.Name.Name]
+		if !ok || len(info.GenericParams) == 0 {
+			return CInvalid, false
+		}
+
+		callArgs := e.Args
+		if g.genericSubst != nil {
+			callArgs = make([]ast.GenericArg, 0, len(e.Args))
+			for _, genericArg := range e.Args {
+				callArgs = append(callArgs, g.substituteGenericArgForCGen(genericArg, g.genericSubst))
+			}
+		}
+
+		if len(info.Decl.Results) == 0 {
+			return CVoid, true
+		}
+
+		if len(info.Decl.Results) == 1 {
+			subst := genericTaskSubstForCGen(info.GenericParams, callArgs)
+			return g.cTypeFromAstWithGenericArgs(info.Decl.Results[0], subst), true
+		}
+
+		name := g.registerGenericTaskInstance(info.Decl, callArgs)
+		resultName := name + "_Result"
+
+		return CType{
+			Name:     resultName,
+			SealName: resultName,
+		}, true
+	}
+
+	return CInvalid, false
+}
+
+func (g *Generator) genericTaskParamCallName(name string) (string, bool) {
+	if g.genericSubst == nil {
+		return "", false
+	}
+
+	arg, ok := g.genericSubst[name]
+	if !ok {
+		return "", false
+	}
+
+	return g.taskCallNameFromGenericArg(arg)
+}
+
+func (g *Generator) taskCallNameFromGenericArg(arg ast.GenericArg) (string, bool) {
+	if g.genericSubst != nil {
+		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
+	}
+
+	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+		g.error(arg.Span(), "generic task parameter requires a task argument")
+		return "0", true
+	}
+
+	switch e := arg.Expr.(type) {
+	case *ast.IdentExpr:
+		info, ok := g.tasks[e.Name.Name]
+		if !ok {
+			g.error(e.Span(), fmt.Sprintf("unknown task argument %q", e.Name.Name))
+			return "0", true
+		}
+
+		if len(info.GenericParams) > 0 {
+			g.error(e.Span(), fmt.Sprintf("generic task argument %q requires specialization", e.Name.Name))
+			return "0", true
+		}
+
+		return g.cTaskName(e.Name.Name), true
+
+	case *ast.SelectorExpr:
+		id, ok := e.Left.(*ast.IdentExpr)
+		if !ok {
+			g.error(e.Span(), "unsupported task argument selector")
+			return "0", true
+		}
+
+		pkg := g.packages[id.Name.Name]
+		if pkg == nil {
+			g.error(e.Span(), fmt.Sprintf("unknown package %q", id.Name.Name))
+			return "0", true
+		}
+
+		info, ok := pkg.Tasks[e.Name.Name]
+		if !ok {
+			g.error(e.Span(), fmt.Sprintf("package %s has no task %q", id.Name.Name, e.Name.Name))
+			return "0", true
+		}
+
+		if len(info.GenericParams) > 0 {
+			g.error(e.Span(), fmt.Sprintf("imported generic task argument %q requires specialization", e.Name.Name))
+			return "0", true
+		}
+
+		return cImportedTaskName(id.Name.Name, e.Name.Name, info), true
+
+	case *ast.GenericExpr:
+		id, ok := e.Base.(*ast.IdentExpr)
+		if !ok {
+			g.error(e.Base.Span(), "unsupported generic task argument")
+			return "0", true
+		}
+
+		info, ok := g.tasks[id.Name.Name]
+		if !ok || len(info.GenericParams) == 0 {
+			g.error(e.Span(), fmt.Sprintf("generic task argument %q is not supported by C codegen yet", id.Name.Name))
+			return "0", true
+		}
+
+		callArgs := e.Args
+		if g.genericSubst != nil {
+			callArgs = make([]ast.GenericArg, 0, len(e.Args))
+			for _, genericArg := range e.Args {
+				callArgs = append(callArgs, g.substituteGenericArgForCGen(genericArg, g.genericSubst))
+			}
+		}
+
+		name := g.registerGenericTaskInstance(info.Decl, callArgs)
+		return name, true
+	}
+
+	g.error(arg.Span(), "unsupported generic task argument")
+	return "0", true
+}
+
 func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	if expected != nil && expected.SealName == "any" {
 		return g.emitAnyExpr(expr)
@@ -3474,6 +3658,16 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if g.scope == nil {
+			if name, ok := g.genericTaskParamCallName(id.Name.Name); ok {
+				return g.emitDirectCNamedCall(name, e.Args, preparedArgs, nil)
+			}
+		} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
+			if name, ok := g.genericTaskParamCallName(id.Name.Name); ok {
+				return g.emitDirectCNamedCall(name, e.Args, preparedArgs, nil)
+			}
+		}
+
 		if kind, ok := g.primitiveTaskKind(id.Name.Name); ok {
 			switch kind {
 			case builtin.TaskLen:
@@ -3647,6 +3841,26 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
 	return "0"
+}
+
+func (g *Generator) emitDirectCNamedCall(name string, args []ast.Expr, preparedArgs []string, expectedParams []CType) string {
+	var outArgs []string
+
+	for i, arg := range args {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
+		expected := (*CType)(nil)
+		if i < len(expectedParams) {
+			expected = &expectedParams[i]
+		}
+
+		outArgs = append(outArgs, g.emitExpr(arg, expected))
+	}
+
+	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
 }
 
 func (g *Generator) emitTaskCall(taskName string, args []ast.Expr, preparedArgs []string) string {
@@ -4614,6 +4828,18 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 				return CInvalid
 			}
 
+			if id, ok := e.Callee.(*ast.IdentExpr); ok {
+				if g.scope == nil {
+					if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
+						return ret
+					}
+				} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
+					if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
+						return ret
+					}
+				}
+			}
+
 			if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
 				switch task.Kind {
 				case builtin.TaskAnyIs:
@@ -5248,6 +5474,22 @@ func (g *Generator) specializedStructCName(decl *ast.StructDecl, args []ast.Gene
 	}
 
 	return strings.Join(parts, "_")
+}
+
+func (g *Generator) genericTaskArgCName(arg ast.GenericArg) string {
+	if g.genericSubst != nil {
+		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
+	}
+
+	switch arg.Kind {
+	case ast.GenericArgExpr:
+		return sanitizeCName(exprCName(arg.Expr))
+
+	case ast.GenericArgType:
+		return sanitizeCName(typeNameFromAst(arg.Type))
+	}
+
+	return "invalid_task"
 }
 
 func (g *Generator) genericTypeArgCName(arg ast.GenericArg) string {
