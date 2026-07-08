@@ -2058,3 +2058,134 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenericDirectMultiReturnForwardingCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+ForwardSwap :: task <T type>(a T, b T) T, T {
+    return Swap<T>(a, b)
+}
+
+Main :: task() {
+    x, y := ForwardSwap<int>(1, 5)
+
+    assert(x == 5)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"typedef struct ForwardSwap_int_Result {",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b);",
+		"ForwardSwap_int_Result ForwardSwap_int(intptr_t a, intptr_t b);",
+		"ForwardSwap_int_Result ForwardSwap_int(intptr_t a, intptr_t b) {",
+		"Swap_int_Result __seal_forward_result_",
+		"= Swap_int(a, b);",
+		"ForwardSwap_int_Result __seal_return_value_",
+		"._0 = __seal_forward_result_",
+		"._1 = __seal_forward_result_",
+		"return __seal_return_value_",
+		"ForwardSwap_int_Result __seal_multi_result_",
+		"= ForwardSwap_int(1, 5);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskParamDirectMultiReturnForwardingCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+SwapInt :: task(a int, b int) int, int {
+    return b, a
+}
+
+ForwardWith :: task <F task[(int, int) int, int]>(a int, b int) int, int {
+    return F(a, b)
+}
+
+Main :: task() {
+    x, y := ForwardWith<SwapInt>(1, 5)
+
+    assert(x == 5)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct SwapInt_Result {",
+		"typedef struct ForwardWith_SwapInt_Result {",
+		"SwapInt_Result SwapInt(intptr_t a, intptr_t b);",
+		"ForwardWith_SwapInt_Result ForwardWith_SwapInt(intptr_t a, intptr_t b);",
+		"ForwardWith_SwapInt_Result ForwardWith_SwapInt(intptr_t a, intptr_t b) {",
+		"SwapInt_Result __seal_forward_result_",
+		"= SwapInt(a, b);",
+		"ForwardWith_SwapInt_Result __seal_return_value_",
+		"._0 = __seal_forward_result_",
+		"._1 = __seal_forward_result_",
+		"return __seal_return_value_",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskParamSpecializedGenericDirectMultiReturnForwardingCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+ForwardWith :: task <F task[(int, int) int, int]>(a int, b int) int, int {
+    return F(a, b)
+}
+
+Main :: task() {
+    x, y := ForwardWith<Swap<int>>(1, 5)
+
+    assert(x == 5)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"typedef struct ForwardWith_Swap_int_Result {",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b);",
+		"ForwardWith_Swap_int_Result ForwardWith_Swap_int(intptr_t a, intptr_t b);",
+		"ForwardWith_Swap_int_Result ForwardWith_Swap_int(intptr_t a, intptr_t b) {",
+		"Swap_int_Result __seal_forward_result_",
+		"= Swap_int(a, b);",
+		"ForwardWith_Swap_int_Result __seal_return_value_",
+		"._0 = __seal_forward_result_",
+		"._1 = __seal_forward_result_",
+		"return __seal_return_value_",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}

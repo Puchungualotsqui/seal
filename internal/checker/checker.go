@@ -1945,6 +1945,26 @@ func (c *Checker) taskHasDefaultParameters(taskType *Type) bool {
 func (c *Checker) checkReturnStmt(scope *Scope, s *ast.ReturnStmt) {
 	expected := c.currentResults
 
+	if len(s.Values) == 1 && len(expected) > 1 {
+		if call, ok := s.Values[0].(*ast.CallExpr); ok {
+			results := c.checkCallResultTypes(scope, call)
+
+			if len(results) != len(expected) {
+				c.diags.Add(
+					s.Span(),
+					fmt.Sprintf("return count mismatch: expected %d value(s), got %d", len(expected), len(results)),
+				)
+				return
+			}
+
+			for i, result := range results {
+				c.checkAssignable(expected[i], result, s.Values[0].Span())
+			}
+
+			return
+		}
+	}
+
 	if len(s.Values) != len(expected) {
 		c.diags.Add(
 			s.Span(),
