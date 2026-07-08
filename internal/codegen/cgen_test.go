@@ -1517,3 +1517,204 @@ Main :: task() {
 		t.Fatalf("expected generic buffer index access, got:\n%s", out)
 	}
 }
+
+func TestGenerateGenericTaskUsesCastTypeParam(t *testing.T) {
+	out, reporter := generate(t, `
+Id :: distinct int
+
+Wrap :: task <T type>(value int) T {
+	return cast<T>(value)
+}
+
+Main :: task() {
+	id: Id = Wrap<Id>(10)
+	assert(id == cast<Id>(10))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Id Wrap_Id(intptr_t value);",
+		"Id Wrap_Id(intptr_t value) {",
+		"Id __seal_return_value_",
+		"return __seal_return_value_",
+		"Id id = Wrap_Id(10);",
+		"assert((id == ((Id)(10))));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericTaskCallsGenericTaskWithTypeParam(t *testing.T) {
+	out, reporter := generate(t, `
+Identity :: task <T type>(value T) T {
+	return value
+}
+
+Forward :: task <T type>(value T) T {
+	return Identity<T>(value)
+}
+
+Main :: task() {
+	a := Forward<int>(10)
+	b := Forward<string>("hello")
+
+	assert(a == 10)
+	assert(size(b) > 0)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t Identity_int(intptr_t value);",
+		"sealString Identity_string(sealString value);",
+		"intptr_t Forward_int(intptr_t value);",
+		"sealString Forward_string(sealString value);",
+		"return __seal_return_value_",
+		"Identity_int(value)",
+		"Identity_string(value)",
+		"intptr_t a = Forward_int(10);",
+		"sealString b = Forward_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericTaskUsesGenericStructOnlyInBody(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+	value T
+}
+
+MakeAndRead :: task <T type>(value T) T {
+	box: Box<T> = Box<T>{value = value}
+	return box.value
+}
+
+Main :: task() {
+	x := MakeAndRead<int>(42)
+	assert(x == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Box_int {",
+		"intptr_t value;",
+		"} Box_int;",
+		"intptr_t MakeAndRead_int(intptr_t value);",
+		"intptr_t MakeAndRead_int(intptr_t value) {",
+		"Box_int box = (Box_int){.value = value};",
+		"return __seal_return_value_",
+		"intptr_t x = MakeAndRead_int(42);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericTaskDefaultParameterUsesGenericType(t *testing.T) {
+	out, reporter := generate(t, `
+Id :: distinct int
+
+WithDefault :: task <T type>(value T = cast<T>(7)) T {
+	return value
+}
+
+Main :: task() {
+	id: Id = WithDefault<Id>()
+	assert(id == cast<Id>(7))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Id WithDefault_Id(Id value);",
+		"Id WithDefault_Id(Id value) {",
+		"Id id = WithDefault_Id(((Id)(7)));",
+		"assert((id == ((Id)(7))));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateGenericTaskNestedGenericStructInReturn(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+	value T
+}
+
+Pair :: struct <A type, B type> {
+	first A
+	second B
+}
+
+MakeNested :: task <T type>(value T) Box<Pair<int, T>> {
+	return Box<Pair<int, T>>{
+		value = Pair<int, T>{
+			first = 1,
+			second = value,
+		},
+	}
+}
+
+Main :: task() {
+	nested := MakeNested<string>("hello")
+	pair := nested.value
+	assert(pair.first == 1)
+	assert(size(pair.second) > 0)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Pair_int_string {",
+		"intptr_t first;",
+		"sealString second;",
+		"} Pair_int_string;",
+		"typedef struct Box_Pair_int_string {",
+		"Pair_int_string value;",
+		"} Box_Pair_int_string;",
+		"Box_Pair_int_string MakeNested_string(sealString value);",
+		"Box_Pair_int_string MakeNested_string(sealString value) {",
+		"return __seal_return_value_",
+		"Box_Pair_int_string nested = MakeNested_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});",
+		"Pair_int_string pair = (nested).value;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
+}

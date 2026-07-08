@@ -391,26 +391,135 @@ func (g *Generator) collect(file *ast.File) {
 }
 
 func (g *Generator) collectGenericTaskInstanceTypes() {
-	names := make([]string, 0, len(g.genericTasks))
-	for name := range g.genericTasks {
-		names = append(names, name)
+	seen := map[string]bool{}
+
+	for {
+		names := make([]string, 0, len(g.genericTasks))
+		for name := range g.genericTasks {
+			if !seen[name] {
+				names = append(names, name)
+			}
+		}
+
+		if len(names) == 0 {
+			return
+		}
+
+		sort.Strings(names)
+
+		for _, name := range names {
+			seen[name] = true
+
+			info := g.genericTasks[name]
+			if info == nil || info.Decl == nil {
+				continue
+			}
+
+			subst := genericTaskSubstForCGen(info.Decl.GenericParams, info.Args)
+
+			for _, param := range info.Decl.Params {
+				g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(param.Type, subst))
+
+				if param.HasDefault {
+					g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(param.Default, subst))
+				}
+			}
+
+			for _, result := range info.Decl.Results {
+				g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(result, subst))
+			}
+
+			g.collectGenericStructInstancesFromBlockWithGenericArgs(info.Decl.Body, subst)
+		}
 	}
-	sort.Strings(names)
+}
 
-	for _, name := range names {
-		info := g.genericTasks[name]
-		if info == nil || info.Decl == nil {
-			continue
+func (g *Generator) collectGenericStructInstancesFromBlockWithGenericArgs(block *ast.BlockStmt, subst map[string]ast.GenericArg) {
+	if block == nil {
+		return
+	}
+
+	for _, stmt := range block.Stmts {
+		g.collectGenericStructInstancesFromStmtWithGenericArgs(stmt, subst)
+	}
+}
+
+func (g *Generator) collectGenericStructInstancesFromStmtWithGenericArgs(stmt ast.Stmt, subst map[string]ast.GenericArg) {
+	switch s := stmt.(type) {
+	case *ast.DeclStmt:
+		// Local declarations are not supported by this C backend phase yet.
+
+	case *ast.BlockStmt:
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(s, subst)
+
+	case *ast.ReturnStmt:
+		for _, value := range s.Values {
+			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(value, subst))
 		}
 
-		subst := genericTaskSubstForCGen(info.Decl.GenericParams, info.Args)
+	case *ast.DeferStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Call, subst))
 
-		for _, param := range info.Decl.Params {
-			_ = g.cTypeFromAstWithGenericArgs(param.Type, subst)
+	case *ast.SealStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Target, subst))
+
+	case *ast.ExprStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Expr, subst))
+
+	case *ast.MultiVarDeclStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Value, subst))
+
+	case *ast.AssignStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Left, subst))
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Right, subst))
+
+	case *ast.VarDeclStmt:
+		if s.HasType {
+			g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(s.Type, subst))
 		}
 
-		for _, result := range info.Decl.Results {
-			_ = g.cTypeFromAstWithGenericArgs(result, subst)
+		if s.HasValue {
+			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Value, subst))
+		}
+
+	case *ast.IfStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Cond, subst))
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(s.Then, subst)
+
+		if s.Else != nil {
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Else, subst)
+		}
+
+	case *ast.ForStmt:
+		if s.Init != nil {
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Init, subst)
+		}
+
+		if s.Cond != nil {
+			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Cond, subst))
+		}
+
+		if s.Post != nil {
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Post, subst)
+		}
+
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(s.Body, subst)
+
+	case *ast.SwitchStmt:
+		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Target, subst))
+
+		for _, swCase := range s.Cases {
+			if swCase.UnionMember != nil {
+				g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(swCase.UnionMember, subst))
+			}
+
+			if swCase.Expr != nil {
+				g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(swCase.Expr, subst))
+			}
+
+			for _, bodyStmt := range swCase.Body {
+				g.collectGenericStructInstancesFromStmtWithGenericArgs(bodyStmt, subst)
+			}
 		}
 	}
 }
@@ -909,7 +1018,11 @@ func (g *Generator) substituteExprForCGen(expr ast.Expr, subst map[string]ast.Ge
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if arg, ok := subst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
-			return arg.Expr
+			if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+				return e
+			}
+
+			return g.substituteExprForCGen(arg.Expr, subst)
 		}
 
 		return e
@@ -929,6 +1042,18 @@ func (g *Generator) substituteExprForCGen(expr ast.Expr, subst map[string]ast.Ge
 			Loc:   e.Loc,
 		}
 
+	case *ast.CallExpr:
+		args := make([]ast.Expr, 0, len(e.Args))
+		for _, arg := range e.Args {
+			args = append(args, g.substituteExprForCGen(arg, subst))
+		}
+
+		return &ast.CallExpr{
+			Callee: g.substituteExprForCGen(e.Callee, subst),
+			Args:   args,
+			Loc:    e.Loc,
+		}
+
 	case *ast.GenericExpr:
 		args := make([]ast.GenericArg, 0, len(e.Args))
 		for _, arg := range e.Args {
@@ -939,6 +1064,58 @@ func (g *Generator) substituteExprForCGen(expr ast.Expr, subst map[string]ast.Ge
 			Base: g.substituteExprForCGen(e.Base, subst),
 			Args: args,
 			Loc:  e.Loc,
+		}
+
+	case *ast.SpreadExpr:
+		return &ast.SpreadExpr{
+			Expr: g.substituteExprForCGen(e.Expr, subst),
+			Loc:  e.Loc,
+		}
+
+	case *ast.SelectorExpr:
+		return &ast.SelectorExpr{
+			Left: g.substituteExprForCGen(e.Left, subst),
+			Name: e.Name,
+			Loc:  e.Loc,
+		}
+
+	case *ast.IndexExpr:
+		return &ast.IndexExpr{
+			Left:  g.substituteExprForCGen(e.Left, subst),
+			Index: g.substituteExprForCGen(e.Index, subst),
+			Loc:   e.Loc,
+		}
+
+	case *ast.ArrayLiteralExpr:
+		values := make([]ast.Expr, 0, len(e.Values))
+		for _, value := range e.Values {
+			values = append(values, g.substituteExprForCGen(value, subst))
+		}
+
+		return &ast.ArrayLiteralExpr{
+			Values: values,
+			Loc:    e.Loc,
+		}
+
+	case *ast.CompoundLiteralExpr:
+		fields := make([]ast.LiteralField, 0, len(e.Fields))
+		for _, field := range e.Fields {
+			fields = append(fields, ast.LiteralField{
+				Name:  field.Name,
+				Value: g.substituteExprForCGen(field.Value, subst),
+			})
+		}
+
+		values := make([]ast.Expr, 0, len(e.Values))
+		for _, value := range e.Values {
+			values = append(values, g.substituteExprForCGen(value, subst))
+		}
+
+		return &ast.CompoundLiteralExpr{
+			Type:   g.substituteTypeAstForCGen(e.Type, subst),
+			Fields: fields,
+			Values: values,
+			Loc:    e.Loc,
 		}
 	}
 
@@ -1102,6 +1279,24 @@ func typeNameFromGenericArg(arg ast.GenericArg) string {
 }
 
 func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
+	if g.genericSubst != nil {
+		switch arg.Kind {
+		case ast.GenericArgExpr:
+			if id, ok := arg.Expr.(*ast.IdentExpr); ok {
+				if replacement, exists := g.genericSubst[id.Name.Name]; exists {
+					if genericArgIsSingleNameForCGen(replacement, id.Name.Name) {
+						return CInvalid
+					}
+
+					return g.cTypeFromGenericArgWithGenericArgs(replacement, g.genericSubst)
+				}
+			}
+
+		case ast.GenericArgType:
+			return g.cTypeFromAstWithGenericArgs(arg.Type, g.genericSubst)
+		}
+	}
+
 	switch arg.Kind {
 	case ast.GenericArgType:
 		if arg.Type == nil {
@@ -1150,7 +1345,7 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 		case *ast.SelectorExpr:
 			if id, ok := e.Left.(*ast.IdentExpr); ok {
 				if pkg := g.packages[id.Name.Name]; pkg != nil {
-					// Package type export is not in cgen.PackageInfo yet.
+					_ = pkg
 					g.error(e.Span(), "package-qualified type arguments are not supported by C codegen yet")
 					return CInvalid
 				}
@@ -1166,7 +1361,7 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 				return CInvalid
 			}
 
-			return g.cTypeFromAst(typ)
+			return g.cTypeFromAstInContext(typ)
 
 		default:
 			g.error(arg.Span(), "expected type argument")
@@ -1626,14 +1821,23 @@ func (g *Generator) emitGenericTaskPrototypes() {
 }
 
 func (g *Generator) emitGenericTasks() {
-	names := make([]string, 0, len(g.genericTasks))
-	for name := range g.genericTasks {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	for {
+		names := make([]string, 0, len(g.genericTasks))
+		for name := range g.genericTasks {
+			if !g.emittedGenericTasks[name] {
+				names = append(names, name)
+			}
+		}
 
-	for _, name := range names {
-		g.emitGenericTaskInstance(name)
+		if len(names) == 0 {
+			return
+		}
+
+		sort.Strings(names)
+
+		for _, name := range names {
+			g.emitGenericTaskInstance(name)
+		}
 	}
 }
 
@@ -2900,8 +3104,20 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		if _, ok := g.scope.lookup(e.Name.Name); ok {
-			return e.Name.Name
+		if g.scope != nil {
+			if _, ok := g.scope.lookup(e.Name.Name); ok {
+				return e.Name.Name
+			}
+		}
+
+		if g.genericSubst != nil {
+			if arg, ok := g.genericSubst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
+				if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+					return e.Name.Name
+				}
+
+				return g.emitExpr(arg.Expr, expected)
+			}
 		}
 
 		return e.Name.Name
@@ -3155,7 +3371,7 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 	return g.emitCallExprWithArgs(e, nil)
 }
 
-func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr) string {
+func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr, preparedArgs []string) string {
 	id, ok := gen.Base.(*ast.IdentExpr)
 	if !ok {
 		g.error(gen.Base.Span(), "unsupported generic callee")
@@ -3172,12 +3388,25 @@ func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr) strin
 		return "0"
 	}
 
-	name := g.registerGenericTaskInstance(info.Decl, gen.Args)
-	subst := genericTaskSubstForCGen(info.GenericParams, gen.Args)
+	callArgs := gen.Args
+	if g.genericSubst != nil {
+		callArgs = make([]ast.GenericArg, 0, len(gen.Args))
+		for _, arg := range gen.Args {
+			callArgs = append(callArgs, g.substituteGenericArgForCGen(arg, g.genericSubst))
+		}
+	}
+
+	name := g.registerGenericTaskInstance(info.Decl, callArgs)
+	subst := genericTaskSubstForCGen(info.GenericParams, callArgs)
 
 	var outArgs []string
 
 	for i, arg := range args {
+		if preparedArgs != nil && i < len(preparedArgs) {
+			outArgs = append(outArgs, preparedArgs[i])
+			continue
+		}
+
 		expected := (*CType)(nil)
 
 		if i < len(info.Decl.Params) {
@@ -3188,12 +3417,24 @@ func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr) strin
 		outArgs = append(outArgs, g.emitExpr(arg, expected))
 	}
 
+	for i := len(args); i < len(info.Decl.Params); i++ {
+		param := info.Decl.Params[i]
+		if !param.HasDefault {
+			continue
+		}
+
+		expected := g.cTypeFromAstWithGenericArgs(param.Type, subst)
+		defaultExpr := g.substituteExprForCGen(param.Default, subst)
+
+		outArgs = append(outArgs, g.emitExpr(defaultExpr, &expected))
+	}
+
 	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
 }
 
 func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return g.emitGenericCall(gen, e.Args)
+		return g.emitGenericCall(gen, e.Args, preparedArgs)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
@@ -3289,7 +3530,12 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 		return "0"
 	}
 
-	target := g.cTypeFromGenericArg(gen.Args[0])
+	targetArg := gen.Args[0]
+	if g.genericSubst != nil {
+		targetArg = g.substituteGenericArgForCGen(targetArg, g.genericSubst)
+	}
+
+	target := g.cTypeFromGenericArg(targetArg)
 	value := g.emitExpr(args[0], nil)
 
 	switch task.Kind {
@@ -4185,8 +4431,20 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		if v, ok := g.scope.lookup(e.Name.Name); ok {
-			return v.Type
+		if g.scope != nil {
+			if v, ok := g.scope.lookup(e.Name.Name); ok {
+				return v.Type
+			}
+		}
+
+		if g.genericSubst != nil {
+			if arg, ok := g.genericSubst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
+				if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+					return CInvalid
+				}
+
+				return g.inferExprType(arg.Expr, expected)
+			}
 		}
 
 		if typ, ok := g.consts[e.Name.Name]; ok {
@@ -4327,7 +4585,12 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 
 				case builtin.TaskAnyAs, builtin.TaskCast:
 					if len(gen.Args) == 1 {
-						return g.cTypeFromGenericArg(gen.Args[0])
+						targetArg := gen.Args[0]
+						if g.genericSubst != nil {
+							targetArg = g.substituteGenericArgForCGen(targetArg, g.genericSubst)
+						}
+
+						return g.cTypeFromGenericArg(targetArg)
 					}
 				}
 
@@ -4880,10 +5143,19 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 }
 
 func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
+	args := typ.Args
+
+	if g.genericSubst != nil {
+		args = make([]ast.GenericArg, 0, len(typ.Args))
+		for _, arg := range typ.Args {
+			args = append(args, g.substituteGenericArgForCGen(arg, g.genericSubst))
+		}
+	}
+
 	baseName := typeNameFromAst(typ.Base)
 
 	if decl := g.structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
-		name := g.registerGenericStructInstance(decl, typ.Args)
+		name := g.registerGenericStructInstance(decl, args)
 
 		return CType{
 			Name:     name,
@@ -4893,13 +5165,6 @@ func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
 
 	base := g.cTypeFromAst(typ.Base)
 
-	// Temporary support for generic interfaces:
-	//
-	//     Enemy<Goblin>
-	//
-	// The runtime object is still the base interface representation:
-	//
-	//     Enemy
 	if g.isInterfaceCType(base) {
 		return base
 	}
@@ -4950,21 +5215,33 @@ func (g *Generator) specializedStructCName(decl *ast.StructDecl, args []ast.Gene
 }
 
 func (g *Generator) genericTypeArgCName(arg ast.GenericArg) string {
+	if g.genericSubst != nil {
+		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
+	}
+
 	switch arg.Kind {
 	case ast.GenericArgType:
-		return sanitizeCName(g.cTypeFromAst(arg.Type).SealName)
+		return sanitizeCName(g.cTypeFromAstInContext(arg.Type).SealName)
 
 	case ast.GenericArgExpr:
 		switch e := arg.Expr.(type) {
 		case *ast.IdentExpr:
-			return sanitizeCName(e.Name.Name)
+			name := e.Name.Name
+
+			if g.genericSubst != nil {
+				if replacement, exists := g.genericSubst[name]; exists {
+					return sanitizeCName(g.cTypeFromGenericArgWithGenericArgs(replacement, g.genericSubst).SealName)
+				}
+			}
+
+			return sanitizeCName(name)
 
 		case *ast.SelectorExpr:
 			return sanitizeCName(e.Name.Name)
 
 		case *ast.GenericExpr:
 			if typ := typeAstFromExprForCGen(e); typ != nil {
-				return sanitizeCName(g.cTypeFromAst(typ).SealName)
+				return sanitizeCName(g.cTypeFromAstInContext(typ).SealName)
 			}
 		}
 	}
