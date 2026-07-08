@@ -1667,6 +1667,127 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	c.currentResults = oldResults
 }
 
+func (c *Checker) taskTypeFromGenericSignature(scope *Scope, generic *Type, args []ast.GenericArg, span source.Span) *Type {
+	if generic == nil || generic.Kind != TypeTask {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    "<invalid>",
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	if len(args) != len(generic.GenericParams) {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    generic.Name,
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	argSubst := genericArgSubst(generic.GenericParams, args)
+	typeSubst := map[string]*Type{}
+
+	for i, param := range generic.GenericParams {
+		if i >= len(args) {
+			break
+		}
+
+		switch param.Category {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			typeSubst[param.Name.Name] = c.typeFromGenericArg(scope, args[i])
+		}
+	}
+
+	var params []*Type
+	for _, param := range generic.Params {
+		params = append(params, c.substituteGenericSignatureType(scope, param, typeSubst, argSubst))
+	}
+
+	var results []*Type
+	for _, result := range generic.Results {
+		results = append(results, c.substituteGenericSignatureType(scope, result, typeSubst, argSubst))
+	}
+
+	paramDefaults := make([]ast.Expr, 0, len(generic.ParamDefaults))
+	for _, defaultExpr := range generic.ParamDefaults {
+		paramDefaults = append(paramDefaults, c.substituteGenericExpr(defaultExpr, argSubst))
+	}
+
+	return &Type{
+		Kind:            TypeTask,
+		Name:            c.specializedTypeName(generic.Name, args),
+		Params:          params,
+		Results:         results,
+		RequiredParams:  generic.RequiredParams,
+		ParamDefaults:   paramDefaults,
+		ParamHasDefault: append([]bool(nil), generic.ParamHasDefault...),
+		ParamIsVariadic: append([]bool(nil), generic.ParamIsVariadic...),
+		IsVariadic:      generic.IsVariadic,
+		IsExtern:        generic.IsExtern,
+		ExternName:      generic.ExternName,
+		IsPure:          generic.IsPure,
+		IsIntrinsic:     generic.IsIntrinsic,
+		IsTrustedPure:   generic.IsTrustedPure,
+	}
+}
+
+func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSubst map[string]*Type, argSubst map[string]ast.GenericArg) *Type {
+	if typ == nil {
+		return InvalidType
+	}
+
+	switch typ.Kind {
+	case TypeTypeParam:
+		if replacement := typeSubst[typ.Name]; replacement != nil {
+			return replacement
+		}
+
+		return typ
+
+	case TypePointer:
+		return &Type{
+			Kind: TypePointer,
+			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
+		}
+
+	case TypeArray:
+		return &Type{
+			Kind:     TypeArray,
+			Name:     typ.Name,
+			Elem:     c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
+			Len:      typ.Len,
+			Inferred: typ.Inferred,
+		}
+
+	case TypeVariadic:
+		return &Type{
+			Kind: TypeVariadic,
+			Name: typ.Name,
+			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
+		}
+
+	case TypeTask:
+		out := *typ
+		out.Params = nil
+		out.Results = nil
+
+		for _, param := range typ.Params {
+			out.Params = append(out.Params, c.substituteGenericSignatureType(scope, param, typeSubst, argSubst))
+		}
+
+		for _, result := range typ.Results {
+			out.Results = append(out.Results, c.substituteGenericSignatureType(scope, result, typeSubst, argSubst))
+		}
+
+		return &out
+
+	default:
+		return typ
+	}
+}
+
 func (c *Checker) taskTypeFromGenericCall(scope *Scope, d *ast.TaskDecl, args []ast.GenericArg) *Type {
 	if d == nil {
 		return &Type{
@@ -2670,43 +2791,39 @@ func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTy
 }
 
 func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) []*Type {
-	id, ok := gen.Base.(*ast.IdentExpr)
-	if !ok {
-		c.diags.Add(gen.Base.Span(), "unsupported generic callee")
-		return []*Type{InvalidType}
+	if id, ok := gen.Base.(*ast.IdentExpr); ok {
+		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
+			actualTypes, _ := c.checkCallArgumentTypes(scope, args)
+			result := c.checkGenericIntrinsicCall(scope, gen, actualTypes, args, span)
+			return []*Type{result}
+		}
 	}
 
-	if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
-		actualTypes, _ := c.checkCallArgumentTypes(scope, args)
-		result := c.checkGenericIntrinsicCall(scope, gen, actualTypes, args, span)
-		return []*Type{result}
-	}
-
-	sym := scope.Lookup(id.Name.Name)
+	sym := c.taskSymbolFromGenericExprBase(scope, gen.Base)
 	if sym == nil {
-		c.diags.Add(id.Span(), fmt.Sprintf("undefined generic task %q", id.Name.Name))
-		return []*Type{InvalidType}
-	}
-
-	if sym.Kind != SymbolTask {
-		c.diags.Add(id.Span(), fmt.Sprintf("%q is not a generic task", id.Name.Name))
 		return []*Type{InvalidType}
 	}
 
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
-		c.diags.Add(id.Span(), fmt.Sprintf("%q is not a valid task", id.Name.Name))
+		c.diags.Add(gen.Base.Span(), "generic callee has invalid task type")
+		return []*Type{InvalidType}
+	}
+
+	if len(sym.Type.GenericParams) == 0 {
+		c.diags.Add(gen.Span(), fmt.Sprintf("task %q is not generic", sym.Name))
 		return []*Type{InvalidType}
 	}
 
 	c.checkGenericArgsAgainstParams(scope, gen.Args, sym.Type.GenericParams, gen.Span())
 
 	taskDecl, _ := sym.Node.(*ast.TaskDecl)
-	if taskDecl == nil {
-		c.diags.Add(id.Span(), fmt.Sprintf("%q has no task declaration", id.Name.Name))
-		return []*Type{InvalidType}
-	}
 
-	instantiated := c.taskTypeFromGenericCall(scope, taskDecl, gen.Args)
+	var instantiated *Type
+	if taskDecl != nil {
+		instantiated = c.taskTypeFromGenericCall(scope, taskDecl, gen.Args)
+	} else {
+		instantiated = c.taskTypeFromGenericSignature(scope, sym.Type, gen.Args, gen.Span())
+	}
 
 	c.checkGenericTaskCallArguments(scope, instantiated, args, span)
 
@@ -4389,19 +4506,19 @@ func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 			return InvalidType
 		}
 
+		if len(sym.Type.GenericParams) == 0 {
+			c.diags.Add(e.Span(), fmt.Sprintf("task %q is not generic", sym.Name))
+			return InvalidType
+		}
+
 		c.checkGenericArgsAgainstParams(scope, e.Args, sym.Type.GenericParams, e.Span())
 
 		taskDecl, _ := sym.Node.(*ast.TaskDecl)
-		if taskDecl == nil {
-			if len(sym.Type.GenericParams) > 0 {
-				c.diags.Add(e.Base.Span(), fmt.Sprintf("cannot specialize imported generic task %q without its declaration", sym.Name))
-				return InvalidType
-			}
-
-			return sym.Type
+		if taskDecl != nil {
+			return c.taskTypeFromGenericCall(scope, taskDecl, e.Args)
 		}
 
-		return c.taskTypeFromGenericCall(scope, taskDecl, e.Args)
+		return c.taskTypeFromGenericSignature(scope, sym.Type, e.Args, e.Span())
 	}
 
 	c.diags.Add(arg.Span(), "expected task argument")
@@ -5839,11 +5956,112 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 			SymbolType,
 			SymbolTask,
 			SymbolOverload:
-			info.Symbols[symbolName] = sym
+			info.Symbols[symbolName] = exportSymbolSignatureOnly(sym)
 		}
 	}
 
 	return info
+}
+
+func exportSymbolSignatureOnly(sym *Symbol) *Symbol {
+	if sym == nil {
+		return nil
+	}
+
+	out := *sym
+
+	// Imported generic tasks must be type-checkable from their typed
+	// signatures, not from their source AST bodies.
+	if out.Kind == SymbolTask {
+		out.Node = nil
+	}
+
+	if out.Type != nil {
+		out.Type = cloneExportType(out.Type, map[*Type]*Type{})
+	}
+
+	if out.Overload != nil {
+		overload := *out.Overload
+		overload.Candidates = nil
+
+		for _, candidate := range out.Overload.Candidates {
+			overload.Candidates = append(overload.Candidates, exportSymbolSignatureOnly(candidate))
+		}
+
+		out.Overload = &overload
+	}
+
+	return &out
+}
+
+func cloneExportType(t *Type, seen map[*Type]*Type) *Type {
+	if t == nil {
+		return nil
+	}
+
+	if cached := seen[t]; cached != nil {
+		return cached
+	}
+
+	out := *t
+	seen[t] = &out
+
+	out.Elem = cloneExportType(t.Elem, seen)
+	out.Underlying = cloneExportType(t.Underlying, seen)
+
+	out.Fields = nil
+	for _, field := range t.Fields {
+		out.Fields = append(out.Fields, FieldInfo{
+			Name: field.Name,
+			Type: cloneExportType(field.Type, seen),
+			Span: field.Span,
+		})
+	}
+
+	out.Members = nil
+	for _, member := range t.Members {
+		out.Members = append(out.Members, cloneExportType(member, seen))
+	}
+
+	out.InterfaceRequirements = nil
+	for _, req := range t.InterfaceRequirements {
+		cloned := InterfaceRequirementInfo{
+			Name: req.Name,
+			Span: req.Span,
+		}
+
+		for _, param := range req.Params {
+			cloned.Params = append(cloned.Params, cloneExportType(param, seen))
+		}
+
+		for _, result := range req.Results {
+			cloned.Results = append(cloned.Results, cloneExportType(result, seen))
+		}
+
+		out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+	}
+
+	out.Implements = nil
+	for _, iface := range t.Implements {
+		out.Implements = append(out.Implements, cloneExportType(iface, seen))
+	}
+
+	out.Params = nil
+	for _, param := range t.Params {
+		out.Params = append(out.Params, cloneExportType(param, seen))
+	}
+
+	out.Results = nil
+	for _, result := range t.Results {
+		out.Results = append(out.Results, cloneExportType(result, seen))
+	}
+
+	out.ParamDefaults = append([]ast.Expr(nil), t.ParamDefaults...)
+	out.ParamHasDefault = append([]bool(nil), t.ParamHasDefault...)
+	out.ParamIsVariadic = append([]bool(nil), t.ParamIsVariadic...)
+	out.GenericParams = append([]ast.GenericParam(nil), t.GenericParams...)
+
+	return &out
 }
 
 func DebugSummary(scope *Scope) string {

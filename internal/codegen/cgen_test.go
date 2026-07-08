@@ -2189,3 +2189,190 @@ Main :: task() {
 		}
 	}
 }
+
+func generateWithPackages(t *testing.T, input string, packages map[string]*PackageInfo) (string, *diag.Reporter) {
+	t.Helper()
+
+	file := source.NewFile("test.seal", input)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := checker.New(reporter)
+	scope := c.CheckFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	_ = scope
+
+	g := NewWithPackages(reporter, "", packages)
+	out := g.Generate(parsed)
+
+	return out, reporter
+}
+
+func exportCGenPackage(t *testing.T, packageName string, input string) (*PackageInfo, *checker.PackageInfo) {
+	t.Helper()
+
+	file := source.NewFile(packageName+".seal", input)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := checker.New(reporter)
+	scope := c.CheckFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	return ExportPackageInfo(packageName, parsed, reporter), checker.ExportPackage(packageName, scope)
+}
+
+func TestImportedGenericTaskSpecializationCodegen(t *testing.T) {
+	mathPkg, _ := exportCGenPackage(t, "math", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    x := math.Identity<int>(10)
+    assert(x == 10)
+}
+`, map[string]*PackageInfo{
+		"math": mathPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t math_Identity_int(intptr_t value);",
+		"intptr_t x = math_Identity_int(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericMultiReturnTaskSpecializationCodegen(t *testing.T) {
+	mathPkg, _ := exportCGenPackage(t, "math", `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    x, y := math.Swap<int>(1, 5)
+
+    assert(x == 5)
+    assert(y == 1)
+}
+`, map[string]*PackageInfo{
+		"math": mathPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct math_Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"math_Swap_int_Result math_Swap_int(intptr_t a, intptr_t b);",
+		"math_Swap_int_Result __seal_multi_result_",
+		"= math_Swap_int(1, 5);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericTaskArgumentCodegen(t *testing.T) {
+	mathPkg, _ := exportCGenPackage(t, "math", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<math.Identity<int>>(10)
+    assert(x == 10)
+}
+`, map[string]*PackageInfo{
+		"math": mathPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t math_Identity_int(intptr_t value);",
+		"intptr_t Apply_math_Identity_int(intptr_t value);",
+		"return math_Identity_int(value);",
+		"intptr_t x = Apply_math_Identity_int(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}

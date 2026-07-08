@@ -113,9 +113,21 @@ func (s *scope) lookup(name string) (valueInfo, bool) {
 	return valueInfo{}, false
 }
 
+type ImportedGenericTaskInstance struct {
+	PackageName string
+	TaskName    string
+	Name        string
+	Info        TaskInfo
+	Args        []ast.GenericArg
+}
+
 type TaskInfo struct {
 	Decl          *ast.TaskDecl
 	GenericParams []ast.GenericParam
+
+	ParamTypeAsts  []ast.Type
+	ResultTypeAsts []ast.Type
+	ParamNames     []string
 
 	ReturnType  CType
 	ReturnTypes []CType
@@ -179,7 +191,8 @@ type Generator struct {
 	genericTasks          map[string]*GenericTaskInstance
 	emittedGenericTasks   map[string]bool
 
-	genericSubst map[string]ast.GenericArg
+	genericSubst         map[string]ast.GenericArg
+	importedGenericTasks map[string]*ImportedGenericTaskInstance
 
 	tasks     map[string]TaskInfo
 	overloads map[string][]string
@@ -217,6 +230,7 @@ func NewWithPackages(diags *diag.Reporter, packageName string, packages map[stri
 		impls:                 map[string][]string{},
 		genericStructs:        map[string]*GenericStructInstance{},
 		emittedGenericStructs: map[string]bool{},
+		importedGenericTasks:  map[string]*ImportedGenericTaskInstance{},
 		genericTasks:          map[string]*GenericTaskInstance{},
 		emittedGenericTasks:   map[string]bool{},
 		tasks:                 map[string]TaskInfo{},
@@ -274,10 +288,12 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitConstants(file)
 	g.emitImportedResultStructs()
 	g.emitResultStructs(file)
+	g.emitImportedResultStructs()
+	g.emitImportedGenericResultStructs()
+	g.emitResultStructs(file)
 	g.emitGenericResultStructs()
 	g.emitImportedTaskPrototypes()
-	g.emitTaskPrototypes(file)
-	g.emitGenericTaskPrototypes()
+	g.emitImportedGenericTaskPrototypes()
 	g.emitImplVTables()
 	g.emitStaticInterfaceDispatchers()
 	g.emitTasks(file)
@@ -343,6 +359,15 @@ func (g *Generator) collect(file *ast.File) {
 				IsPure:         d.IsPure,
 				IsIntrinsic:    d.IsIntrinsic,
 				IsTrustedPure:  d.IsTrustedPure,
+			}
+
+			for _, param := range d.Params {
+				info.ParamNames = append(info.ParamNames, param.Name.Name)
+				info.ParamTypeAsts = append(info.ParamTypeAsts, param.Type)
+			}
+
+			for _, result := range d.Results {
+				info.ResultTypeAsts = append(info.ResultTypeAsts, result)
 			}
 
 			// Generic tasks are templates. Do not lower their parameter/result
@@ -513,18 +538,25 @@ func (g *Generator) collectGenericTaskArgInstance(arg ast.GenericArg) {
 		return
 	}
 
-	id, ok := gen.Base.(*ast.IdentExpr)
-	if !ok {
-		return
-	}
+	switch base := gen.Base.(type) {
+	case *ast.IdentExpr:
+		info, ok := g.tasks[base.Name.Name]
+		if !ok || info.Decl == nil || len(info.GenericParams) == 0 {
+			return
+		}
 
-	info, ok := g.tasks[id.Name.Name]
-	if !ok || info.Decl == nil || len(info.GenericParams) == 0 {
-		return
-	}
+		g.registerGenericTaskInstance(info.Decl, gen.Args)
+		g.collectGenericTaskArgsFromParams(info.GenericParams, gen.Args)
 
-	g.registerGenericTaskInstance(info.Decl, gen.Args)
-	g.collectGenericTaskArgsFromParams(info.GenericParams, gen.Args)
+	case *ast.SelectorExpr:
+		pkgName, taskName, info, ok := g.importedGenericTaskInfoFromSelector(base)
+		if !ok {
+			return
+		}
+
+		g.registerImportedGenericTaskInstance(pkgName, taskName, info, gen.Args)
+		g.collectGenericTaskArgsFromParams(info.GenericParams, gen.Args)
+	}
 }
 
 func (g *Generator) collectGenericStructInstancesFromBlockWithGenericArgs(block *ast.BlockStmt, subst map[string]ast.GenericArg) {
@@ -838,9 +870,16 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 		}
 
 	case *ast.GenericExpr:
-		if id, ok := e.Base.(*ast.IdentExpr); ok {
-			if info, ok := g.tasks[id.Name.Name]; ok && info.Decl != nil && len(info.GenericParams) > 0 {
+		switch base := e.Base.(type) {
+		case *ast.IdentExpr:
+			if info, ok := g.tasks[base.Name.Name]; ok && info.Decl != nil && len(info.GenericParams) > 0 {
 				g.registerGenericTaskInstance(info.Decl, e.Args)
+				g.collectGenericTaskArgsFromParams(info.GenericParams, e.Args)
+			}
+
+		case *ast.SelectorExpr:
+			if pkgName, taskName, info, ok := g.importedGenericTaskInfoFromSelector(base); ok {
+				g.registerImportedGenericTaskInstance(pkgName, taskName, info, e.Args)
 				g.collectGenericTaskArgsFromParams(info.GenericParams, e.Args)
 			}
 		}
@@ -1846,6 +1885,68 @@ func (g *Generator) emitResultStructs(file *ast.File) {
 	}
 
 	if emitted {
+		g.line("")
+	}
+}
+
+func (g *Generator) emitImportedGenericResultStructs() {
+	names := make([]string, 0, len(g.importedGenericTasks))
+	for name := range g.importedGenericTasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	emitted := false
+
+	for _, name := range names {
+		info := g.importedGenericTasks[name]
+		if info == nil {
+			continue
+		}
+
+		resultTypes := g.importedGenericTaskReturnTypes(info)
+		if len(resultTypes) <= 1 {
+			continue
+		}
+
+		resultName := g.importedGenericTaskResultStructName(info.Name)
+
+		g.linef("typedef struct %s {", resultName)
+		g.indent++
+
+		for i, resultType := range resultTypes {
+			g.linef("%s;", resultType.Decl(fmt.Sprintf("_%d", i)))
+		}
+
+		g.indent--
+		g.linef("} %s;", resultName)
+		g.line("")
+
+		emitted = true
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
+func (g *Generator) emitImportedGenericTaskPrototypes() {
+	names := make([]string, 0, len(g.importedGenericTasks))
+	for name := range g.importedGenericTasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		info := g.importedGenericTasks[name]
+		if info == nil {
+			continue
+		}
+
+		g.linef("%s;", g.importedGenericTaskSignature(info))
+	}
+
+	if len(names) > 0 {
 		g.line("")
 	}
 }
@@ -3632,28 +3733,43 @@ func (g *Generator) taskCallNameFromGenericArg(arg ast.GenericArg) (string, bool
 		return cImportedTaskName(id.Name.Name, e.Name.Name, info), true
 
 	case *ast.GenericExpr:
-		id, ok := e.Base.(*ast.IdentExpr)
-		if !ok {
-			g.error(e.Base.Span(), "unsupported generic task argument")
-			return "0", true
-		}
-
-		info, ok := g.tasks[id.Name.Name]
-		if !ok || len(info.GenericParams) == 0 {
-			g.error(e.Span(), fmt.Sprintf("generic task argument %q is not supported by C codegen yet", id.Name.Name))
-			return "0", true
-		}
-
-		callArgs := e.Args
-		if g.genericSubst != nil {
-			callArgs = make([]ast.GenericArg, 0, len(e.Args))
-			for _, genericArg := range e.Args {
-				callArgs = append(callArgs, g.substituteGenericArgForCGen(genericArg, g.genericSubst))
+		switch base := e.Base.(type) {
+		case *ast.IdentExpr:
+			info, ok := g.tasks[base.Name.Name]
+			if !ok || info.Decl == nil || len(info.GenericParams) == 0 {
+				g.error(e.Span(), fmt.Sprintf("generic task argument %q is not supported by C codegen yet", base.Name.Name))
+				return "0", true
 			}
-		}
 
-		name := g.registerGenericTaskInstance(info.Decl, callArgs)
-		return name, true
+			callArgs := e.Args
+			if g.genericSubst != nil {
+				callArgs = make([]ast.GenericArg, 0, len(e.Args))
+				for _, genericArg := range e.Args {
+					callArgs = append(callArgs, g.substituteGenericArgForCGen(genericArg, g.genericSubst))
+				}
+			}
+
+			name := g.registerGenericTaskInstance(info.Decl, callArgs)
+			return name, true
+
+		case *ast.SelectorExpr:
+			pkgName, taskName, info, ok := g.importedGenericTaskInfoFromSelector(base)
+			if !ok {
+				g.error(e.Span(), "unsupported imported generic task argument")
+				return "0", true
+			}
+
+			callArgs := e.Args
+			if g.genericSubst != nil {
+				callArgs = make([]ast.GenericArg, 0, len(e.Args))
+				for _, genericArg := range e.Args {
+					callArgs = append(callArgs, g.substituteGenericArgForCGen(genericArg, g.genericSubst))
+				}
+			}
+
+			name := g.registerImportedGenericTaskInstance(pkgName, taskName, info, callArgs)
+			return name, true
+		}
 	}
 
 	g.error(arg.Span(), "unsupported generic task argument")
@@ -3941,33 +4057,57 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 }
 
 func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr, preparedArgs []string) string {
-	id, ok := gen.Base.(*ast.IdentExpr)
-	if !ok {
-		g.error(gen.Base.Span(), "unsupported generic callee")
-		return "0"
-	}
-
-	if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
-		return g.emitGenericIntrinsicCall(gen, args)
-	}
-
-	info, ok := g.tasks[id.Name.Name]
-	if !ok || len(info.GenericParams) == 0 {
-		g.error(gen.Span(), fmt.Sprintf("generic task call %q is not supported by C codegen yet", id.Name.Name))
-		return "0"
-	}
-
-	callArgs := gen.Args
-	if g.genericSubst != nil {
-		callArgs = make([]ast.GenericArg, 0, len(gen.Args))
-		for _, arg := range gen.Args {
-			callArgs = append(callArgs, g.substituteGenericArgForCGen(arg, g.genericSubst))
+	if id, ok := gen.Base.(*ast.IdentExpr); ok {
+		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
+			return g.emitGenericIntrinsicCall(gen, args)
 		}
+
+		info, ok := g.tasks[id.Name.Name]
+		if !ok || len(info.GenericParams) == 0 {
+			g.error(gen.Span(), fmt.Sprintf("generic task call %q is not supported by C codegen yet", id.Name.Name))
+			return "0"
+		}
+
+		callArgs := gen.Args
+		if g.genericSubst != nil {
+			callArgs = make([]ast.GenericArg, 0, len(gen.Args))
+			for _, arg := range gen.Args {
+				callArgs = append(callArgs, g.substituteGenericArgForCGen(arg, g.genericSubst))
+			}
+		}
+
+		name := g.registerGenericTaskInstance(info.Decl, callArgs)
+		subst := genericTaskSubstForCGen(info.GenericParams, callArgs)
+
+		return g.emitGenericCallToName(name, info.ParamTypeAsts, info.ParamDefaults, info.ParamHasDefault, subst, args, preparedArgs)
 	}
 
-	name := g.registerGenericTaskInstance(info.Decl, callArgs)
-	subst := genericTaskSubstForCGen(info.GenericParams, callArgs)
+	if selector, ok := gen.Base.(*ast.SelectorExpr); ok {
+		pkgName, taskName, info, ok := g.importedGenericTaskInfoFromSelector(selector)
+		if !ok {
+			g.error(gen.Span(), "unsupported imported generic task call")
+			return "0"
+		}
 
+		callArgs := gen.Args
+		if g.genericSubst != nil {
+			callArgs = make([]ast.GenericArg, 0, len(gen.Args))
+			for _, arg := range gen.Args {
+				callArgs = append(callArgs, g.substituteGenericArgForCGen(arg, g.genericSubst))
+			}
+		}
+
+		name := g.registerImportedGenericTaskInstance(pkgName, taskName, info, callArgs)
+		subst := genericArgSubstForCGen(info.GenericParams, callArgs)
+
+		return g.emitGenericCallToName(name, info.ParamTypeAsts, info.ParamDefaults, info.ParamHasDefault, subst, args, preparedArgs)
+	}
+
+	g.error(gen.Base.Span(), "unsupported generic callee")
+	return "0"
+}
+
+func (g *Generator) emitGenericCallToName(name string, paramTypes []ast.Type, paramDefaults []ast.Expr, paramHasDefault []bool, subst map[string]ast.GenericArg, args []ast.Expr, preparedArgs []string) string {
 	var outArgs []string
 
 	for i, arg := range args {
@@ -3978,22 +4118,25 @@ func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr, prepa
 
 		expected := (*CType)(nil)
 
-		if i < len(info.Decl.Params) {
-			paramType := g.cTypeFromAstWithGenericArgs(info.Decl.Params[i].Type, subst)
+		if i < len(paramTypes) {
+			paramType := g.cTypeFromAstWithGenericArgs(paramTypes[i], subst)
 			expected = &paramType
 		}
 
 		outArgs = append(outArgs, g.emitExpr(arg, expected))
 	}
 
-	for i := len(args); i < len(info.Decl.Params); i++ {
-		param := info.Decl.Params[i]
-		if !param.HasDefault {
+	for i := len(args); i < len(paramTypes); i++ {
+		if i >= len(paramHasDefault) || !paramHasDefault[i] {
 			continue
 		}
 
-		expected := g.cTypeFromAstWithGenericArgs(param.Type, subst)
-		defaultExpr := g.substituteExprForCGen(param.Default, subst)
+		expected := g.cTypeFromAstWithGenericArgs(paramTypes[i], subst)
+		defaultExpr := ast.Expr(nil)
+
+		if i < len(paramDefaults) {
+			defaultExpr = g.substituteExprForCGen(paramDefaults[i], subst)
+		}
 
 		outArgs = append(outArgs, g.emitExpr(defaultExpr, &expected))
 	}
@@ -4153,6 +4296,151 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
 		return "0"
 	}
+}
+
+func (g *Generator) importedGenericTaskInfoFromSelector(sel *ast.SelectorExpr) (string, string, TaskInfo, bool) {
+	id, ok := sel.Left.(*ast.IdentExpr)
+	if !ok {
+		return "", "", TaskInfo{}, false
+	}
+
+	pkg := g.packages[id.Name.Name]
+	if pkg == nil {
+		return "", "", TaskInfo{}, false
+	}
+
+	info, ok := pkg.Tasks[sel.Name.Name]
+	if !ok {
+		return "", "", TaskInfo{}, false
+	}
+
+	if len(info.GenericParams) == 0 {
+		return "", "", TaskInfo{}, false
+	}
+
+	return id.Name.Name, sel.Name.Name, info, true
+}
+
+func (g *Generator) registerImportedGenericTaskInstance(packageName string, taskName string, info TaskInfo, args []ast.GenericArg) string {
+	name := g.specializedImportedTaskCName(packageName, taskName, info, args)
+
+	if _, exists := g.importedGenericTasks[name]; exists {
+		return name
+	}
+
+	copiedArgs := append([]ast.GenericArg(nil), args...)
+
+	g.importedGenericTasks[name] = &ImportedGenericTaskInstance{
+		PackageName: packageName,
+		TaskName:    taskName,
+		Name:        name,
+		Info:        info,
+		Args:        copiedArgs,
+	}
+
+	return name
+}
+
+func (g *Generator) specializedImportedTaskCName(packageName string, taskName string, info TaskInfo, args []ast.GenericArg) string {
+	parts := []string{sanitizeCName(packageName), sanitizeCName(taskName)}
+
+	for i, arg := range args {
+		paramCategory := ast.GenericParamInvalid
+		if i < len(info.GenericParams) {
+			paramCategory = info.GenericParams[i].Category
+		}
+
+		switch paramCategory {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			parts = append(parts, g.genericTypeArgCName(arg))
+
+		case ast.GenericParamTask:
+			parts = append(parts, g.genericTaskArgCName(arg))
+
+		default:
+			parts = append(parts, genericValueArgCName(arg))
+		}
+	}
+
+	return strings.Join(parts, "_")
+}
+
+func (g *Generator) importedGenericTaskReturnTypes(info *ImportedGenericTaskInstance) []CType {
+	if info == nil {
+		return nil
+	}
+
+	subst := genericArgSubstForCGen(info.Info.GenericParams, info.Args)
+
+	results := make([]CType, 0, len(info.Info.ResultTypeAsts))
+	for _, result := range info.Info.ResultTypeAsts {
+		results = append(results, g.cTypeFromAstWithGenericArgs(result, subst))
+	}
+
+	return results
+}
+
+func (g *Generator) importedGenericTaskReturnType(info *ImportedGenericTaskInstance) CType {
+	results := g.importedGenericTaskReturnTypes(info)
+
+	if len(results) == 0 {
+		return CVoid
+	}
+
+	if len(results) == 1 {
+		return results[0]
+	}
+
+	name := g.importedGenericTaskResultStructName(info.Name)
+
+	return CType{
+		Name:     name,
+		SealName: name,
+	}
+}
+
+func (g *Generator) importedGenericTaskResultStructName(instanceName string) string {
+	return instanceName + "_Result"
+}
+
+func (g *Generator) importedGenericTaskSignature(info *ImportedGenericTaskInstance) string {
+	if info == nil {
+		return "/*invalid*/ int invalid_imported_generic(void)"
+	}
+
+	subst := genericArgSubstForCGen(info.Info.GenericParams, info.Args)
+	ret := g.importedGenericTaskReturnType(info)
+
+	var params []string
+
+	for i, paramAst := range info.Info.ParamTypeAsts {
+		paramType := g.cTypeFromAstWithGenericArgs(paramAst, subst)
+
+		name := fmt.Sprintf("arg%d", i)
+		if i < len(info.Info.ParamNames) && info.Info.ParamNames[i] != "" {
+			name = info.Info.ParamNames[i]
+		}
+
+		if i < len(info.Info.ParamIsVariadic) && info.Info.ParamIsVariadic[i] {
+			if info.Info.IsExtern {
+				params = append(params, "...")
+				break
+			}
+
+			params = append(params, g.variadicCType(paramType).Decl(name))
+			break
+		}
+
+		params = append(params, paramType.Decl(name))
+	}
+
+	if len(params) == 0 {
+		return fmt.Sprintf("%s %s(void)", ret.Name, info.Name)
+	}
+
+	return fmt.Sprintf("%s %s(%s)", ret.Name, info.Name, strings.Join(params, ", "))
 }
 
 func (g *Generator) sealTypeKindFor(t CType) (string, bool) {
