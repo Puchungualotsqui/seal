@@ -244,3 +244,82 @@ Print :: task(format string, args ...any) {
 		t.Fatalf("expected package-qualified variadic forwarding, got:\n%s", appC)
 	}
 }
+
+func TestCompilerCommandPresets(t *testing.T) {
+	path, args, err := compilerCommand(Config{
+		Compiler: "gcc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if path != "gcc" {
+		t.Fatalf("expected gcc, got %q", path)
+	}
+
+	if len(args) != 0 {
+		t.Fatalf("expected no args, got %#v", args)
+	}
+
+	path, args, err = compilerCommand(Config{
+		Compiler: "zigcc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if path != "zig" {
+		t.Fatalf("expected zig, got %q", path)
+	}
+
+	if strings.Join(args, " ") != "cc" {
+		t.Fatalf("expected cc arg, got %#v", args)
+	}
+
+	path, args, err = compilerCommand(Config{
+		Compiler:     "zigcc",
+		CompilerPath: "C:/tools/zig/zig.exe",
+		CompilerArgs: []string{"cc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if path != "C:/tools/zig/zig.exe" {
+		t.Fatalf("expected explicit zig path, got %q", path)
+	}
+
+	if strings.Join(args, " ") != "cc" {
+		t.Fatalf("expected cc arg, got %#v", args)
+	}
+}
+
+func TestCompilerConfigArgs(t *testing.T) {
+	args := compilerConfigArgs(Config{
+		Compiler:    "gcc",
+		Standard:    "c11",
+		CFlags:      []string{"-Wall"},
+		LinkFlags:   []string{"-static"},
+		IncludeDirs: []string{"include"},
+		LibraryDirs: []string{"lib"},
+		Libraries:   []string{"m"},
+		Defines:     []string{"SEAL_DEBUG=1"},
+	})
+
+	got := strings.Join(args, " ")
+	wantParts := []string{
+		"-std=c11",
+		"-Iinclude",
+		"-DSEAL_DEBUG=1",
+		"-Wall",
+		"-Llib",
+		"-lm",
+		"-static",
+	}
+
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in args %q", want, got)
+		}
+	}
+}

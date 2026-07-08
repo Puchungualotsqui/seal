@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"seal/internal/checker"
@@ -99,6 +100,10 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 		output = filepath.Join(outDir, graph.Root.Config.Name)
 	}
 
+	if runtime.GOOS == "windows" && filepath.Ext(output) == "" {
+		output += ".exe"
+	}
+
 	if !options.EmitOnly && graph.Root.Config.Kind == KindExecutable {
 		if err := compileExecutable(graph, loaded, output); err != nil {
 			return nil, err
@@ -114,12 +119,19 @@ func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error
 }
 
 func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) error {
-	compiler := graph.Root.Config.Compiler
-	if compiler == "" {
-		compiler = "cc"
+	root := graph.Root
+	if root == nil {
+		return fmt.Errorf("missing root package")
 	}
 
-	args := make([]string, 0, len(loaded)*2+2)
+	compilerPath, compilerArgs, err := compilerCommand(root.Config)
+	if err != nil {
+		return err
+	}
+
+	args := make([]string, 0, len(compilerArgs)+len(loaded)*2+16)
+	args = append(args, compilerArgs...)
+
 	seen := map[string]bool{}
 
 	addFile := func(path string) {
@@ -148,17 +160,120 @@ func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) err
 		}
 	}
 
+	args = append(args, compilerConfigArgs(root.Config)...)
 	args = append(args, "-o", output)
 
-	cmd := exec.Command(compiler, args...)
+	cmd := exec.Command(compilerPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("C compiler failed: %w", err)
+		return fmt.Errorf("C compiler failed: %w\ncommand: %s %s", err, compilerPath, strings.Join(args, " "))
 	}
 
 	return nil
+}
+
+func compilerCommand(cfg Config) (string, []string, error) {
+	compiler := strings.TrimSpace(cfg.Compiler)
+	compilerPath := strings.TrimSpace(cfg.CompilerPath)
+	args := append([]string(nil), cfg.CompilerArgs...)
+
+	if compiler == "" && compilerPath == "" {
+		compiler = "cc"
+	}
+
+	if compilerPath != "" {
+		return compilerPath, args, nil
+	}
+
+	switch compiler {
+	case "", "cc":
+		return "cc", args, nil
+
+	case "gcc":
+		return "gcc", args, nil
+
+	case "clang":
+		return "clang", args, nil
+
+	case "zigcc", "zig-cc", "zig cc":
+		if len(args) == 0 {
+			args = append(args, "cc")
+		}
+		return "zig", args, nil
+
+	case "msvc", "cl":
+		return "cl", args, nil
+
+	default:
+		// Allow custom compiler names directly:
+		//
+		//     compiler = "tcc"
+		//     compiler = "x86_64-w64-mingw32-gcc"
+		return compiler, args, nil
+	}
+}
+
+func compilerConfigArgs(cfg Config) []string {
+	var args []string
+
+	if cfg.Standard != "" {
+		switch normalizedCompilerName(cfg) {
+		case "msvc", "cl":
+			// MSVC does not use -std=c11.
+			// Add MSVC-specific flags later if needed.
+		default:
+			args = append(args, "-std="+cfg.Standard)
+		}
+	}
+
+	if cfg.Target != "" {
+		switch normalizedCompilerName(cfg) {
+		case "zigcc", "zig-cc", "zig cc":
+			args = append(args, "-target", cfg.Target)
+		default:
+			// GCC/Clang target handling is platform-specific.
+			// Let users pass it explicitly through c_flags if needed.
+		}
+	}
+
+	for _, dir := range cfg.IncludeDirs {
+		args = append(args, "-I"+dir)
+	}
+
+	for _, define := range cfg.Defines {
+		args = append(args, "-D"+define)
+	}
+
+	args = append(args, cfg.CFlags...)
+
+	for _, dir := range cfg.LibraryDirs {
+		args = append(args, "-L"+dir)
+	}
+
+	for _, lib := range cfg.Libraries {
+		args = append(args, "-l"+lib)
+	}
+
+	args = append(args, cfg.LinkFlags...)
+
+	return args
+}
+
+func normalizedCompilerName(cfg Config) string {
+	if cfg.Compiler != "" {
+		return strings.ToLower(strings.TrimSpace(cfg.Compiler))
+	}
+
+	base := strings.ToLower(filepath.Base(cfg.CompilerPath))
+	base = strings.TrimSuffix(base, ".exe")
+
+	if base == "zig" {
+		return "zigcc"
+	}
+
+	return base
 }
 
 func withDiagnostics(err error, reporter *diag.Reporter) error {

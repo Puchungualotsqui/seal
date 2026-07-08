@@ -27,8 +27,18 @@ func defaultConfig() Config {
 		Version: "0.1.0",
 		Kind:    KindLibrary,
 
-		Compiler: "cc",
-		Linkage:  "static",
+		Compiler:     "",
+		CompilerPath: "",
+		CompilerArgs: nil,
+		CFlags:       nil,
+		LinkFlags:    nil,
+		IncludeDirs:  nil,
+		LibraryDirs:  nil,
+		Libraries:    nil,
+		Defines:      nil,
+		Target:       "",
+		Standard:     "c11",
+		Linkage:      "static",
 
 		AutoInitializeVariables:        true,
 		AllowUninitializedVariables:    false,
@@ -47,11 +57,12 @@ func defaultConfig() Config {
 }
 
 type configParser struct {
-	path  string
-	text  string
-	lines []string
-	cfg   *Config
-	index int
+	path    string
+	text    string
+	lines   []string
+	cfg     *Config
+	index   int
+	section string
 }
 
 func newConfigParser(path string, text string, cfg *Config) *configParser {
@@ -72,6 +83,14 @@ func (p *configParser) parse() error {
 			continue
 		}
 
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			p.section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			if p.section == "" {
+				return p.err("section name cannot be empty")
+			}
+			continue
+		}
+
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			return p.err("expected key = value")
@@ -80,7 +99,11 @@ func (p *configParser) parse() error {
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
 
-		if key == "dependencies" {
+		if p.section != "" {
+			key = p.section + "." + key
+		}
+
+		if key == "dependencies" || key == "package.dependencies" {
 			deps, err := p.parseDependencies(value)
 			if err != nil {
 				return err
@@ -204,112 +227,182 @@ func (p *configParser) parseDependencies(value string) ([]Dependency, error) {
 
 func (p *configParser) assign(key string, value string) error {
 	switch key {
-	case "name":
+	case "name", "package.name":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.Name = s
 
-	case "version":
+	case "version", "package.version":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.Version = s
 
-	case "kind":
+	case "kind", "package.kind":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.Kind = Kind(s)
 
-	case "compiler":
+	case "compiler", "build.compiler":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.Compiler = s
 
-	case "linkage":
+	case "compiler_path", "build.compiler_path":
+		s, err := parseString(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.CompilerPath = s
+
+	case "compiler_args", "build.compiler_args":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.CompilerArgs = values
+
+	case "c_flags", "build.c_flags":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.CFlags = values
+
+	case "link_flags", "build.link_flags":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.LinkFlags = values
+
+	case "include_dirs", "build.include_dirs":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.IncludeDirs = values
+
+	case "library_dirs", "build.library_dirs":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.LibraryDirs = values
+
+	case "libraries", "build.libraries":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.Libraries = values
+
+	case "defines", "build.defines":
+		values, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.Defines = values
+
+	case "target", "build.target":
+		s, err := parseString(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.Target = s
+
+	case "standard", "build.standard":
+		s, err := parseString(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.Standard = s
+
+	case "linkage", "build.linkage":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.Linkage = s
 
-	case "auto_initialize_variables":
+	case "auto_initialize_variables", "checks.auto_initialize_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AutoInitializeVariables = v
 
-	case "allow_uninitialized_variables":
+	case "allow_uninitialized_variables", "checks.allow_uninitialized_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowUninitializedVariables = v
 
-	case "allow_partial_initialized_structs":
+	case "allow_partial_initialized_structs", "checks.allow_partial_initialized_structs":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowPartialInitializedStructs = v
 
-	case "allow_partial_initialized_arrays":
+	case "allow_partial_initialized_arrays", "checks.allow_partial_initialized_arrays":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowPartialInitializedArrays = v
 
-	case "allow_partial_switches":
+	case "allow_partial_switches", "checks.allow_partial_switches":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowPartialSwitches = v
 
-	case "integer_overflow":
+	case "integer_overflow", "checks.integer_overflow":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.IntegerOverflow = s
 
-	case "bounds_checking":
+	case "bounds_checking", "checks.bounds_checking":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.BoundsChecking = s
 
-	case "fail_bad_style":
+	case "fail_bad_style", "checks.fail_bad_style":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.FailBadStyle = v
 
-	case "allow_unused_variables":
+	case "allow_unused_variables", "checks.allow_unused_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowUnusedVariables = v
 
-	case "allow_unused_parameters":
+	case "allow_unused_parameters", "checks.allow_unused_parameters":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
 		p.cfg.AllowUnusedParameters = v
 
-	case "allow_run_directives":
+	case "allow_run_directives", "checks.allow_run_directives":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
@@ -345,6 +438,33 @@ func parseString(value string) (string, error) {
 	}
 
 	return strings.Trim(value, `"`), nil
+}
+
+func parseStringArray(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+
+	if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
+		return nil, fmt.Errorf("expected string array, got %q", value)
+	}
+
+	content := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
+	if content == "" {
+		return nil, nil
+	}
+
+	parts := splitComma(content)
+	values := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		s, err := parseString(part)
+		if err != nil {
+			return nil, err
+		}
+
+		values = append(values, s)
+	}
+
+	return values, nil
 }
 
 func parseBool(value string) (bool, error) {

@@ -28,8 +28,18 @@ type Config struct {
 
 	Dependencies []Dependency
 
-	Compiler string
-	Linkage  string
+	Compiler     string
+	CompilerPath string
+	CompilerArgs []string
+	CFlags       []string
+	LinkFlags    []string
+	IncludeDirs  []string
+	LibraryDirs  []string
+	Libraries    []string
+	Defines      []string
+	Target       string
+	Standard     string
+	Linkage      string
 
 	AutoInitializeVariables        bool
 	AllowUninitializedVariables    bool

@@ -432,3 +432,85 @@ Free :: extern("free") task(ptr rawptr)
 		t.Fatalf("did not expect mem_Free wrapper call, got:\n%s", appCode)
 	}
 }
+
+func TestReadConfigBuildSectionCompiler(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seal.toml")
+
+	writeFile(t, path, `
+[package]
+name = "game"
+version = "0.1.0"
+kind = "executable"
+
+[build]
+compiler = "zigcc"
+compiler_path = "zig"
+compiler_args = ["cc"]
+c_flags = ["-Wall", "-Wextra"]
+link_flags = ["-lm"]
+include_dirs = ["include"]
+library_dirs = ["lib"]
+libraries = ["m"]
+defines = ["SEAL_DEBUG=1"]
+target = "x86_64-windows-gnu"
+standard = "c11"
+`)
+
+	cfg, err := ReadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Name != "game" {
+		t.Fatalf("expected game, got %q", cfg.Name)
+	}
+
+	if cfg.Kind != KindExecutable {
+		t.Fatalf("expected executable, got %q", cfg.Kind)
+	}
+
+	if cfg.Compiler != "zigcc" {
+		t.Fatalf("expected zigcc, got %q", cfg.Compiler)
+	}
+
+	if cfg.CompilerPath != "zig" {
+		t.Fatalf("expected zig path, got %q", cfg.CompilerPath)
+	}
+
+	if strings.Join(cfg.CompilerArgs, ",") != "cc" {
+		t.Fatalf("bad compiler args: %#v", cfg.CompilerArgs)
+	}
+
+	if strings.Join(cfg.CFlags, ",") != "-Wall,-Wextra" {
+		t.Fatalf("bad c flags: %#v", cfg.CFlags)
+	}
+
+	if strings.Join(cfg.LinkFlags, ",") != "-lm" {
+		t.Fatalf("bad link flags: %#v", cfg.LinkFlags)
+	}
+
+	if strings.Join(cfg.IncludeDirs, ",") != "include" {
+		t.Fatalf("bad include dirs: %#v", cfg.IncludeDirs)
+	}
+
+	if strings.Join(cfg.LibraryDirs, ",") != "lib" {
+		t.Fatalf("bad library dirs: %#v", cfg.LibraryDirs)
+	}
+
+	if strings.Join(cfg.Libraries, ",") != "m" {
+		t.Fatalf("bad libraries: %#v", cfg.Libraries)
+	}
+
+	if strings.Join(cfg.Defines, ",") != "SEAL_DEBUG=1" {
+		t.Fatalf("bad defines: %#v", cfg.Defines)
+	}
+
+	if cfg.Target != "x86_64-windows-gnu" {
+		t.Fatalf("bad target: %q", cfg.Target)
+	}
+
+	if cfg.Standard != "c11" {
+		t.Fatalf("bad standard: %q", cfg.Standard)
+	}
+}
