@@ -344,6 +344,42 @@ func (g *Generator) collect(file *ast.File) {
 				IsTrustedPure:  d.IsTrustedPure,
 			}
 
+			// Generic tasks are templates. Do not lower their parameter/result
+			// types during collection, because those types may contain type
+			// parameters such as T, N, or nested forms like Box<Pair<int, T>>.
+			//
+			// Concrete parameter/result C types are produced later by
+			// genericTaskSignature and emitGenericTaskInstance with a real
+			// substitution map.
+			if len(d.GenericParams) > 0 {
+				if len(d.Results) == 0 {
+					info.ReturnType = CVoid
+				} else {
+					info.ReturnType = CInvalid
+				}
+
+				for i, param := range d.Params {
+					info.ParamTypes = append(info.ParamTypes, CInvalid)
+					info.ParamDefaults = append(info.ParamDefaults, param.Default)
+					info.ParamHasDefault = append(info.ParamHasDefault, param.HasDefault)
+					info.ParamIsVariadic = append(info.ParamIsVariadic, param.IsVariadic)
+
+					if param.IsVariadic {
+						info.IsVariadic = true
+						if info.RequiredParams == len(d.Params) {
+							info.RequiredParams = i
+						}
+					}
+
+					if param.HasDefault && info.RequiredParams == len(d.Params) {
+						info.RequiredParams = i
+					}
+				}
+
+				g.tasks[d.Name.Name] = info
+				continue
+			}
+
 			for _, result := range d.Results {
 				info.ReturnTypes = append(info.ReturnTypes, g.cTypeFromAst(result))
 			}
