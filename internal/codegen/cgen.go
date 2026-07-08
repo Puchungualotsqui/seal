@@ -3229,64 +3229,64 @@ func (g *Generator) emitUnionSwitchStmt(s *ast.SwitchStmt) {
 	g.line("}")
 }
 
-func (g *Generator) genericTaskParamReturnType(name string) (CType, bool) {
+func (g *Generator) genericTaskParamInfo(name string) (TaskInfo, bool) {
 	if g.genericSubst == nil {
-		return CInvalid, false
+		return TaskInfo{}, false
 	}
 
 	arg, ok := g.genericSubst[name]
 	if !ok {
-		return CInvalid, false
+		return TaskInfo{}, false
 	}
 
-	return g.taskReturnTypeFromGenericArg(arg)
+	return g.taskInfoFromGenericArg(arg)
 }
 
-func (g *Generator) taskReturnTypeFromGenericArg(arg ast.GenericArg) (CType, bool) {
+func (g *Generator) taskInfoFromGenericArg(arg ast.GenericArg) (TaskInfo, bool) {
 	if g.genericSubst != nil {
 		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
 	}
 
 	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
-		return CInvalid, false
+		return TaskInfo{}, false
 	}
 
 	switch e := arg.Expr.(type) {
 	case *ast.IdentExpr:
 		info, ok := g.tasks[e.Name.Name]
 		if !ok {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
-		return info.ReturnType, true
+		return info, true
 
 	case *ast.SelectorExpr:
 		id, ok := e.Left.(*ast.IdentExpr)
 		if !ok {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
 		pkg := g.packages[id.Name.Name]
 		if pkg == nil {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
 		info, ok := pkg.Tasks[e.Name.Name]
 		if !ok {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
-		return info.ReturnType, true
+		return info, true
 
 	case *ast.GenericExpr:
 		id, ok := e.Base.(*ast.IdentExpr)
 		if !ok {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
 		info, ok := g.tasks[id.Name.Name]
-		if !ok || len(info.GenericParams) == 0 {
-			return CInvalid, false
+		if !ok || len(info.GenericParams) == 0 || info.Decl == nil {
+			return TaskInfo{}, false
 		}
 
 		callArgs := e.Args
@@ -3300,13 +3300,116 @@ func (g *Generator) taskReturnTypeFromGenericArg(arg ast.GenericArg) (CType, boo
 		name := g.registerGenericTaskInstance(info.Decl, callArgs)
 		instance := g.genericTasks[name]
 		if instance == nil {
-			return CInvalid, false
+			return TaskInfo{}, false
 		}
 
-		return g.genericTaskReturnType(instance), true
+		return g.taskInfoFromGenericTaskInstance(instance), true
 	}
 
-	return CInvalid, false
+	return TaskInfo{}, false
+}
+
+func (g *Generator) taskInfoFromGenericTaskInstance(instance *GenericTaskInstance) TaskInfo {
+	if instance == nil || instance.Decl == nil {
+		return TaskInfo{
+			ReturnType:  CInvalid,
+			ReturnTypes: []CType{CInvalid},
+		}
+	}
+
+	decl := instance.Decl
+	subst := genericTaskSubstForCGen(decl.GenericParams, instance.Args)
+
+	info := TaskInfo{
+		Decl:           decl,
+		GenericParams:  nil,
+		ReturnType:     g.genericTaskReturnType(instance),
+		ReturnTypes:    g.genericTaskReturnTypes(instance),
+		RequiredParams: len(decl.Params),
+		IsExtern:       decl.IsExtern,
+		ExternName:     decl.ExternName,
+		IsPure:         decl.IsPure,
+		IsIntrinsic:    decl.IsIntrinsic,
+		IsTrustedPure:  decl.IsTrustedPure,
+	}
+
+	for i, param := range decl.Params {
+		paramType := g.cTypeFromAstWithGenericArgs(param.Type, subst)
+
+		info.ParamTypes = append(info.ParamTypes, paramType)
+		info.ParamHasDefault = append(info.ParamHasDefault, param.HasDefault)
+		info.ParamIsVariadic = append(info.ParamIsVariadic, param.IsVariadic)
+
+		if param.HasDefault {
+			info.ParamDefaults = append(info.ParamDefaults, g.substituteExprForCGen(param.Default, subst))
+		} else {
+			info.ParamDefaults = append(info.ParamDefaults, nil)
+		}
+
+		if param.IsVariadic {
+			info.IsVariadic = true
+			if info.RequiredParams == len(decl.Params) {
+				info.RequiredParams = i
+			}
+		}
+
+		if param.HasDefault && info.RequiredParams == len(decl.Params) {
+			info.RequiredParams = i
+		}
+	}
+
+	return info
+}
+
+func (g *Generator) genericTaskParamReturnTypes(name string) ([]CType, bool) {
+	info, ok := g.genericTaskParamInfo(name)
+	if !ok {
+		return nil, false
+	}
+
+	if len(info.ReturnTypes) > 0 {
+		return info.ReturnTypes, true
+	}
+
+	if info.ReturnType.Name == "" {
+		return []CType{CInvalid}, true
+	}
+
+	if info.ReturnType.SealName == "void" {
+		return nil, true
+	}
+
+	return []CType{info.ReturnType}, true
+}
+
+func (g *Generator) genericTaskParamReturnType(name string) (CType, bool) {
+	info, ok := g.genericTaskParamInfo(name)
+	if !ok {
+		return CInvalid, false
+	}
+
+	if info.ReturnType.Name != "" {
+		return info.ReturnType, true
+	}
+
+	if len(info.ReturnTypes) == 0 {
+		return CVoid, true
+	}
+
+	if len(info.ReturnTypes) == 1 {
+		return info.ReturnTypes[0], true
+	}
+
+	return CInvalid, true
+}
+
+func (g *Generator) taskReturnTypeFromGenericArg(arg ast.GenericArg) (CType, bool) {
+	info, ok := g.taskInfoFromGenericArg(arg)
+	if !ok {
+		return CInvalid, false
+	}
+
+	return info.ReturnType, true
 }
 
 func (g *Generator) genericTaskParamCallName(name string) (string, bool) {
@@ -3749,12 +3852,18 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
-		if g.scope == nil {
+		isLocal := false
+		if g.scope != nil {
+			_, isLocal = g.scope.lookup(id.Name.Name)
+		}
+
+		if !isLocal {
 			if name, ok := g.genericTaskParamCallName(id.Name.Name); ok {
-				return g.emitDirectCNamedCall(name, e.Args, preparedArgs, nil)
-			}
-		} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
-			if name, ok := g.genericTaskParamCallName(id.Name.Name); ok {
+				info, hasInfo := g.genericTaskParamInfo(id.Name.Name)
+				if hasInfo {
+					return g.emitDirectCNamedCall(name, e.Args, preparedArgs, info.ParamTypes)
+				}
+
 				return g.emitDirectCNamedCall(name, e.Args, preparedArgs, nil)
 			}
 		}
@@ -4741,6 +4850,16 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 	}
 
 	if id, ok := call.Callee.(*ast.IdentExpr); ok {
+		if g.scope == nil {
+			if results, ok := g.genericTaskParamReturnTypes(id.Name.Name); ok {
+				return results
+			}
+		} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
+			if results, ok := g.genericTaskParamReturnTypes(id.Name.Name); ok {
+				return results
+			}
+		}
+
 		if id.Name.Name == "len" {
 			return []CType{CUint}
 		}
@@ -4917,6 +5036,18 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return left
 
 	case *ast.CallExpr:
+		if id, ok := e.Callee.(*ast.IdentExpr); ok {
+			if g.scope == nil {
+				if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
+					return ret
+				}
+			} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
+				if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
+					return ret
+				}
+			}
+		}
+
 		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "len" && !g.isLocalValueName("len") {
 			return CUint
 		}
@@ -4933,18 +5064,6 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			id, ok := gen.Base.(*ast.IdentExpr)
 			if !ok {
 				return CInvalid
-			}
-
-			if id, ok := e.Callee.(*ast.IdentExpr); ok {
-				if g.scope == nil {
-					if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
-						return ret
-					}
-				} else if _, isLocal := g.scope.lookup(id.Name.Name); !isLocal {
-					if ret, ok := g.genericTaskParamReturnType(id.Name.Name); ok {
-						return ret
-					}
-				}
 			}
 
 			if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {

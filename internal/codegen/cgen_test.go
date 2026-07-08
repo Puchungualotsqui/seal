@@ -1883,3 +1883,178 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenericMultiReturnTaskCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+Main :: task() {
+    x, y := Swap<int>(1, 2)
+
+    assert(x == 2)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} Swap_int_Result;",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b);",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b) {",
+		"Swap_int_Result __seal_return_value_",
+		"__seal_return_value_",
+		"._0 = b;",
+		"._1 = a;",
+		"return __seal_return_value_",
+		"Swap_int_Result __seal_multi_result_",
+		"= Swap_int(1, 2);",
+		"intptr_t x = __seal_multi_result_",
+		"intptr_t y = __seal_multi_result_",
+		"._0;",
+		"._1;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskParameterAsValueCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Double :: task(x int) int {
+    return x * 2
+}
+
+Apply :: task <F task[(int) int]>(x int) int {
+    return F(x)
+}
+
+Main :: task() {
+    y := Apply<Double>(10)
+    assert(y == 20)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t Double(intptr_t x);",
+		"intptr_t Apply_Double(intptr_t x);",
+		"intptr_t Apply_Double(intptr_t x) {",
+		"intptr_t __seal_return_value_",
+		"= Double(x);",
+		"return __seal_return_value_",
+		"intptr_t y = Apply_Double(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskParameterMultiReturnCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+SwapInt :: task(a int, b int) int, int {
+    return b, a
+}
+
+UseSwap :: task <F task[(int, int) int, int]>(a int, b int) int {
+    x, y := F(a, b)
+    return x - y
+}
+
+Main :: task() {
+    result := UseSwap<SwapInt>(1, 5)
+    assert(result == 4)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct SwapInt_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} SwapInt_Result;",
+		"intptr_t UseSwap_SwapInt(intptr_t a, intptr_t b);",
+		"intptr_t UseSwap_SwapInt(intptr_t a, intptr_t b) {",
+		"SwapInt_Result __seal_multi_result_",
+		"= SwapInt(a, b);",
+		"intptr_t x = __seal_multi_result_",
+		"._0;",
+		"intptr_t y = __seal_multi_result_",
+		"._1;",
+		"intptr_t __seal_return_value_",
+		"= (x - y);",
+		"return __seal_return_value_",
+		"intptr_t result = UseSwap_SwapInt(1, 5);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskParameterSpecializedGenericMultiReturnCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+UseSwap :: task <F task[(int, int) int, int]>(a int, b int) int {
+    x, y := F(a, b)
+    return x - y
+}
+
+Main :: task() {
+    result := UseSwap<Swap<int>>(1, 5)
+    assert(result == 4)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} Swap_int_Result;",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b);",
+		"intptr_t UseSwap_Swap_int(intptr_t a, intptr_t b);",
+		"Swap_int_Result Swap_int(intptr_t a, intptr_t b) {",
+		"intptr_t UseSwap_Swap_int(intptr_t a, intptr_t b) {",
+		"Swap_int_Result __seal_multi_result_",
+		"= Swap_int(a, b);",
+		"intptr_t x = __seal_multi_result_",
+		"._0;",
+		"intptr_t y = __seal_multi_result_",
+		"._1;",
+		"intptr_t result = UseSwap_Swap_int(1, 5);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
