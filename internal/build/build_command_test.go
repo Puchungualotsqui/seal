@@ -670,3 +670,257 @@ MakeBox :: task <T type>(value T) Box<T> {
 		t.Fatalf("expected one types_MakeBox_int definition, got %d:\n%s", count, typesC)
 	}
 }
+
+func TestBuildWorkspaceImportedGenericTaskConstraintEmitOnly(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), "")
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+name = "app"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    { name = "types", version = "0.1.0" },
+]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, types.Identity<int>>(10)
+    assert(x == 10)
+}
+`)
+
+	writeFile(t, filepath.Join(root, "types", "seal.toml"), `
+name = "types"
+version = "0.1.0"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "types", "types.seal"), `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	outDir := filepath.Join(root, "out")
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+		OutDir:   outDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appBytes, err := os.ReadFile(filepath.Join(outDir, "app.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appC := string(appBytes)
+
+	appChecks := []string{
+		"intptr_t types_Identity_int(intptr_t value);",
+		"intptr_t Apply_int_types_Identity_int(intptr_t value);",
+		"intptr_t x = Apply_int_types_Identity_int(10);",
+		"types_Identity_int(value)",
+	}
+
+	for _, want := range appChecks {
+		if !strings.Contains(appC, want) {
+			t.Fatalf("expected app.c to contain %q, got:\n%s", want, appC)
+		}
+	}
+
+	typesBytes, err := os.ReadFile(filepath.Join(outDir, "types.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typesC := string(typesBytes)
+
+	typesChecks := []string{
+		"intptr_t types_Identity_int(intptr_t value);",
+		"intptr_t types_Identity_int(intptr_t value) {",
+	}
+
+	for _, want := range typesChecks {
+		if !strings.Contains(typesC, want) {
+			t.Fatalf("expected types.c to contain %q, got:\n%s", want, typesC)
+		}
+	}
+}
+
+func TestBuildWorkspaceImportedGenericFieldConstraintEmitOnly(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), "")
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+name = "app"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    { name = "types", version = "0.1.0" },
+]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+HealthOf :: task <T type[health int]>(target T) int {
+    return target.health
+}
+
+Main :: task() {
+    p := types.Player{health = 10}
+    h := HealthOf<types.Player>(p)
+    assert(h == 10)
+}
+`)
+
+	writeFile(t, filepath.Join(root, "types", "seal.toml"), `
+name = "types"
+version = "0.1.0"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "types", "types.seal"), `
+Player :: struct {
+    health int
+}
+`)
+
+	outDir := filepath.Join(root, "out")
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+		OutDir:   outDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appBytes, err := os.ReadFile(filepath.Join(outDir, "app.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appC := string(appBytes)
+
+	appChecks := []string{
+		"typedef struct types_Player {",
+		"intptr_t health;",
+		"} types_Player;",
+		"intptr_t HealthOf_types_Player(types_Player target);",
+		"types_Player p = (types_Player){.health = 10};",
+		"intptr_t h = HealthOf_types_Player(p);",
+		"(target).health",
+	}
+
+	for _, want := range appChecks {
+		if !strings.Contains(appC, want) {
+			t.Fatalf("expected app.c to contain %q, got:\n%s", want, appC)
+		}
+	}
+
+	typesBytes, err := os.ReadFile(filepath.Join(outDir, "types.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typesC := string(typesBytes)
+
+	if !strings.Contains(typesC, "typedef struct types_Player {") {
+		t.Fatalf("expected types.c to contain Player definition, got:\n%s", typesC)
+	}
+}
+
+func TestBuildWorkspaceImportedGenericStructValueConstraintEmitOnly(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), "")
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+name = "app"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    { name = "types", version = "0.1.0" },
+]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+Main :: task() {
+    b: types.Buffer<int, 4>
+    x := b.data[0]
+    assert(x == 0)
+}
+`)
+
+	writeFile(t, filepath.Join(root, "types", "seal.toml"), `
+name = "types"
+version = "0.1.0"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "types", "types.seal"), `
+Buffer :: struct <T type, N int[N > 0]> {
+    data [N]T
+}
+`)
+
+	outDir := filepath.Join(root, "out")
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+		OutDir:   outDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appBytes, err := os.ReadFile(filepath.Join(outDir, "app.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appC := string(appBytes)
+
+	appChecks := []string{
+		"typedef struct types_Buffer_int_4 {",
+		"intptr_t data[4];",
+		"} types_Buffer_int_4;",
+		"types_Buffer_int_4 b;",
+		"intptr_t x = (b).data[0];",
+	}
+
+	for _, want := range appChecks {
+		if !strings.Contains(appC, want) {
+			t.Fatalf("expected app.c to contain %q, got:\n%s", want, appC)
+		}
+	}
+
+	typesBytes, err := os.ReadFile(filepath.Join(outDir, "types.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typesC := string(typesBytes)
+
+	typesChecks := []string{
+		"typedef struct types_Buffer_int_4 {",
+		"intptr_t data[4];",
+		"} types_Buffer_int_4;",
+	}
+
+	for _, want := range typesChecks {
+		if !strings.Contains(typesC, want) {
+			t.Fatalf("expected types.c to contain %q, got:\n%s", want, typesC)
+		}
+	}
+}

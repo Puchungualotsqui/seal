@@ -2853,3 +2853,427 @@ Buffer :: struct <T type, N int> {
 		}
 	}
 }
+
+func TestGenericFieldConstraintCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Player :: struct {
+    health int
+}
+
+HealthOf :: task <T type[health int]>(target T) int {
+    return target.health
+}
+
+Main :: task() {
+    p := Player{health = 10}
+    h := HealthOf<Player>(p)
+    assert(h == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Player {",
+		"intptr_t health;",
+		"} Player;",
+		"intptr_t HealthOf_Player(Player target);",
+		"Player p = (Player){.health = 10};",
+		"intptr_t h = HealthOf_Player(p);",
+		"intptr_t HealthOf_Player(Player target) {",
+		"return __seal_return_value_",
+		"(target).health",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericFieldConstraintPointerCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Enemy :: struct {
+    health int
+}
+
+ReadHealth :: task <T type[health int]>(target *T) int {
+    return target.health
+}
+
+Main :: task() {
+    e := Enemy{health = 25}
+    h := ReadHealth<Enemy>(&e)
+    assert(h == 25)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Enemy {",
+		"intptr_t health;",
+		"} Enemy;",
+		"intptr_t ReadHealth_Enemy(Enemy * target);",
+		"Enemy e = (Enemy){.health = 25};",
+		"intptr_t h = ReadHealth_Enemy((&e));",
+		"intptr_t ReadHealth_Enemy(Enemy * target) {",
+		"(target)->health",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericFieldConstraintMutationCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Player :: struct {
+    health int
+}
+
+Damage :: task <T type[health int]>(target *T, amount int) {
+    target.health -= amount
+}
+
+Main :: task() {
+    p := Player{health = 10}
+    Damage<Player>(&p, 3)
+    assert(p.health == 7)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"void Damage_Player(Player * target, intptr_t amount);",
+		"Player p = (Player){.health = 10};",
+		"Damage_Player((&p), 3);",
+		"assert(((p).health == 7));",
+		"void Damage_Player(Player * target, intptr_t amount) {",
+		"(target)->health -= amount;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskConstraintCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, Identity<int>>(10)
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t Identity_int(intptr_t value);",
+		"intptr_t Apply_int_Identity_int(intptr_t value);",
+		"intptr_t x = Apply_int_Identity_int(10);",
+		"intptr_t Apply_int_Identity_int(intptr_t value) {",
+		"Identity_int(value)",
+		"intptr_t Identity_int(intptr_t value) {",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskConstraintWithStructTypeCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+    value T
+}
+
+Wrap :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+
+ApplyWrap :: task <T type, F task[(T) Box<T>]>(value T) Box<T> {
+    return F(value)
+}
+
+Main :: task() {
+    b := ApplyWrap<int, Wrap<int>>(10)
+    x := b.value
+    assert(x == 10)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Box_int {",
+		"intptr_t value;",
+		"} Box_int;",
+		"Box_int Wrap_int(intptr_t value);",
+		"Box_int ApplyWrap_int_Wrap_int(intptr_t value);",
+		"Box_int b = ApplyWrap_int_Wrap_int(10);",
+		"intptr_t x = (b).value;",
+		"Box_int ApplyWrap_int_Wrap_int(intptr_t value) {",
+		"Wrap_int(value)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenericTaskConstraintMultiReturnCodegen(t *testing.T) {
+	out, reporter := generate(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+ApplySwap :: task <T type, F task[(T, T) T, T]>(a T, b T) T, T {
+    return F(a, b)
+}
+
+Main :: task() {
+    x, y := ApplySwap<int, Swap<int>>(1, 2)
+    assert(x == 2)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} Swap_int_Result;",
+		"typedef struct ApplySwap_int_Swap_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} ApplySwap_int_Swap_int_Result;",
+		"ApplySwap_int_Swap_int_Result ApplySwap_int_Swap_int(intptr_t a, intptr_t b);",
+		"ApplySwap_int_Result",
+		"Swap_int(a, b)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedStructSatisfiesGenericFieldConstraintCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Player :: struct {
+    health int
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+HealthOf :: task <T type[health int]>(target T) int {
+    return target.health
+}
+
+Main :: task() {
+    p := types.Player{health = 10}
+    h := HealthOf<types.Player>(p)
+    assert(h == 10)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct types_Player {",
+		"intptr_t health;",
+		"} types_Player;",
+		"intptr_t HealthOf_types_Player(types_Player target);",
+		"types_Player p = (types_Player){.health = 10};",
+		"intptr_t h = HealthOf_types_Player(p);",
+		"(target).health",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericStructSatisfiesGenericFieldConstraintCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Cell :: struct <T type> {
+    health T
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+HealthOf :: task <T type[health int]>(target T) int {
+    return target.health
+}
+
+Main :: task() {
+    c := types.Cell<int>{health = 15}
+    h := HealthOf<types.Cell<int>>(c)
+    assert(h == 15)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct types_Cell_int {",
+		"intptr_t health;",
+		"} types_Cell_int;",
+		"intptr_t HealthOf_types_Cell_int(types_Cell_int target);",
+		"types_Cell_int c = (types_Cell_int){.health = 15};",
+		"intptr_t h = HealthOf_types_Cell_int(c);",
+		"(target).health",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericTaskSatisfiesGenericTaskConstraintCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, types.Identity<int>>(10)
+    assert(x == 10)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t types_Identity_int(intptr_t value);",
+		"intptr_t Apply_int_types_Identity_int(intptr_t value);",
+		"intptr_t x = Apply_int_types_Identity_int(10);",
+		"intptr_t Apply_int_types_Identity_int(intptr_t value) {",
+		"types_Identity_int(value)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericTaskReturningImportedGenericStructConstraintCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+
+Wrap :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+ApplyWrap :: task <T type, F task[(T) types.Box<T>]>(value T) types.Box<T> {
+    return F(value)
+}
+
+Main :: task() {
+    b := ApplyWrap<int, types.Wrap<int>>(10)
+    x := b.value
+    assert(x == 10)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct types_Box_int {",
+		"intptr_t value;",
+		"} types_Box_int;",
+		"types_Box_int types_Wrap_int(intptr_t value);",
+		"types_Box_int ApplyWrap_int_types_Wrap_int(intptr_t value);",
+		"types_Box_int b = ApplyWrap_int_types_Wrap_int(10);",
+		"intptr_t x = (b).value;",
+		"types_Wrap_int(value)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
