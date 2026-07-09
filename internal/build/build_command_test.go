@@ -727,8 +727,8 @@ Identity :: task <T type>(value T) T {
 
 	appChecks := []string{
 		"intptr_t types_Identity_int(intptr_t value);",
-		"intptr_t Apply_int_types_Identity_int(intptr_t value);",
-		"intptr_t x = Apply_int_types_Identity_int(10);",
+		"intptr_t app_Apply_int_types_Identity_int(intptr_t value);",
+		"intptr_t x = app_Apply_int_types_Identity_int(10);",
 		"types_Identity_int(value)",
 	}
 
@@ -816,9 +816,9 @@ Player :: struct {
 		"typedef struct types_Player {",
 		"intptr_t health;",
 		"} types_Player;",
-		"intptr_t HealthOf_types_Player(types_Player target);",
+		"intptr_t app_HealthOf_types_Player(types_Player target);",
 		"types_Player p = (types_Player){.health = 10};",
-		"intptr_t h = HealthOf_types_Player(p);",
+		"intptr_t h = app_HealthOf_types_Player(p);",
 		"(target).health",
 	}
 

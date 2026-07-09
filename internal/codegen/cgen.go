@@ -557,30 +557,6 @@ func (g *Generator) collectImportedGenericTaskInstanceMonomorphizations(name str
 	})
 }
 
-func (g *Generator) collectGenericStructInstancesFromGenericArgsForParams(params []ast.GenericParam, args []ast.GenericArg) {
-	for i, arg := range args {
-		if i >= len(params) {
-			g.collectGenericStructInstancesFromGenericArg(arg)
-			continue
-		}
-
-		switch params[i].Category {
-		case ast.GenericParamType,
-			ast.GenericParamEnum,
-			ast.GenericParamUnion:
-			g.collectGenericStructInstancesFromGenericArg(arg)
-
-		case ast.GenericParamTask:
-			g.collectGenericTaskArgInstance(arg)
-
-		default:
-			if arg.Kind == ast.GenericArgExpr {
-				g.collectGenericStructInstancesFromExpr(arg.Expr)
-			}
-		}
-	}
-}
-
 func (g *Generator) collectGenericTaskInstanceMonomorphizations(name string) {
 	info := g.genericTasks[name]
 	if info == nil || info.Decl == nil {
@@ -951,6 +927,30 @@ func (g *Generator) collectGenericStructInstancesFromGenericArg(arg ast.GenericA
 			return
 		}
 
+		// A generic expression used as a generic argument can mean either:
+		//
+		//   Box<int>      // type argument
+		//   Identity<int> // task argument
+		//
+		// Do not blindly reinterpret every GenericExpr as a type. First check
+		// whether it names a local or imported generic task. Task arguments are
+		// handled by collectGenericTaskArgInstance.
+		if gen, ok := arg.Expr.(*ast.GenericExpr); ok {
+			switch base := gen.Base.(type) {
+			case *ast.IdentExpr:
+				if info, ok := g.tasks[base.Name.Name]; ok && len(info.GenericParams) > 0 {
+					g.collectGenericTaskArgInstance(arg)
+					return
+				}
+
+			case *ast.SelectorExpr:
+				if _, _, _, ok := g.importedGenericTaskInfoFromSelector(base); ok {
+					g.collectGenericTaskArgInstance(arg)
+					return
+				}
+			}
+		}
+
 		if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
 			g.collectGenericStructInstancesFromType(typ)
 			return
@@ -1031,6 +1031,30 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 
 		for _, value := range e.Values {
 			g.collectGenericStructInstancesFromExpr(value)
+		}
+	}
+}
+
+func (g *Generator) collectGenericStructInstancesFromGenericArgsForParams(params []ast.GenericParam, args []ast.GenericArg) {
+	for i, arg := range args {
+		if i >= len(params) {
+			g.collectGenericStructInstancesFromGenericArg(arg)
+			continue
+		}
+
+		switch params[i].Category {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			g.collectGenericStructInstancesFromGenericArg(arg)
+
+		case ast.GenericParamTask:
+			g.collectGenericTaskArgInstance(arg)
+
+		default:
+			if arg.Kind == ast.GenericArgExpr {
+				g.collectGenericStructInstancesFromExpr(arg.Expr)
+			}
 		}
 	}
 }

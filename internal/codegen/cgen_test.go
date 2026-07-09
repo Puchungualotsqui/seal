@@ -3081,7 +3081,6 @@ Main :: task() {
 		"intptr_t _1;",
 		"} ApplySwap_int_Swap_int_Result;",
 		"ApplySwap_int_Swap_int_Result ApplySwap_int_Swap_int(intptr_t a, intptr_t b);",
-		"ApplySwap_int_Result",
 		"Swap_int(a, b)",
 	}
 
@@ -3089,6 +3088,10 @@ Main :: task() {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
 		}
+	}
+
+	if strings.Contains(out, "typedef struct /*invalid*/ int") {
+		t.Fatalf("generated invalid generic struct typedef:\n%s", out)
 	}
 }
 

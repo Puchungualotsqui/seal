@@ -1670,6 +1670,181 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	c.currentResults = oldResults
 }
 
+func (c *Checker) taskTypeFromImportedGenericSignature(scope *Scope, packageName string, generic *Type, args []ast.GenericArg, span source.Span) *Type {
+	if generic == nil || generic.Kind != TypeTask {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    "<invalid>",
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	if len(args) != len(generic.GenericParams) {
+		return &Type{
+			Kind:    TypeTask,
+			Name:    generic.Name,
+			Results: []*Type{InvalidType},
+		}
+	}
+
+	argSubst := genericArgSubst(generic.GenericParams, args)
+	typeSubst := c.genericTypeSubstFromArgs(scope, generic.GenericParams, args)
+
+	var params []*Type
+	for _, param := range generic.Params {
+		params = append(params, c.substituteImportedGenericSignatureType(scope, packageName, param, typeSubst, argSubst))
+	}
+
+	var results []*Type
+	for _, result := range generic.Results {
+		results = append(results, c.substituteImportedGenericSignatureType(scope, packageName, result, typeSubst, argSubst))
+	}
+
+	paramDefaults := make([]ast.Expr, 0, len(generic.ParamDefaults))
+	for _, defaultExpr := range generic.ParamDefaults {
+		paramDefaults = append(paramDefaults, c.substituteGenericExpr(defaultExpr, argSubst))
+	}
+
+	return &Type{
+		Kind:            TypeTask,
+		Name:            c.specializedTypeName(packageName+"."+generic.Name, args),
+		Params:          params,
+		Results:         results,
+		RequiredParams:  generic.RequiredParams,
+		ParamDefaults:   paramDefaults,
+		ParamHasDefault: append([]bool(nil), generic.ParamHasDefault...),
+		ParamIsVariadic: append([]bool(nil), generic.ParamIsVariadic...),
+		IsVariadic:      generic.IsVariadic,
+		IsExtern:        generic.IsExtern,
+		ExternName:      generic.ExternName,
+		IsPure:          generic.IsPure,
+		IsIntrinsic:     generic.IsIntrinsic,
+		IsTrustedPure:   generic.IsTrustedPure,
+	}
+}
+
+func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageName string, typ *Type, typeSubst map[string]*Type, argSubst map[string]ast.GenericArg) *Type {
+	if typ == nil {
+		return InvalidType
+	}
+
+	switch typ.Kind {
+	case TypeTypeParam:
+		// Important: substituted caller-provided type arguments must NOT be
+		// qualified with the imported package name.
+		if replacement := typeSubst[typ.Name]; replacement != nil {
+			return replacement
+		}
+
+		return typ
+
+	case TypePointer:
+		return &Type{
+			Kind: TypePointer,
+			Elem: c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
+		}
+
+	case TypeArray:
+		return &Type{
+			Kind:     TypeArray,
+			Name:     typ.Name,
+			Elem:     c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
+			Len:      typ.Len,
+			Inferred: typ.Inferred,
+		}
+
+	case TypeVariadic:
+		return &Type{
+			Kind: TypeVariadic,
+			Name: typ.Name,
+			Elem: c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
+		}
+
+	case TypeStruct:
+		out := *typ
+		out.Fields = nil
+		out.GenericParams = nil
+
+		if typ.Name != "" {
+			out.Name = c.substitutedGenericDisplayName(typ.Name, typeSubst)
+
+			if packageName != "" && !strings.Contains(out.Name, ".") {
+				out.Name = packageName + "." + out.Name
+			}
+		}
+
+		for _, field := range typ.Fields {
+			out.Fields = append(out.Fields, FieldInfo{
+				Name:    field.Name,
+				Type:    c.substituteImportedGenericSignatureType(scope, packageName, field.Type, typeSubst, argSubst),
+				TypeAst: field.TypeAst,
+				Span:    field.Span,
+			})
+		}
+
+		return &out
+
+	case TypeUnion:
+		out := *typ
+		out.Members = nil
+
+		if out.Name != "" && packageName != "" && !strings.Contains(out.Name, ".") {
+			out.Name = packageName + "." + out.Name
+		}
+
+		for _, member := range typ.Members {
+			out.Members = append(out.Members, c.substituteImportedGenericSignatureType(scope, packageName, member, typeSubst, argSubst))
+		}
+
+		return &out
+
+	case TypeInterface:
+		out := *typ
+		out.InterfaceRequirements = nil
+
+		if out.Name != "" && packageName != "" && !strings.Contains(out.Name, ".") {
+			out.Name = packageName + "." + out.Name
+		}
+
+		for _, req := range typ.InterfaceRequirements {
+			cloned := InterfaceRequirementInfo{
+				Name: req.Name,
+				Span: req.Span,
+			}
+
+			for _, param := range req.Params {
+				cloned.Params = append(cloned.Params, c.substituteImportedGenericSignatureType(scope, packageName, param, typeSubst, argSubst))
+			}
+
+			for _, result := range req.Results {
+				cloned.Results = append(cloned.Results, c.substituteImportedGenericSignatureType(scope, packageName, result, typeSubst, argSubst))
+			}
+
+			out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+		}
+
+		return &out
+
+	case TypeTask:
+		out := *typ
+		out.Params = nil
+		out.Results = nil
+
+		for _, param := range typ.Params {
+			out.Params = append(out.Params, c.substituteImportedGenericSignatureType(scope, packageName, param, typeSubst, argSubst))
+		}
+
+		for _, result := range typ.Results {
+			out.Results = append(out.Results, c.substituteImportedGenericSignatureType(scope, packageName, result, typeSubst, argSubst))
+		}
+
+		return &out
+
+	default:
+		return typ
+	}
+}
+
 func (c *Checker) taskTypeFromGenericSignature(scope *Scope, generic *Type, args []ast.GenericArg, span source.Span) *Type {
 	if generic == nil || generic.Kind != TypeTask {
 		return &Type{
@@ -1769,9 +1944,10 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 
 		for _, field := range typ.Fields {
 			out.Fields = append(out.Fields, FieldInfo{
-				Name: field.Name,
-				Type: c.substituteGenericSignatureType(scope, field.Type, typeSubst, argSubst),
-				Span: field.Span,
+				Name:    field.Name,
+				Type:    c.substituteGenericSignatureType(scope, field.Type, typeSubst, argSubst),
+				TypeAst: field.TypeAst,
+				Span:    field.Span,
 			})
 		}
 
@@ -2933,6 +3109,8 @@ func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr
 	var instantiated *Type
 	if taskDecl != nil {
 		instantiated = c.taskTypeFromGenericCall(scope, taskDecl, gen.Args)
+	} else if pkgName, ok := c.packageNameFromGenericExprBase(scope, gen.Base); ok {
+		instantiated = c.taskTypeFromImportedGenericSignature(scope, pkgName, sym.Type, gen.Args, gen.Span())
 	} else {
 		instantiated = c.taskTypeFromGenericSignature(scope, sym.Type, gen.Args, gen.Span())
 	}
@@ -2940,6 +3118,25 @@ func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr
 	c.checkGenericTaskCallArguments(scope, instantiated, args, span)
 
 	return instantiated.Results
+}
+
+func (c *Checker) packageNameFromGenericExprBase(scope *Scope, base ast.Expr) (string, bool) {
+	selector, ok := base.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+
+	id, ok := selector.Left.(*ast.IdentExpr)
+	if !ok {
+		return "", false
+	}
+
+	pkgSym := scope.Lookup(id.Name.Name)
+	if pkgSym == nil || pkgSym.Kind != SymbolPackage {
+		return "", false
+	}
+
+	return id.Name.Name, true
 }
 
 func (c *Checker) checkGenericTaskCallArguments(scope *Scope, taskType *Type, args []ast.Expr, span source.Span) {
@@ -4696,6 +4893,10 @@ func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 		taskDecl, _ := sym.Node.(*ast.TaskDecl)
 		if taskDecl != nil {
 			return c.taskTypeFromGenericCall(scope, taskDecl, e.Args)
+		}
+
+		if pkgName, ok := c.packageNameFromGenericExprBase(scope, e.Base); ok {
+			return c.taskTypeFromImportedGenericSignature(scope, pkgName, sym.Type, e.Args, e.Span())
 		}
 
 		return c.taskTypeFromGenericSignature(scope, sym.Type, e.Args, e.Span())
