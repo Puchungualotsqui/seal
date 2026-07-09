@@ -3835,3 +3835,173 @@ Main :: task() {
 
 	assertCheckerDiagnosticContains(t, reporter, `generic parameter "N" requires a compile-time value argument`)
 }
+
+func TestGenericValueConstraintSubstitutesIntArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UsePositive :: task <N int[N > 0]>() {}
+
+Main :: task() {
+    UsePositive<3>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueConstraintRejectsSubstitutedIntArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UsePositive :: task <N int[N > 0]>() {}
+
+Main :: task() {
+    UsePositive<0>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: 0 > 0`)
+}
+
+func TestGenericValueConstraintSubstitutesBoolArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UsePositive :: task <N int, OK bool[OK != false]>() {}
+
+Main :: task() {
+    UsePositive<3, true>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueConstraintRejectsSubstitutedBoolArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UsePositive :: task <N int, OK bool[OK != false]>() {}
+
+Main :: task() {
+    UsePositive<3, false>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: false != false`)
+}
+
+func TestGenericValueConstraintReferencesEarlierIntArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UseBounded :: task <N int, Limit int[N < Limit]>() {}
+
+Main :: task() {
+    UseBounded<3, 10>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueConstraintRejectsEarlierIntArgumentReference(t *testing.T) {
+	reporter := checkSource(t, `
+UseBounded :: task <N int, Limit int[N < Limit]>() {}
+
+Main :: task() {
+    UseBounded<10, 3>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: 10 < 3`)
+}
+
+func TestGenericValueConstraintSubstitutesStringArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UseNamed :: task <Name string[Name != ""]>() {}
+
+Main :: task() {
+    UseNamed<"seal">()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueConstraintRejectsSubstitutedStringArgument(t *testing.T) {
+	reporter := checkSource(t, `
+UseNamed :: task <Name string[Name != ""]>() {}
+
+Main :: task() {
+    UseNamed<"">()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: "" != ""`)
+}
+
+func TestGenericValueConstraintAcceptsConstExprArgument(t *testing.T) {
+	reporter := checkSource(t, `
+Base :: 2
+UsePositive :: task <N int[N > 0]>() {}
+
+Main :: task() {
+    UsePositive<Base + 1>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericValueConstraintRejectsConstExprArgument(t *testing.T) {
+	reporter := checkSource(t, `
+Base :: 2
+UseSmall :: task <N int[N < 2]>() {}
+
+Main :: task() {
+    UseSmall<Base + 1>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: Base + 1 < 2`)
+}
+
+func TestImportedGenericValueConstraintSubstitutesArgument(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "limits", `
+UsePositive :: task <N int[N > 0]>() {}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    limits.UsePositive<3>()
+}
+`, map[string]*resolver.PackageInfo{
+		"limits": resolverPkg,
+	}, map[string]*PackageInfo{
+		"limits": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestImportedGenericValueConstraintRejectsSubstitutedArgument(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "limits", `
+UsePositive :: task <N int[N > 0]>() {}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    limits.UsePositive<0>()
+}
+`, map[string]*resolver.PackageInfo{
+		"limits": resolverPkg,
+	}, map[string]*PackageInfo{
+		"limits": checkerPkg,
+	})
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: 0 > 0`)
+}

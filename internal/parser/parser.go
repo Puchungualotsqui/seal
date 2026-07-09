@@ -1976,16 +1976,25 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 		return false
 	}
 
-	depth := 0
+	angleDepth := 0
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
 
 	for i := p.pos; i < len(p.tokens); i++ {
-		switch p.tokens[i].Kind {
+		kind := p.tokens[i].Kind
+
+		switch kind {
 		case token.Lt:
-			depth++
+			angleDepth++
 
 		case token.Gt:
-			depth--
-			if depth == 0 {
+			if parenDepth > 0 || bracketDepth > 0 || braceDepth > 0 {
+				continue
+			}
+
+			angleDepth--
+			if angleDepth == 0 {
 				if i+1 < len(p.tokens) &&
 					(p.tokens[i+1].Kind == token.LParen || p.tokens[i+1].Kind == token.LBrace) {
 					return true
@@ -1993,6 +2002,33 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 
 				return false
 			}
+
+		case token.LParen:
+			parenDepth++
+
+		case token.RParen:
+			if parenDepth == 0 {
+				return false
+			}
+			parenDepth--
+
+		case token.LBracket:
+			bracketDepth++
+
+		case token.RBracket:
+			if bracketDepth == 0 {
+				return false
+			}
+			bracketDepth--
+
+		case token.LBrace:
+			braceDepth++
+
+		case token.RBrace:
+			if braceDepth == 0 {
+				return false
+			}
+			braceDepth--
 
 		case token.EOF:
 			return false
