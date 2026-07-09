@@ -514,3 +514,227 @@ standard = "c11"
 		t.Fatalf("bad standard: %q", cfg.Standard)
 	}
 }
+
+func TestBuildWorkspaceGenericConstraintMaxDepthFromSealTomlRejectsDeepEvaluation(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), ``)
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+[package]
+name = "app"
+kind = "executable"
+
+[checker]
+generic_constraint_max_depth = 2
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return C(n)
+}
+
+C :: pure task(n int) bool {
+	return n > 0
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+	})
+
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+
+	if !strings.Contains(err.Error(), `generic constraint evaluation exceeded max depth 2`) {
+		t.Fatalf("expected max depth diagnostic, got:\n%v", err)
+	}
+}
+
+func TestBuildWorkspaceGenericConstraintMaxDepthDisabledByDefault(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), ``)
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+[package]
+name = "app"
+kind = "executable"
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return C(n)
+}
+
+C :: pure task(n int) bool {
+	return n > 0
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+	})
+
+	if err != nil {
+		t.Fatalf("BuildWorkspace failed:\n%v", err)
+	}
+}
+
+func TestBuildWorkspaceGenericConstraintMaxDepthNegativeDisablesGuard(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), ``)
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+[package]
+name = "app"
+kind = "executable"
+
+[checker]
+generic_constraint_max_depth = -1
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return C(n)
+}
+
+C :: pure task(n int) bool {
+	return n > 0
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+	})
+
+	if err != nil {
+		t.Fatalf("BuildWorkspace failed:\n%v", err)
+	}
+}
+
+func TestBuildWorkspaceImportedPureOperatorGenericValueConstraintDerivedNotEqual(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), ``)
+
+	writeFile(t, filepath.Join(root, "rules", "seal.toml"), `
+[package]
+name = "rules"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "rules", "rules.seal"), `
+Matrix :: struct {
+	years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+	return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+	IsVampireAge
+}
+`)
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+[package]
+name = "app"
+kind = "executable"
+
+dependencies = ["rules"]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+UseAge :: task <Age rules.Matrix[Age != "vampire"]>() {}
+
+Main :: task() {
+	UseAge<rules.Matrix{years = 10}>()
+}
+`)
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+	})
+
+	if err != nil {
+		t.Fatalf("BuildWorkspace failed:\n%v", err)
+	}
+}
+
+func TestBuildWorkspaceGenericRequestFixedPointConverges(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "seal.workspace"), ``)
+
+	writeFile(t, filepath.Join(root, "lib", "seal.toml"), `
+[package]
+name = "lib"
+kind = "library"
+`)
+
+	writeFile(t, filepath.Join(root, "lib", "lib.seal"), `
+Box :: struct <T type> {
+	value T
+}
+
+Make :: task <T type>(value T) Box<T> {
+	return Box<T>{value = value}
+}
+`)
+
+	writeFile(t, filepath.Join(root, "app", "seal.toml"), `
+[package]
+name = "app"
+kind = "executable"
+
+dependencies = ["lib"]
+`)
+
+	writeFile(t, filepath.Join(root, "app", "main.seal"), `
+Main :: task() {
+	lib.Make<int>(1)
+}
+`)
+
+	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
+		EmitOnly: true,
+	})
+
+	if err != nil {
+		t.Fatalf("BuildWorkspace failed:\n%v", err)
+	}
+}

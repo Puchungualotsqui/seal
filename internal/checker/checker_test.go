@@ -4005,3 +4005,320 @@ Main :: task() {
 
 	assertCheckerDiagnosticContains(t, reporter, `generic constraint failed: 0 > 0`)
 }
+
+func TestCheckImportedGenericValueConstraintPreservesPackageQualifiedStructType(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+	years int
+}
+
+Accept :: pure task(age Matrix) bool {
+	return age.years > 0
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age rules.Matrix[rules.Accept(Age)]>() {}
+
+Main :: task() {
+	UseAge<rules.Matrix{years = 1}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintRejectsDifferentPackageSameTypeName(t *testing.T) {
+	_, resolverRules, checkerRules := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+	years int
+}
+
+Accept :: pure task(age Matrix) bool {
+	return age.years > 0
+}
+`)
+
+	_, resolverOther, checkerOther := exportCheckerPackage(t, "other", `
+Matrix :: struct {
+	years int
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age other.Matrix[rules.Accept(Age)]>() {}
+
+Main :: task() {
+	UseAge<other.Matrix{years = 1}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverRules,
+		"other": resolverOther,
+	}, map[string]*PackageInfo{
+		"rules": checkerRules,
+		"other": checkerOther,
+	})
+
+	assertCheckerDiagnosticContains(t, reporter, `cannot assign other.Matrix to rules.Matrix`)
+}
+
+func TestCheckImportedGenericValueConstraintRejectsAmbiguousImportedOperatorOverload(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+	years int
+}
+
+A :: pure task(age Matrix, tag any) bool {
+	return true
+}
+
+B :: pure task(age any, tag string) bool {
+	return true
+}
+
+== :: overload {
+	A
+	B
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age rules.Matrix[Age == "vampire"]>() {}
+
+Main :: task() {
+	UseAge<rules.Matrix{years = 999}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	assertCheckerDiagnosticContains(t, reporter, `ambiguous operator overload "=="`)
+}
+
+func TestCheckImportedGenericValueConstraintRejectsNoMatchingImportedOperatorOverload(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+	years int
+}
+
+CompareInt :: pure task(age Matrix, value int) bool {
+	return age.years == value
+}
+
+== :: overload {
+	CompareInt
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age rules.Matrix[Age == "vampire"]>() {}
+
+Main :: task() {
+	UseAge<rules.Matrix{years = 999}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	assertCheckerDiagnosticContains(t, reporter, `no operator overload "==" matches operand types (rules.Matrix, string)`)
+}
+
+func TestCheckImportedTypeConstraintFindsImportedOperatorEvenWithUnrelatedLocalOperator(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+	years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+	return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+	IsVampireAge
+}
+`)
+
+	reporter := checkWithPackages(t, `
+LocalThing :: struct {
+	value int
+}
+
+LocalCompare :: pure task(x LocalThing, tag string) bool {
+	return false
+}
+
+== :: overload {
+	LocalCompare
+}
+
+UseAge :: task <Age rules.Matrix[Age == "vampire"]>() {}
+
+Main :: task() {
+	UseAge<rules.Matrix{years = 999}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericConstraintMaxDepthDisabledAllowsDeepPureEvaluation(t *testing.T) {
+	reporter := diag.NewReporter()
+
+	src := source.NewFile("test.seal", `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return C(n)
+}
+
+C :: pure task(n int) bool {
+	return n > 0
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	lex := lexer.New(src, reporter)
+	tokens := lex.LexAll()
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	r := resolver.New(reporter)
+	r.ResolveFile(file)
+
+	c := NewWithPackagesAndOptions(reporter, nil, Options{
+		GenericConstraintMaxDepth: 0,
+	})
+	c.CheckFile(file)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericConstraintMaxDepthRejectsDeepPureEvaluation(t *testing.T) {
+	reporter := diag.NewReporter()
+
+	src := source.NewFile("test.seal", `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return C(n)
+}
+
+C :: pure task(n int) bool {
+	return n > 0
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	lex := lexer.New(src, reporter)
+	tokens := lex.LexAll()
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	r := resolver.New(reporter)
+	r.ResolveFile(file)
+
+	c := NewWithPackagesAndOptions(reporter, nil, Options{
+		GenericConstraintMaxDepth: 2,
+	})
+	c.CheckFile(file)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic constraint evaluation exceeded max depth 2`)
+}
+
+func TestGenericConstraintMaxDepthRejectsDirectRecursivePureEvaluation(t *testing.T) {
+	reporter := diag.NewReporter()
+
+	src := source.NewFile("test.seal", `
+Loop :: pure task(n int) bool {
+	return Loop(n)
+}
+
+Use :: task <N int[Loop(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	lex := lexer.New(src, reporter)
+	tokens := lex.LexAll()
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	r := resolver.New(reporter)
+	r.ResolveFile(file)
+
+	c := NewWithPackagesAndOptions(reporter, nil, Options{
+		GenericConstraintMaxDepth: 8,
+	})
+	c.CheckFile(file)
+
+	assertCheckerDiagnosticContains(t, reporter, `recursive generic constraint evaluation through "Loop"`)
+}
+
+func TestGenericConstraintMaxDepthRejectsMutualRecursivePureEvaluation(t *testing.T) {
+	reporter := diag.NewReporter()
+
+	src := source.NewFile("test.seal", `
+A :: pure task(n int) bool {
+	return B(n)
+}
+
+B :: pure task(n int) bool {
+	return A(n)
+}
+
+Use :: task <N int[A(N)]>() {}
+
+Main :: task() {
+	Use<1>()
+}
+`)
+
+	lex := lexer.New(src, reporter)
+	tokens := lex.LexAll()
+	p := parser.New(tokens, reporter)
+	file := p.ParseFile()
+
+	r := resolver.New(reporter)
+	r.ResolveFile(file)
+
+	c := NewWithPackagesAndOptions(reporter, nil, Options{
+		GenericConstraintMaxDepth: 8,
+	})
+	c.CheckFile(file)
+
+	assertCheckerDiagnosticContains(t, reporter, `recursive generic constraint evaluation through "A"`)
+}
