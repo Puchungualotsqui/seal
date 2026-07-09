@@ -355,6 +355,11 @@ func (s *Scope) Declare(sym *Symbol) {
 	s.Symbols[sym.Name] = sym
 }
 
+type Options struct {
+	// 	<= 0 means disabled
+	GenericConstraintMaxDepth int
+}
+
 type Checker struct {
 	diags *diag.Reporter
 
@@ -369,13 +374,22 @@ type Checker struct {
 
 	preparingOverloads map[*ast.OverloadDecl]bool
 	preparedOverloads  map[*ast.OverloadDecl]bool
+
+	options Options
+
+	genericConstraintEvalStack []string
+	packageScopes              map[string]*Scope
 }
 
 func New(diags *diag.Reporter) *Checker {
-	return NewWithPackages(diags, nil)
+	return NewWithPackagesAndOptions(diags, nil, Options{})
 }
 
 func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Checker {
+	return NewWithPackagesAndOptions(diags, packages, Options{})
+}
+
+func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*PackageInfo, options Options) *Checker {
 	c := &Checker{
 		diags:              diags,
 		packages:           packages,
@@ -383,6 +397,8 @@ func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Ch
 		preparingTasks:     map[*ast.TaskDecl]bool{},
 		preparingOverloads: map[*ast.OverloadDecl]bool{},
 		preparedOverloads:  map[*ast.OverloadDecl]bool{},
+		options:            options,
+		packageScopes:      map[string]*Scope{},
 	}
 
 	c.global = NewScope(nil)
@@ -4703,6 +4719,40 @@ func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, 
 	}
 }
 
+func (c *Checker) enterGenericConstraintEval(name string, span source.Span) bool {
+	maxDepth := c.options.GenericConstraintMaxDepth
+	if maxDepth <= 0 {
+		return true
+	}
+
+	for _, existing := range c.genericConstraintEvalStack {
+		if existing == name {
+			c.diags.Add(span, fmt.Sprintf("recursive generic constraint evaluation through %q", name))
+			return false
+		}
+	}
+
+	if len(c.genericConstraintEvalStack) >= maxDepth {
+		c.diags.Add(span, fmt.Sprintf("generic constraint evaluation exceeded max depth %d while evaluating %q", maxDepth, name))
+		return false
+	}
+
+	c.genericConstraintEvalStack = append(c.genericConstraintEvalStack, name)
+	return true
+}
+
+func (c *Checker) exitGenericConstraintEval() {
+	if c.options.GenericConstraintMaxDepth <= 0 {
+		return
+	}
+
+	if len(c.genericConstraintEvalStack) == 0 {
+		return
+	}
+
+	c.genericConstraintEvalStack = c.genericConstraintEvalStack[:len(c.genericConstraintEvalStack)-1]
+}
+
 func (c *Checker) checkGenericTaskArgumentSignature(span source.Span, paramName string, expected *Type, actual *Type) {
 	if expected == nil || actual == nil {
 		return
@@ -5494,7 +5544,7 @@ func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, le
 		return genericConstValue{}, false
 	}
 
-	return c.evalPureTaskConstBody(scope, taskDecl, []genericConstValue{left, right})
+	return c.evalPureTaskConstBody(scope, candidate.Name, span, taskDecl, []genericConstValue{left, right})
 }
 
 func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
@@ -5638,12 +5688,12 @@ func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[st
 		return genericConstValue{Kind: genericConstInt, Type: UintType, IntValue: int64(len(value.StringValue))}, true
 	}
 
-	sym := c.taskSymbolFromConstCallCallee(scope, e.Callee)
+	sym, evalScope, evalName := c.taskSymbolAndScopeFromConstCallCallee(scope, e.Callee)
 	if sym == nil {
 		return genericConstValue{}, false
 	}
 
-	c.ensureTaskSymbolPrepared(scope, sym)
+	c.ensureTaskSymbolPrepared(evalScope, sym)
 
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		return genericConstValue{}, false
@@ -5675,45 +5725,55 @@ func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[st
 		return genericConstValue{}, false
 	}
 
-	return c.evalPureTaskConstBody(scope, taskDecl, argValues)
+	if evalName == "" {
+		evalName = sym.Name
+	}
+
+	return c.evalPureTaskConstBody(evalScope, evalName, e.Callee.Span(), taskDecl, argValues)
 }
 
-func (c *Checker) taskSymbolFromConstCallCallee(scope *Scope, callee ast.Expr) *Symbol {
+func (c *Checker) taskSymbolAndScopeFromConstCallCallee(scope *Scope, callee ast.Expr) (*Symbol, *Scope, string) {
 	switch x := callee.(type) {
 	case *ast.IdentExpr:
 		sym := scope.Lookup(x.Name.Name)
 		if sym == nil || sym.Kind != SymbolTask {
-			return nil
+			return nil, scope, ""
 		}
 
-		return sym
+		return sym, scope, sym.Name
 
 	case *ast.SelectorExpr:
 		id, ok := x.Left.(*ast.IdentExpr)
 		if !ok {
-			return nil
+			return nil, scope, ""
 		}
 
 		pkgSym := scope.Lookup(id.Name.Name)
 		if pkgSym == nil || pkgSym.Kind != SymbolPackage || pkgSym.Package == nil {
-			return nil
+			return nil, scope, ""
 		}
 
 		member := pkgSym.Package.Symbols[x.Name.Name]
 		if member == nil || member.Kind != SymbolTask {
-			return nil
+			return nil, scope, ""
 		}
 
-		return member
+		evalScope := c.scopeForPackageInfo(id.Name.Name, pkgSym.Package)
+		return member, evalScope, id.Name.Name + "." + member.Name
 	}
 
-	return nil
+	return nil, scope, ""
 }
 
-func (c *Checker) evalPureTaskConstBody(scope *Scope, d *ast.TaskDecl, args []genericConstValue) (genericConstValue, bool) {
+func (c *Checker) evalPureTaskConstBody(scope *Scope, name string, span source.Span, d *ast.TaskDecl, args []genericConstValue) (genericConstValue, bool) {
 	if d == nil || d.Body == nil {
 		return genericConstValue{}, false
 	}
+
+	if !c.enterGenericConstraintEval(name, span) {
+		return genericConstValue{}, false
+	}
+	defer c.exitGenericConstraintEval()
 
 	if len(args) != len(d.Params) {
 		return genericConstValue{}, false
@@ -6869,8 +6929,20 @@ func exportSymbolSignatureOnly(sym *Symbol) *Symbol {
 	// Imported tasks and types must be type-checkable from exported typed
 	// signatures, not from source bodies/declarations. Generic struct fields
 	// keep their field TypeAst through FieldInfo.
-	if out.Kind == SymbolTask || out.Kind == SymbolType {
+	if out.Kind == SymbolType {
 		out.Node = nil
+	}
+
+	if out.Kind == SymbolTask {
+		keepBody := false
+
+		if out.Type != nil && (out.Type.IsPure || out.Type.IsTrustedPure) {
+			keepBody = true
+		}
+
+		if !keepBody {
+			out.Node = nil
+		}
 	}
 
 	if out.Type != nil {
@@ -6889,6 +6961,50 @@ func exportSymbolSignatureOnly(sym *Symbol) *Symbol {
 	}
 
 	return &out
+}
+
+func (c *Checker) scopeForPackageInfo(packageName string, pkg *PackageInfo) *Scope {
+	if pkg == nil {
+		return c.global
+	}
+
+	key := packageName
+	if key == "" {
+		key = pkg.Name
+	}
+
+	if key != "" {
+		if cached := c.packageScopes[key]; cached != nil {
+			return cached
+		}
+	}
+
+	scope := NewScope(nil)
+	c.declareBuiltins(scope)
+	c.declarePackages(scope)
+
+	for name, sym := range pkg.Symbols {
+		if sym == nil {
+			continue
+		}
+
+		scope.Declare(&Symbol{
+			Name:     name,
+			Kind:     sym.Kind,
+			Type:     sym.Type,
+			Span:     sym.Span,
+			Node:     sym.Node,
+			Overload: sym.Overload,
+			Builtin:  sym.Builtin,
+			Package:  sym.Package,
+		})
+	}
+
+	if key != "" {
+		c.packageScopes[key] = scope
+	}
+
+	return scope
 }
 
 func cloneExportType(t *Type, seen map[*Type]*Type) *Type {

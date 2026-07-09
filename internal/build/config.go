@@ -3,6 +3,7 @@ package build
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -53,6 +54,8 @@ func defaultConfig() Config {
 		AllowUnusedVariables:  true,
 		AllowUnusedParameters: true,
 		AllowRunDirectives:    true,
+
+		GenericConstraintMaxDepth: 0,
 	}
 }
 
@@ -332,6 +335,13 @@ func (p *configParser) assign(key string, value string) error {
 		}
 		p.cfg.Linkage = s
 
+	case "generic_constraint_max_depth", "checker.generic_constraint_max_depth":
+		v, err := parseInt(value)
+		if err != nil {
+			return err
+		}
+		p.cfg.GenericConstraintMaxDepth = v
+
 	case "auto_initialize_variables", "checks.auto_initialize_variables":
 		v, err := parseBool(value)
 		if err != nil {
@@ -476,6 +486,17 @@ func parseBool(value string) (bool, error) {
 	default:
 		return false, fmt.Errorf("expected bool, got %q", value)
 	}
+}
+
+func parseInt(value string) (int, error) {
+	value = strings.TrimSpace(value)
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("expected integer, got %q", value)
+	}
+
+	return parsed, nil
 }
 
 func splitTopLevelObjects(input string) []string {

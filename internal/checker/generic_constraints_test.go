@@ -4,8 +4,31 @@ import (
 	"strings"
 	"testing"
 
+	"seal/internal/diag"
 	"seal/internal/resolver"
 )
+
+func checkSourceWithOptions(t *testing.T, input string, options Options) *diag.Reporter {
+	t.Helper()
+
+	file, reporter := parseCheckerFile(t, "test", input)
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	resolverReporter := diag.NewReporter()
+	res := resolver.New(resolverReporter)
+	res.ResolveFile(file)
+	if resolverReporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", resolverReporter.String())
+	}
+
+	checkerReporter := diag.NewReporter()
+	c := NewWithPackagesAndOptions(checkerReporter, nil, options)
+	c.CheckFile(file)
+
+	return checkerReporter
+}
 
 func TestCheckGenericTypeFieldConstraint(t *testing.T) {
 	reporter := checkSource(t, `
@@ -650,6 +673,174 @@ Main :: task() {
     UseAge<Matrix{years = 999}>()
 }
 `)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsRecursivePureTaskWhenDepthGuardEnabled(t *testing.T) {
+	reporter := checkSourceWithOptions(t, `
+Loop :: pure task(n int) bool {
+    return Loop(n)
+}
+
+UseAge :: task <Age int[Loop(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`, Options{
+		GenericConstraintMaxDepth: 8,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `recursive generic constraint evaluation through "Loop"`) {
+		t.Fatalf("expected recursive generic constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsMutualRecursivePureTasksWhenDepthGuardEnabled(t *testing.T) {
+	reporter := checkSourceWithOptions(t, `
+A :: pure task(n int) bool {
+    return B(n)
+}
+
+B :: pure task(n int) bool {
+    return A(n)
+}
+
+UseAge :: task <Age int[A(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`, Options{
+		GenericConstraintMaxDepth: 8,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `recursive generic constraint evaluation through "A"`) {
+		t.Fatalf("expected mutual recursion diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsPureTaskEvaluationPastMaxDepth(t *testing.T) {
+	reporter := checkSourceWithOptions(t, `
+F1 :: pure task(n int) bool {
+    return F2(n)
+}
+
+F2 :: pure task(n int) bool {
+    return F3(n)
+}
+
+F3 :: pure task(n int) bool {
+    return F4(n)
+}
+
+F4 :: pure task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[F1(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`, Options{
+		GenericConstraintMaxDepth: 3,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint evaluation exceeded max depth 3`) {
+		t.Fatalf("expected generic constraint max depth diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintAllowsPureTaskPredicate(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age int[rules.Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintRejectsPureTaskPredicateFalse(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age int[rules.Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<18>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed: rules.Over(18)`) {
+		t.Fatalf("expected imported pure task constraint failure, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintAllowsPureTaskCallingPureTask(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+OverLimit :: pure task(n int, limit int) bool {
+    return n > limit
+}
+
+Over :: pure task(n int) bool {
+    return OverLimit(n, 18)
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <Age int[rules.Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
 
 	if reporter.HasErrors() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())

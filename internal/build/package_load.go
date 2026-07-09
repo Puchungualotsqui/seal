@@ -27,6 +27,12 @@ type LoadedPackage struct {
 	CodegenInfo *cgen.PackageInfo
 }
 
+func checkerOptionsFromConfig(cfg Config) checker.Options {
+	return checker.Options{
+		GenericConstraintMaxDepth: cfg.GenericConstraintMaxDepth,
+	}
+}
+
 func LoadAndCheckPackage(
 	pkg *Package,
 	reporter *diag.Reporter,
@@ -38,13 +44,15 @@ func LoadAndCheckPackage(
 		return nil, nil, nil, err
 	}
 
+	checkerOptions := checkerOptionsFromConfig(pkg.Config)
+
 	if len(files) == 0 {
 		if pkg.Config.Kind == KindLibrary {
 			empty := &ast.File{}
 			r := resolver.NewWithPackages(reporter, resolverPackages)
 			resolverScope := r.ResolveFile(empty)
 
-			c := checker.NewWithPackages(reporter, checkerPackages)
+			c := checker.NewWithPackagesAndOptions(reporter, checkerPackages, checkerOptions)
 			checkerScope := c.CheckFile(empty)
 
 			return empty, resolverScope, checkerScope, nil
@@ -87,7 +95,7 @@ func LoadAndCheckPackage(
 		return nil, nil, nil, fmt.Errorf("resolving failed for package %q", pkg.Config.Name)
 	}
 
-	c := checker.NewWithPackages(reporter, checkerPackages)
+	c := checker.NewWithPackagesAndOptions(reporter, checkerPackages, checkerOptions)
 	checkerScope := c.CheckFile(combined)
 
 	if reporter.HasErrors() {

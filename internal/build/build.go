@@ -54,6 +54,8 @@ type Config struct {
 	AllowUnusedVariables  bool
 	AllowUnusedParameters bool
 	AllowRunDirectives    bool
+
+	GenericConstraintMaxDepth int
 }
 
 type Package struct {
