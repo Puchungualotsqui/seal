@@ -2537,3 +2537,92 @@ Main :: task() {
 		}
 	}
 }
+
+func TestImportedGenericStructValueParamCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    b: types.Buffer<int, 4>
+    x := b.data[0]
+    assert(x == 0)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct types_Buffer_int_4 {",
+		"intptr_t data[4];",
+		"} types_Buffer_int_4;",
+		"types_Buffer_int_4 b;",
+		"intptr_t x = (b).data[0];",
+		"assert((x == 0));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedNestedGenericStructValueParamCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    b: types.Box<types.Buffer<int, 4>>
+    x := b.value.data[0]
+    assert(x == 0)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct types_Buffer_int_4 {",
+		"intptr_t data[4];",
+		"} types_Buffer_int_4;",
+		"typedef struct types_Box_types_Buffer_int_4 {",
+		"types_Buffer_int_4 value;",
+		"} types_Box_types_Buffer_int_4;",
+		"types_Box_types_Buffer_int_4 b;",
+		"intptr_t x = ((b).value).data[0];",
+		"assert((x == 0));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
