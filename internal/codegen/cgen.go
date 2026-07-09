@@ -151,6 +151,12 @@ type PackageInfo struct {
 	Name      string
 	Tasks     map[string]TaskInfo
 	Overloads map[string][]string
+
+	Structs    map[string]*ast.StructDecl
+	Distincts  map[string]*ast.DistinctDecl
+	Enums      map[string]*ast.EnumDecl
+	Unions     map[string]*ast.UnionDecl
+	Interfaces map[string]*ast.InterfaceDecl
 }
 
 type ImplInfo struct {
@@ -163,6 +169,14 @@ type GenericStructInstance struct {
 	Name string
 	Decl *ast.StructDecl
 	Args []ast.GenericArg
+}
+
+type ImportedGenericStructInstance struct {
+	PackageName string
+	TypeName    string
+	Name        string
+	Decl        *ast.StructDecl
+	Args        []ast.GenericArg
 }
 
 type GenericTaskInstance struct {
@@ -190,6 +204,11 @@ type Generator struct {
 	emittedGenericStructs map[string]bool
 	genericTasks          map[string]*GenericTaskInstance
 	emittedGenericTasks   map[string]bool
+
+	importedGenericStructs        map[string]*ImportedGenericStructInstance
+	emittedImportedGenericStructs map[string]bool
+
+	typeContextPackage string
 
 	genericSubst         map[string]ast.GenericArg
 	importedGenericTasks map[string]*ImportedGenericTaskInstance
@@ -220,25 +239,27 @@ func New(diags *diag.Reporter) *Generator {
 
 func NewWithPackages(diags *diag.Reporter, packageName string, packages map[string]*PackageInfo) *Generator {
 	return &Generator{
-		diags:                 diags,
-		packageName:           packageName,
-		packages:              packages,
-		structs:               map[string]*ast.StructDecl{},
-		enums:                 map[string]*ast.EnumDecl{},
-		unions:                map[string]*ast.UnionDecl{},
-		interfaces:            map[string]*ast.InterfaceDecl{},
-		impls:                 map[string][]string{},
-		genericStructs:        map[string]*GenericStructInstance{},
-		emittedGenericStructs: map[string]bool{},
-		importedGenericTasks:  map[string]*ImportedGenericTaskInstance{},
-		genericTasks:          map[string]*GenericTaskInstance{},
-		emittedGenericTasks:   map[string]bool{},
-		tasks:                 map[string]TaskInfo{},
-		overloads:             map[string][]string{},
-		consts:                map[string]CType{},
-		emittedVariadics:      map[string]bool{},
-		distincts:             map[string]*ast.DistinctDecl{},
-		implInfos:             map[string]map[string]*ImplInfo{},
+		diags:                         diags,
+		packageName:                   packageName,
+		packages:                      packages,
+		structs:                       map[string]*ast.StructDecl{},
+		enums:                         map[string]*ast.EnumDecl{},
+		unions:                        map[string]*ast.UnionDecl{},
+		interfaces:                    map[string]*ast.InterfaceDecl{},
+		impls:                         map[string][]string{},
+		genericStructs:                map[string]*GenericStructInstance{},
+		emittedGenericStructs:         map[string]bool{},
+		importedGenericTasks:          map[string]*ImportedGenericTaskInstance{},
+		genericTasks:                  map[string]*GenericTaskInstance{},
+		emittedGenericTasks:           map[string]bool{},
+		importedGenericStructs:        map[string]*ImportedGenericStructInstance{},
+		emittedImportedGenericStructs: map[string]bool{},
+		tasks:                         map[string]TaskInfo{},
+		overloads:                     map[string][]string{},
+		consts:                        map[string]CType{},
+		emittedVariadics:              map[string]bool{},
+		distincts:                     map[string]*ast.DistinctDecl{},
+		implInfos:                     map[string]map[string]*ImplInfo{},
 	}
 }
 
@@ -246,18 +267,15 @@ func ExportPackageInfo(packageName string, file *ast.File, reporter *diag.Report
 	g := NewWithPackages(reporter, packageName, nil)
 	g.collect(file)
 
-	tasks := map[string]TaskInfo{}
-	for name, info := range g.tasks {
-		// Export typed signatures only. Consumers can specialize imported
-		// generic tasks from signature metadata without depending on source AST.
-		info.Decl = nil
-		tasks[name] = info
-	}
-
 	return &PackageInfo{
-		Name:      packageName,
-		Tasks:     tasks,
-		Overloads: g.overloads,
+		Name:       packageName,
+		Tasks:      g.tasks,
+		Overloads:  g.overloads,
+		Structs:    g.structs,
+		Distincts:  g.distincts,
+		Enums:      g.enums,
+		Unions:     g.unions,
+		Interfaces: g.interfaces,
 	}
 }
 
@@ -907,6 +925,15 @@ func (g *Generator) collectGenericStructInstancesFromGenericArg(arg ast.GenericA
 		g.collectGenericStructInstancesFromType(arg.Type)
 
 	case ast.GenericArgExpr:
+		if arg.Expr == nil {
+			return
+		}
+
+		if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
+			g.collectGenericStructInstancesFromType(typ)
+			return
+		}
+
 		g.collectGenericStructInstancesFromExpr(arg.Expr)
 	}
 }
@@ -1538,12 +1565,8 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 			return CInvalid
 
 		case *ast.SelectorExpr:
-			if id, ok := e.Left.(*ast.IdentExpr); ok {
-				if pkg := g.packages[id.Name.Name]; pkg != nil {
-					_ = pkg
-					g.error(e.Span(), "package-qualified type arguments are not supported by C codegen yet")
-					return CInvalid
-				}
+			if typ := typeAstFromExprForCGen(e); typ != nil {
+				return g.cTypeFromAstInContext(typ)
 			}
 
 			g.error(e.Span(), "expected type argument")
@@ -1790,6 +1813,178 @@ func (g *Generator) emitEnums(file *ast.File) {
 		g.indent--
 		g.linef("} %s;", d.Name.Name)
 		g.line("")
+	}
+}
+
+func (g *Generator) emitImportedStructs() {
+	if len(g.packages) == 0 {
+		return
+	}
+
+	pkgNames := make([]string, 0, len(g.packages))
+	for pkgName := range g.packages {
+		pkgNames = append(pkgNames, pkgName)
+	}
+	sort.Strings(pkgNames)
+
+	emitted := false
+
+	for _, pkgName := range pkgNames {
+		pkg := g.packages[pkgName]
+		if pkg == nil {
+			continue
+		}
+
+		structNames := make([]string, 0, len(pkg.Structs))
+		for name := range pkg.Structs {
+			structNames = append(structNames, name)
+		}
+		sort.Strings(structNames)
+
+		for _, structName := range structNames {
+			decl := pkg.Structs[structName]
+			if decl == nil || decl.IsIntrinsic || len(decl.GenericParams) > 0 {
+				continue
+			}
+
+			cName := cImportedTypeName(pkgName, structName)
+
+			g.linef("typedef struct %s {", cName)
+			g.indent++
+
+			for _, field := range decl.Fields {
+				fieldType := g.cTypeFromAstInTypeContext(pkgName, field.Type)
+				g.linef("%s;", fieldType.Decl(field.Name.Name))
+			}
+
+			g.indent--
+			g.linef("} %s;", cName)
+			g.line("")
+
+			emitted = true
+		}
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
+func (g *Generator) emitImportedGenericStructs() {
+	names := make([]string, 0, len(g.importedGenericStructs))
+	for name := range g.importedGenericStructs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		g.emitImportedGenericStructInstance(name, map[string]bool{})
+	}
+}
+
+func (g *Generator) emitImportedGenericStructInstance(name string, visiting map[string]bool) {
+	if g.emittedImportedGenericStructs[name] {
+		return
+	}
+
+	info := g.importedGenericStructs[name]
+	if info == nil || info.Decl == nil {
+		return
+	}
+
+	if visiting[name] {
+		g.error(info.Decl.Name.Span(), fmt.Sprintf("recursive imported generic struct instantiation %s is not supported yet", name))
+		return
+	}
+
+	visiting[name] = true
+
+	subst := genericArgSubstForCGen(info.Decl.GenericParams, info.Args)
+
+	g.withTypeContext(info.PackageName, func() {
+		for _, field := range info.Decl.Fields {
+			g.emitImportedGenericStructDepsForType(field.Type, subst, visiting)
+		}
+	})
+
+	g.linef("typedef struct %s {", info.Name)
+	g.indent++
+
+	g.withTypeContext(info.PackageName, func() {
+		for _, field := range info.Decl.Fields {
+			fieldType := g.cTypeFromAstWithGenericArgs(field.Type, subst)
+			g.linef("%s;", fieldType.Decl(field.Name.Name))
+		}
+	})
+
+	g.indent--
+	g.linef("} %s;", info.Name)
+	g.line("")
+
+	g.emittedImportedGenericStructs[name] = true
+	visiting[name] = false
+}
+
+func (g *Generator) emitImportedGenericStructDepsForType(typ ast.Type, subst map[string]ast.GenericArg, visiting map[string]bool) {
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) == 1 {
+			if arg, ok := subst[t.Parts[0].Name]; ok {
+				g.emitImportedGenericStructDepsForGenericArg(arg, subst, visiting)
+			}
+		}
+
+	case *ast.PointerType:
+		g.emitImportedGenericStructDepsForType(t.Elem, subst, visiting)
+
+	case *ast.ArrayType:
+		g.emitImportedGenericStructDepsForType(t.Elem, subst, visiting)
+
+	case *ast.GenericType:
+		args := make([]ast.GenericArg, 0, len(t.Args))
+		for _, arg := range t.Args {
+			args = append(args, g.substituteGenericArgForCGen(arg, subst))
+		}
+
+		gen := &ast.GenericType{
+			Base: t.Base,
+			Args: args,
+			Loc:  t.Loc,
+		}
+
+		ct := g.cTypeFromGenericType(gen)
+
+		if info := g.importedGenericStructs[ct.Name]; info != nil {
+			g.emitImportedGenericStructInstance(info.Name, visiting)
+			return
+		}
+
+		for _, arg := range args {
+			g.emitImportedGenericStructDepsForGenericArg(arg, subst, visiting)
+		}
+	}
+}
+
+func (g *Generator) emitImportedGenericStructDepsForGenericArg(arg ast.GenericArg, subst map[string]ast.GenericArg, visiting map[string]bool) {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		g.emitImportedGenericStructDepsForType(arg.Type, subst, visiting)
+
+	case ast.GenericArgExpr:
+		if id, ok := arg.Expr.(*ast.IdentExpr); ok {
+			if replacement, exists := subst[id.Name.Name]; exists {
+				if genericArgIsSingleNameForCGen(replacement, id.Name.Name) {
+					return
+				}
+
+				g.emitImportedGenericStructDepsForGenericArg(replacement, subst, visiting)
+				return
+			}
+		}
+
+		if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
+			g.emitImportedGenericStructDepsForType(typ, subst, visiting)
+		}
 	}
 }
 
@@ -2462,6 +2657,85 @@ func (g *Generator) cTaskName(name string) string {
 
 func cPackageTaskName(packageName string, taskName string) string {
 	return sanitizeCName(packageName) + "_" + sanitizeCName(taskName)
+}
+
+func cImportedTypeName(packageName string, typeName string) string {
+	return sanitizeCName(packageName) + "_" + sanitizeCName(typeName)
+}
+
+func packageTypeNameFromAst(t ast.Type) (string, string, bool) {
+	named, ok := t.(*ast.NamedType)
+	if !ok || len(named.Parts) < 2 {
+		return "", "", false
+	}
+
+	pkgName := named.Parts[0].Name
+	typeName := named.Parts[len(named.Parts)-1].Name
+
+	if pkgName == "" || typeName == "" {
+		return "", "", false
+	}
+
+	return pkgName, typeName, true
+}
+
+func (g *Generator) packageHasType(pkg *PackageInfo, typeName string) bool {
+	if pkg == nil {
+		return false
+	}
+
+	if pkg.Structs[typeName] != nil ||
+		pkg.Distincts[typeName] != nil ||
+		pkg.Enums[typeName] != nil ||
+		pkg.Unions[typeName] != nil ||
+		pkg.Interfaces[typeName] != nil {
+		return true
+	}
+
+	return false
+}
+
+func (g *Generator) importedNamedCType(packageName string, typeName string) CType {
+	name := cImportedTypeName(packageName, typeName)
+
+	if pkg := g.packages[packageName]; pkg != nil {
+		if iface := pkg.Interfaces[typeName]; iface != nil {
+			return CType{
+				Name:           name,
+				SealName:       name,
+				IsInterface:    true,
+				IsDynInterface: iface.IsDyn,
+			}
+		}
+	}
+
+	return CType{
+		Name:     name,
+		SealName: name,
+	}
+}
+
+func (g *Generator) withTypeContext(packageName string, fn func()) {
+	old := g.typeContextPackage
+	g.typeContextPackage = packageName
+	fn()
+	g.typeContextPackage = old
+}
+
+func (g *Generator) cTypeFromAstInTypeContext(packageName string, typ ast.Type) CType {
+	old := g.typeContextPackage
+	g.typeContextPackage = packageName
+	out := g.cTypeFromAst(typ)
+	g.typeContextPackage = old
+	return out
+}
+
+func (g *Generator) cTypeFromAstWithGenericArgsInTypeContext(packageName string, typ ast.Type, subst map[string]ast.GenericArg) CType {
+	old := g.typeContextPackage
+	g.typeContextPackage = packageName
+	out := g.cTypeFromAstWithGenericArgs(typ, subst)
+	g.typeContextPackage = old
+	return out
 }
 
 func sanitizeCName(name string) string {
@@ -6138,7 +6412,27 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			return CInvalid
 		}
 
+		if len(typ.Parts) >= 2 {
+			pkgName := typ.Parts[0].Name
+			typeName := typ.Parts[len(typ.Parts)-1].Name
+
+			if pkg := g.packages[pkgName]; pkg != nil && g.packageHasType(pkg, typeName) {
+				return g.importedNamedCType(pkgName, typeName)
+			}
+
+			return CType{
+				Name:     cImportedTypeName(pkgName, typeName),
+				SealName: cImportedTypeName(pkgName, typeName),
+			}
+		}
+
 		name := typ.Parts[len(typ.Parts)-1].Name
+
+		if g.typeContextPackage != "" {
+			if pkg := g.packages[g.typeContextPackage]; pkg != nil && g.packageHasType(pkg, name) {
+				return g.importedNamedCType(g.typeContextPackage, name)
+			}
+		}
 
 		if spec, ok := builtin.LookupType(name); ok {
 			return CType{
@@ -6217,7 +6511,42 @@ func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
 		}
 	}
 
+	if pkgName, typeName, ok := packageTypeNameFromAst(typ.Base); ok {
+		if pkg := g.packages[pkgName]; pkg != nil {
+			if decl := pkg.Structs[typeName]; decl != nil && len(decl.GenericParams) > 0 {
+				name := g.registerImportedGenericStructInstance(pkgName, typeName, decl, args)
+
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+		}
+
+		base := g.cTypeFromAst(typ.Base)
+
+		if g.isInterfaceCType(base) {
+			return base
+		}
+
+		g.error(typ.Span(), "imported generic type instantiation is not supported by C codegen yet")
+		return base
+	}
+
 	baseName := typeNameFromAst(typ.Base)
+
+	if g.typeContextPackage != "" {
+		if pkg := g.packages[g.typeContextPackage]; pkg != nil {
+			if decl := pkg.Structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
+				name := g.registerImportedGenericStructInstance(g.typeContextPackage, baseName, decl, args)
+
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+		}
+	}
 
 	if decl := g.structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
 		name := g.registerGenericStructInstance(decl, args)
@@ -6236,6 +6565,49 @@ func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
 
 	g.error(typ.Span(), "generic type instantiation is not supported by C codegen yet")
 	return base
+}
+
+func (g *Generator) registerImportedGenericStructInstance(packageName string, typeName string, decl *ast.StructDecl, args []ast.GenericArg) string {
+	name := g.specializedImportedStructCName(packageName, typeName, decl, args)
+
+	if _, exists := g.importedGenericStructs[name]; exists {
+		return name
+	}
+
+	copiedArgs := append([]ast.GenericArg(nil), args...)
+
+	g.importedGenericStructs[name] = &ImportedGenericStructInstance{
+		PackageName: packageName,
+		TypeName:    typeName,
+		Name:        name,
+		Decl:        decl,
+		Args:        copiedArgs,
+	}
+
+	return name
+}
+
+func (g *Generator) specializedImportedStructCName(packageName string, typeName string, decl *ast.StructDecl, args []ast.GenericArg) string {
+	parts := []string{sanitizeCName(packageName), sanitizeCName(typeName)}
+
+	for i, arg := range args {
+		paramCategory := ast.GenericParamInvalid
+		if decl != nil && i < len(decl.GenericParams) {
+			paramCategory = decl.GenericParams[i].Category
+		}
+
+		switch paramCategory {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			parts = append(parts, g.genericTypeArgCName(arg))
+
+		default:
+			parts = append(parts, genericValueArgCName(arg))
+		}
+	}
+
+	return strings.Join(parts, "_")
 }
 
 func (g *Generator) registerGenericStructInstance(decl *ast.StructDecl, args []ast.GenericArg) string {
@@ -6305,9 +6677,23 @@ func (g *Generator) genericTypeArgCName(arg ast.GenericArg) string {
 		return sanitizeCName(g.cTypeFromAstInContext(arg.Type).SealName)
 
 	case ast.GenericArgExpr:
+		if arg.Expr == nil {
+			return "invalid_type"
+		}
+
+		if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
+			return sanitizeCName(g.cTypeFromAstInContext(typ).SealName)
+		}
+
 		switch e := arg.Expr.(type) {
 		case *ast.IdentExpr:
 			name := e.Name.Name
+
+			if g.typeContextPackage != "" {
+				if pkg := g.packages[g.typeContextPackage]; pkg != nil && g.packageHasType(pkg, name) {
+					return sanitizeCName(cImportedTypeName(g.typeContextPackage, name))
+				}
+			}
 
 			if g.genericSubst != nil {
 				if replacement, exists := g.genericSubst[name]; exists {
@@ -6316,14 +6702,6 @@ func (g *Generator) genericTypeArgCName(arg ast.GenericArg) string {
 			}
 
 			return sanitizeCName(name)
-
-		case *ast.SelectorExpr:
-			return sanitizeCName(e.Name.Name)
-
-		case *ast.GenericExpr:
-			if typ := typeAstFromExprForCGen(e); typ != nil {
-				return sanitizeCName(g.cTypeFromAstInContext(typ).SealName)
-			}
 		}
 	}
 
@@ -6568,6 +6946,38 @@ func (g *Generator) lookupStructFieldType(structName string, fieldName string) C
 		}
 
 		return CInvalid
+	}
+
+	if info := g.importedGenericStructs[structName]; info != nil {
+		subst := genericArgSubstForCGen(info.Decl.GenericParams, info.Args)
+
+		for _, field := range info.Decl.Fields {
+			if field.Name.Name == fieldName {
+				return g.cTypeFromAstWithGenericArgsInTypeContext(info.PackageName, field.Type, subst)
+			}
+		}
+
+		return CInvalid
+	}
+
+	for pkgName, pkg := range g.packages {
+		if pkg == nil {
+			continue
+		}
+
+		for typeName, decl := range pkg.Structs {
+			if cImportedTypeName(pkgName, typeName) != structName {
+				continue
+			}
+
+			for _, field := range decl.Fields {
+				if field.Name.Name == fieldName {
+					return g.cTypeFromAstInTypeContext(pkgName, field.Type)
+				}
+			}
+
+			return CInvalid
+		}
 	}
 
 	return CInvalid
