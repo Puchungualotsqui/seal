@@ -1696,6 +1696,8 @@ func (g *Generator) cTypeFromAstInContext(t ast.Type) CType {
 }
 
 func (g *Generator) registerGenericTaskInstance(decl *ast.TaskDecl, args []ast.GenericArg) string {
+	args = normalizeGenericArgsForCGenParams(decl.GenericParams, args)
+
 	name := g.specializedTaskCName(decl, args)
 
 	if _, exists := g.genericTasks[name]; exists {
@@ -4826,6 +4828,7 @@ func (g *Generator) importedGenericTaskInfoFromSelector(sel *ast.SelectorExpr) (
 }
 
 func (g *Generator) registerImportedGenericTaskInstance(packageName string, taskName string, info TaskInfo, args []ast.GenericArg) string {
+	args = normalizeGenericArgsForCGenParams(info.GenericParams, args)
 	name := g.specializedImportedTaskCName(packageName, taskName, info, args)
 
 	if _, exists := g.importedGenericTasks[name]; exists {
@@ -6721,6 +6724,8 @@ func (g *Generator) registerImportedGenericStructInstance(packageName string, ty
 		return CInvalid.Name
 	}
 
+	args = normalizeGenericArgsForCGenParams(decl.GenericParams, args)
+
 	name := g.specializedImportedStructCName(packageName, typeName, decl, args)
 	if isInvalidCStructName(name) {
 		return CInvalid.Name
@@ -6784,6 +6789,7 @@ func isInvalidCStructName(name string) bool {
 }
 
 func (g *Generator) registerGenericStructInstance(decl *ast.StructDecl, args []ast.GenericArg) string {
+	args = normalizeGenericArgsForCGenParams(decl.GenericParams, args)
 	if decl == nil || isInvalidCStructName(decl.Name.Name) {
 		return CInvalid.Name
 	}

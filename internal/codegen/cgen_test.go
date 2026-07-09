@@ -3320,3 +3320,85 @@ Main :: task() {
 		}
 	}
 }
+
+func TestNormalizeGenericTypeArgExprToTypeForRequestKey(t *testing.T) {
+	params := []ast.GenericParam{
+		{
+			Name:     ast.Ident{Name: "T"},
+			Category: ast.GenericParamType,
+		},
+	}
+
+	exprArgs := []ast.GenericArg{
+		{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.IdentExpr{
+				Name: ast.Ident{Name: "int"},
+			},
+		},
+	}
+
+	typeArgs := []ast.GenericArg{
+		{
+			Kind: ast.GenericArgType,
+			Type: &ast.NamedType{
+				Parts: []ast.Ident{{Name: "int"}},
+			},
+		},
+	}
+
+	normalizedExprArgs := normalizeGenericArgsForCGenParams(params, exprArgs)
+	normalizedTypeArgs := normalizeGenericArgsForCGenParams(params, typeArgs)
+
+	reqA := GenericInstanceRequest{
+		Kind:        GenericInstanceTask,
+		PackageName: "rules",
+		SymbolName:  "Box",
+		Args:        normalizedExprArgs,
+	}
+
+	reqB := GenericInstanceRequest{
+		Kind:        GenericInstanceTask,
+		PackageName: "rules",
+		SymbolName:  "Box",
+		Args:        normalizedTypeArgs,
+	}
+
+	if reqA.Key() != reqB.Key() {
+		t.Fatalf("expected normalized request keys to match:\n%s\n%s", reqA.Key(), reqB.Key())
+	}
+}
+
+func TestNormalizeGenericTaskArgKeepsExpressionForRequestKey(t *testing.T) {
+	params := []ast.GenericParam{
+		{
+			Name:     ast.Ident{Name: "F"},
+			Category: ast.GenericParamTask,
+		},
+	}
+
+	args := []ast.GenericArg{
+		{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.GenericExpr{
+				Base: &ast.IdentExpr{
+					Name: ast.Ident{Name: "Identity"},
+				},
+				Args: []ast.GenericArg{
+					{
+						Kind: ast.GenericArgType,
+						Type: &ast.NamedType{
+							Parts: []ast.Ident{{Name: "int"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	normalized := normalizeGenericArgsForCGenParams(params, args)
+
+	if normalized[0].Kind != ast.GenericArgExpr {
+		t.Fatalf("expected task generic argument to remain expression, got kind %v", normalized[0].Kind)
+	}
+}

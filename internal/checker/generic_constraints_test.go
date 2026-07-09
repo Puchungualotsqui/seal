@@ -846,3 +846,103 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestCheckImportedGenericValueConstraintAllowsPureOperatorOverload(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <age rules.Matrix[age == "vampire"]>() {}
+
+Main :: task() {
+    UseAge<rules.Matrix{years = 999}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintRejectsPureOperatorOverloadFalse(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseAge :: task <age rules.Matrix[age == "vampire"]>() {}
+
+Main :: task() {
+    UseAge<rules.Matrix{years = 10}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed`) {
+		t.Fatalf("expected imported pure operator constraint failure, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericValueConstraintAllowsDerivedNotEqualPureOperatorOverload(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "rules", `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+`)
+
+	reporter := checkWithPackages(t, `
+UseMortalAge :: task <age rules.Matrix[age != "vampire"]>() {}
+
+Main :: task() {
+    UseMortalAge<rules.Matrix{years = 10}>()
+}
+`, map[string]*resolver.PackageInfo{
+		"rules": resolverPkg,
+	}, map[string]*PackageInfo{
+		"rules": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

@@ -408,6 +408,89 @@ func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*Packag
 	return c
 }
 
+type operatorOverloadLookup struct {
+	Symbol *Symbol
+	Scope  *Scope
+	Name   string
+}
+
+func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []*Type) []operatorOverloadLookup {
+	if scope == nil {
+		scope = c.global
+	}
+
+	var out []operatorOverloadLookup
+	seen := map[*Symbol]bool{}
+
+	add := func(sym *Symbol, lookupScope *Scope, displayName string) {
+		if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+			return
+		}
+
+		if seen[sym] {
+			return
+		}
+
+		seen[sym] = true
+		out = append(out, operatorOverloadLookup{
+			Symbol: sym,
+			Scope:  lookupScope,
+			Name:   displayName,
+		})
+	}
+
+	add(scope.Lookup(name), scope, name)
+
+	for _, typ := range argTypes {
+		pkgName, ok := packageNameFromType(typ)
+		if !ok {
+			continue
+		}
+
+		pkgSym := scope.Lookup(pkgName)
+		if pkgSym == nil || pkgSym.Kind != SymbolPackage || pkgSym.Package == nil {
+			continue
+		}
+
+		member := pkgSym.Package.Symbols[name]
+		if member == nil || member.Kind != SymbolOverload || member.Overload == nil {
+			continue
+		}
+
+		pkgScope := c.scopeForPackageInfo(pkgName, pkgSym.Package)
+		add(member, pkgScope, pkgName+"."+name)
+	}
+
+	return out
+}
+
+func packageNameFromType(typ *Type) (string, bool) {
+	if typ == nil {
+		return "", false
+	}
+
+	switch typ.Kind {
+	case TypePointer, TypeArray, TypeVariadic:
+		return packageNameFromType(typ.Elem)
+	}
+
+	name := typ.Name
+	if name == "" {
+		return "", false
+	}
+
+	if i := strings.Index(name, "<"); i >= 0 {
+		name = name[:i]
+	}
+
+	dot := strings.Index(name, ".")
+	if dot <= 0 {
+		return "", false
+	}
+
+	return name[:dot], true
+}
+
 func (c *Checker) CheckFile(file *ast.File) *Scope {
 	for _, decl := range file.Decls {
 		c.declareDecl(c.global, decl)
@@ -2943,17 +3026,46 @@ func (c *Checker) numericComparable(a *Type, b *Type) bool {
 }
 
 func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*Type, span source.Span, diagnoseMissing bool) (*Type, bool) {
-	sym := scope.Lookup(name)
-	if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+	lookups := c.operatorOverloadLookups(scope, name, argTypes)
+	if len(lookups) == 0 {
 		return InvalidType, false
 	}
 
-	c.ensureOverloadSymbolPrepared(scope, sym)
+	best := overloadResolution{
+		Score: 1 << 30,
+	}
+	var bestLookup operatorOverloadLookup
 
-	info := sym.Overload
-	result := c.resolveOverload(info, argTypes)
+	for _, lookup := range lookups {
+		c.ensureOverloadSymbolPrepared(lookup.Scope, lookup.Symbol)
 
-	if !result.Matched {
+		result := c.resolveOverload(lookup.Symbol.Overload, argTypes)
+		if !result.Matched {
+			continue
+		}
+
+		if result.Ambiguous {
+			c.diags.Add(
+				span,
+				fmt.Sprintf("ambiguous operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)),
+			)
+			return InvalidType, true
+		}
+
+		if !best.Matched || result.Score < best.Score {
+			best = result
+			bestLookup = lookup
+			continue
+		}
+
+		if result.Score == best.Score {
+			best.Ambiguous = true
+		}
+	}
+
+	_ = bestLookup
+
+	if !best.Matched {
 		if diagnoseMissing {
 			c.diags.Add(
 				span,
@@ -2964,7 +3076,7 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 		return InvalidType, true
 	}
 
-	if result.Ambiguous {
+	if best.Ambiguous {
 		c.diags.Add(
 			span,
 			fmt.Sprintf("ambiguous operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)),
@@ -2973,7 +3085,7 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 		return InvalidType, true
 	}
 
-	return c.resultTypeFromCall(result.Candidate.Type, span), true
+	return c.resultTypeFromCall(best.Candidate.Type, span), true
 }
 
 func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
@@ -5502,27 +5614,52 @@ func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, le
 		scope = c.global
 	}
 
-	sym := scope.Lookup(name)
-	if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
-		return genericConstValue{}, false
-	}
-
-	c.ensureOverloadSymbolPrepared(scope, sym)
-
 	argTypes := []*Type{left.Type, right.Type}
-	result := c.resolveOverload(sym.Overload, argTypes)
-
-	if !result.Matched {
+	lookups := c.operatorOverloadLookups(scope, name, argTypes)
+	if len(lookups) == 0 {
 		return genericConstValue{}, false
 	}
 
-	if result.Ambiguous {
+	best := overloadResolution{
+		Score: 1 << 30,
+	}
+	var bestScope *Scope
+
+	for _, lookup := range lookups {
+		c.ensureOverloadSymbolPrepared(lookup.Scope, lookup.Symbol)
+
+		result := c.resolveOverload(lookup.Symbol.Overload, argTypes)
+		if !result.Matched {
+			continue
+		}
+
+		if result.Ambiguous {
+			c.diags.Add(span, fmt.Sprintf("ambiguous generic constraint operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)))
+			return genericConstValue{}, false
+		}
+
+		if !best.Matched || result.Score < best.Score {
+			best = result
+			bestScope = lookup.Scope
+			continue
+		}
+
+		if result.Score == best.Score {
+			best.Ambiguous = true
+		}
+	}
+
+	if !best.Matched {
+		return genericConstValue{}, false
+	}
+
+	if best.Ambiguous {
 		c.diags.Add(span, fmt.Sprintf("ambiguous generic constraint operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)))
 		return genericConstValue{}, false
 	}
 
-	candidate := result.Candidate
-	c.ensureTaskSymbolPrepared(scope, candidate)
+	candidate := best.Candidate
+	c.ensureTaskSymbolPrepared(bestScope, candidate)
 
 	if candidate == nil || candidate.Type == nil || candidate.Type.Kind != TypeTask {
 		return genericConstValue{}, false
@@ -5544,7 +5681,12 @@ func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, le
 		return genericConstValue{}, false
 	}
 
-	return c.evalPureTaskConstBody(scope, candidate.Name, span, taskDecl, []genericConstValue{left, right})
+	evalName := candidate.Name
+	if pkgName, ok := packageNameFromType(left.Type); ok {
+		evalName = pkgName + "." + candidate.Name
+	}
+
+	return c.evalPureTaskConstBody(bestScope, evalName, span, taskDecl, []genericConstValue{left, right})
 }
 
 func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
