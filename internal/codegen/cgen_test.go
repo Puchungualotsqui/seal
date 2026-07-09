@@ -2190,7 +2190,13 @@ Main :: task() {
 	}
 }
 
-func generateWithPackages(t *testing.T, input string, packages map[string]*PackageInfo) (string, *diag.Reporter) {
+func generateWithPackages(
+	t *testing.T,
+	input string,
+	packages map[string]*PackageInfo,
+	resolverPackages map[string]*resolver.PackageInfo,
+	checkerPackages map[string]*checker.PackageInfo,
+) (string, *diag.Reporter) {
 	t.Helper()
 
 	file := source.NewFile("test.seal", input)
@@ -2210,21 +2216,19 @@ func generateWithPackages(t *testing.T, input string, packages map[string]*Packa
 		t.Fatalf("parser diagnostics:\n%s", reporter.String())
 	}
 
-	r := resolver.New(reporter)
+	r := resolver.NewWithPackages(reporter, resolverPackages)
 	r.ResolveFile(parsed)
 
 	if reporter.HasErrors() {
 		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
 	}
 
-	c := checker.New(reporter)
-	scope := c.CheckFile(parsed)
+	c := checker.NewWithPackages(reporter, checkerPackages)
+	c.CheckFile(parsed)
 
 	if reporter.HasErrors() {
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
-
-	_ = scope
 
 	g := NewWithPackages(reporter, "", packages)
 	out := g.Generate(parsed)
@@ -2232,7 +2236,7 @@ func generateWithPackages(t *testing.T, input string, packages map[string]*Packa
 	return out, reporter
 }
 
-func exportCGenPackage(t *testing.T, packageName string, input string) (*PackageInfo, *checker.PackageInfo) {
+func exportCGenPackage(t *testing.T, packageName string, input string) (*PackageInfo, *resolver.PackageInfo, *checker.PackageInfo) {
 	t.Helper()
 
 	file := source.NewFile(packageName+".seal", input)
@@ -2253,24 +2257,26 @@ func exportCGenPackage(t *testing.T, packageName string, input string) (*Package
 	}
 
 	r := resolver.New(reporter)
-	r.ResolveFile(parsed)
+	resolverScope := r.ResolveFile(parsed)
 
 	if reporter.HasErrors() {
 		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
 	}
 
 	c := checker.New(reporter)
-	scope := c.CheckFile(parsed)
+	checkerScope := c.CheckFile(parsed)
 
 	if reporter.HasErrors() {
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	return ExportPackageInfo(packageName, parsed, reporter), checker.ExportPackage(packageName, scope)
+	return ExportPackageInfo(packageName, parsed, reporter),
+		resolver.ExportPackage(packageName, resolverScope),
+		checker.ExportPackage(packageName, checkerScope)
 }
 
 func TestImportedGenericTaskSpecializationCodegen(t *testing.T) {
-	mathPkg, _ := exportCGenPackage(t, "math", `
+	mathPkg, mathResolverPkg, mathCheckerPkg := exportCGenPackage(t, "math", `
 Identity :: task <T type>(value T) T {
     return value
 }
@@ -2283,6 +2289,10 @@ Main :: task() {
 }
 `, map[string]*PackageInfo{
 		"math": mathPkg,
+	}, map[string]*resolver.PackageInfo{
+		"math": mathResolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"math": mathCheckerPkg,
 	})
 
 	if reporter.HasErrors() {
@@ -2302,7 +2312,7 @@ Main :: task() {
 }
 
 func TestImportedGenericMultiReturnTaskSpecializationCodegen(t *testing.T) {
-	mathPkg, _ := exportCGenPackage(t, "math", `
+	mathPkg, mathResolverPkg, mathCheckerPkg := exportCGenPackage(t, "math", `
 Swap :: task <T type>(a T, b T) T, T {
     return b, a
 }
@@ -2317,6 +2327,10 @@ Main :: task() {
 }
 `, map[string]*PackageInfo{
 		"math": mathPkg,
+	}, map[string]*resolver.PackageInfo{
+		"math": mathResolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"math": mathCheckerPkg,
 	})
 
 	if reporter.HasErrors() {
@@ -2340,7 +2354,7 @@ Main :: task() {
 }
 
 func TestImportedGenericTaskArgumentCodegen(t *testing.T) {
-	mathPkg, _ := exportCGenPackage(t, "math", `
+	mathPkg, mathResolverPkg, mathCheckerPkg := exportCGenPackage(t, "math", `
 Identity :: task <T type>(value T) T {
     return value
 }
@@ -2357,6 +2371,10 @@ Main :: task() {
 }
 `, map[string]*PackageInfo{
 		"math": mathPkg,
+	}, map[string]*resolver.PackageInfo{
+		"math": mathResolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"math": mathCheckerPkg,
 	})
 
 	if reporter.HasErrors() {
@@ -2366,7 +2384,8 @@ Main :: task() {
 	checks := []string{
 		"intptr_t math_Identity_int(intptr_t value);",
 		"intptr_t Apply_math_Identity_int(intptr_t value);",
-		"return math_Identity_int(value);",
+		"intptr_t Apply_math_Identity_int(intptr_t value) {",
+		"math_Identity_int(value)",
 		"intptr_t x = Apply_math_Identity_int(10);",
 	}
 
