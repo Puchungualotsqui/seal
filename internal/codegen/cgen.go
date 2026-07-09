@@ -2251,7 +2251,7 @@ func (g *Generator) emitResultStructs(file *ast.File) {
 
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.TaskDecl)
-		if !ok || d.IsTest || len(d.Results) <= 1 {
+		if !ok || d.IsTest || len(d.GenericParams) > 0 || len(d.Results) <= 1 {
 			continue
 		}
 

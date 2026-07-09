@@ -3280,3 +3280,43 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenericTaskTemplateMultiReturnDoesNotEmitUnspecializedResultStruct(t *testing.T) {
+	out, reporter := generate(t, `
+Pair :: task <T type>(a T, b T) T, T {
+    return a, b
+}
+
+Main :: task() {
+    x, y := Pair<int>(1, 2)
+    assert(x == 1)
+    assert(y == 2)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	if strings.Contains(out, "Pair_Result") {
+		t.Fatalf("generic task template emitted unspecialized result struct:\n%s", out)
+	}
+
+	if strings.Contains(out, "typedef struct /*invalid*/ int") {
+		t.Fatalf("generic task template emitted invalid result struct:\n%s", out)
+	}
+
+	checks := []string{
+		"typedef struct Pair_int_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"} Pair_int_Result;",
+		"Pair_int_Result Pair_int(intptr_t a, intptr_t b);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
