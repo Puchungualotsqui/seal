@@ -14,6 +14,8 @@ import (
 	"seal/internal/resolver"
 )
 
+const maxGenericRequestIterations = 64
+
 type BuildOptions struct {
 	EmitOnly bool
 	OutDir   string
@@ -158,7 +160,7 @@ func generateWorkspaceCWithGenericRequests(
 		requestsByPackage[loadedPkg.Package.Config.Name] = cgen.NewGenericInstanceRequestSet()
 	}
 
-	for {
+	for iteration := 0; iteration < maxGenericRequestIterations; iteration++ {
 		changed := false
 
 		for _, loadedPkg := range loaded {
@@ -227,6 +229,8 @@ func generateWorkspaceCWithGenericRequests(
 			return nil
 		}
 	}
+
+	return fmt.Errorf("generic instance request fixed point did not converge after %d iterations", maxGenericRequestIterations)
 }
 
 func codegenPackagesForPackage(
