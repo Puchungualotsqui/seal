@@ -107,9 +107,10 @@ type EnumVariantInfo struct {
 }
 
 type FieldInfo struct {
-	Name string
-	Type *Type
-	Span source.Span
+	Name    string
+	Type    *Type
+	TypeAst ast.Type
+	Span    source.Span
 }
 
 type InterfaceRequirementInfo struct {
@@ -964,9 +965,10 @@ func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
 		fieldType := c.typeFromAst(scope, field.Type)
 
 		fields = append(fields, FieldInfo{
-			Name: field.Name.Name,
-			Type: fieldType,
-			Span: field.Name.Span(),
+			Name:    field.Name.Name,
+			Type:    fieldType,
+			TypeAst: field.Type,
+			Span:    field.Name.Span(),
 		})
 	}
 
@@ -3754,10 +3756,9 @@ func (c *Checker) structDeclForGenericBase(scope *Scope, typ ast.Type, baseType 
 		return nil, baseName
 	}
 
-	importedBaseName := pkgIdent.Name + "." + typeIdent.Name
-
 	decl, _ := member.Node.(*ast.StructDecl)
-	return decl, importedBaseName
+
+	return decl, pkgIdent.Name + "." + typeIdent.Name
 }
 
 func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseType *Type, decl *ast.StructDecl, baseName string) *Type {
@@ -3792,23 +3793,30 @@ func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseT
 			fieldType := c.typeFromAstWithGenericArgs(scope, field.Type, subst)
 
 			typ.Fields = append(typ.Fields, FieldInfo{
-				Name: field.Name.Name,
-				Type: fieldType,
-				Span: field.Name.Span(),
+				Name:    field.Name.Name,
+				Type:    fieldType,
+				TypeAst: field.Type,
+				Span:    field.Name.Span(),
 			})
 		}
 
 		return typ
 	}
 
-	// Fallback for imported signature-only types. This cannot recover generic
-	// value expressions such as [N]T perfectly, but it does correctly substitute
-	// typed generic fields such as value T.
 	for _, field := range baseType.Fields {
+		fieldType := InvalidType
+
+		if field.TypeAst != nil {
+			fieldType = c.typeFromAstWithGenericArgs(scope, field.TypeAst, subst)
+		} else {
+			fieldType = c.substituteGenericSignatureType(scope, field.Type, typeSubst, subst)
+		}
+
 		typ.Fields = append(typ.Fields, FieldInfo{
-			Name: field.Name,
-			Type: c.substituteGenericSignatureType(scope, field.Type, typeSubst, subst),
-			Span: field.Span,
+			Name:    field.Name,
+			Type:    fieldType,
+			TypeAst: field.TypeAst,
+			Span:    field.Span,
 		})
 	}
 
@@ -6142,9 +6150,10 @@ func exportSymbolSignatureOnly(sym *Symbol) *Symbol {
 
 	out := *sym
 
-	// Imported generic tasks must be type-checkable from their typed
-	// signatures, not from their source AST bodies.
-	if out.Kind == SymbolTask {
+	// Imported tasks and types must be type-checkable from exported typed
+	// signatures, not from source bodies/declarations. Generic struct fields
+	// keep their field TypeAst through FieldInfo.
+	if out.Kind == SymbolTask || out.Kind == SymbolType {
 		out.Node = nil
 	}
 
@@ -6184,9 +6193,10 @@ func cloneExportType(t *Type, seen map[*Type]*Type) *Type {
 	out.Fields = nil
 	for _, field := range t.Fields {
 		out.Fields = append(out.Fields, FieldInfo{
-			Name: field.Name,
-			Type: cloneExportType(field.Type, seen),
-			Span: field.Span,
+			Name:    field.Name,
+			Type:    cloneExportType(field.Type, seen),
+			TypeAst: field.TypeAst,
+			Span:    field.Span,
 		})
 	}
 

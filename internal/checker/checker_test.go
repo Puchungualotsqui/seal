@@ -44,6 +44,76 @@ func check(t *testing.T, input string) (*Scope, *diag.Reporter) {
 	return scope, reporter
 }
 
+func checkWithPackages(t *testing.T, input string, resolverPackages map[string]*resolver.PackageInfo, checkerPackages map[string]*PackageInfo) *diag.Reporter {
+	t.Helper()
+
+	file := source.NewFile("test.seal", input)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.NewWithPackages(reporter, resolverPackages)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := NewWithPackages(reporter, checkerPackages)
+	c.CheckFile(parsed)
+
+	return reporter
+}
+
+func exportCheckerPackage(t *testing.T, packageName string, input string) (*Scope, *resolver.PackageInfo, *PackageInfo) {
+	t.Helper()
+
+	file := source.NewFile(packageName+".seal", input)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	resolverScope := r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := New(reporter)
+	checkerScope := c.CheckFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	return checkerScope, resolver.ExportPackage(packageName, resolverScope), ExportPackage(packageName, checkerScope)
+}
+
 func TestCheckBuiltInTypesAndVarInference(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
@@ -2808,5 +2878,308 @@ Main :: task() {
 
 	if !strings.Contains(reporter.String(), `must contain member Failure`) {
 		t.Fatalf("expected missing union member diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructFieldSubstitution(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Box<int> = types.Box<int>{value = 10}
+    x := b.value
+    assert(x == 10)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructRejectsWrongFieldValueType(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Box<int> = types.Box<int>{value = "wrong"}
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedNestedGenericStructFieldSubstitution(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Pair :: struct <A type, B type> {
+    first A
+    second B
+}
+
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Box<types.Pair<int, string>>
+    pair := b.value
+
+    x := pair.first
+    s := pair.second
+
+    assert(x == 0)
+    assert(size(s) >= 0)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericTaskReturnsImportedGenericStruct(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+
+MakeBox :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b := types.MakeBox<int>(10)
+    x := b.value
+
+    assert(x == 10)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericTaskRejectsWrongArgumentAfterSpecialization(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    x := types.Identity<int>("wrong")
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedSpecializedGenericTaskArgument(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<types.Identity<int>>(10)
+    assert(x == 10)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedSpecializedGenericTaskArgumentRejectsSignatureMismatch(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<types.Identity<string>>(10)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic task parameter "F" expects task(int) int, got task(string) string`) {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructValueParamFieldSubstitution(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Buffer<int, 4>
+    x := b.data[0]
+    assert(x == 0)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructValueParamRejectsWrongIndexUse(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Buffer<string, 4>
+    x: int = b.data[0]
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign string to int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructValueParamArrayLength(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+TakeFour :: task(values [4]int) {
+}
+
+Main :: task() {
+    b: types.Buffer<int, 4>
+    TakeFour(b.data)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericStructValueParamRejectsArrayLengthMismatch(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+TakeFive :: task(values [5]int) {
+}
+
+Main :: task() {
+    b: types.Buffer<int, 4>
+    TakeFive(b.data)
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), "cannot assign [4]int to [5]int") {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
