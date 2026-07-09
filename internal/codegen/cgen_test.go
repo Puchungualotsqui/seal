@@ -2405,7 +2405,9 @@ Box :: struct <T type> {
 
 	out, reporter := generateWithPackages(t, `
 Main :: task() {
-    b: types.Box<int>
+    b: types.Box<int> = types.Box<int>{value = 10}
+    x := b.value
+    assert(x == 10)
 }
 `, map[string]*PackageInfo{
 		"types": typesPkg,
@@ -2423,7 +2425,9 @@ Main :: task() {
 		"typedef struct types_Box_int {",
 		"intptr_t value;",
 		"} types_Box_int;",
-		"types_Box_int b;",
+		"types_Box_int b = (types_Box_int){.value = 10};",
+		"intptr_t x = (b).value;",
+		"assert((x == 10));",
 	}
 
 	for _, want := range checks {
@@ -2448,6 +2452,12 @@ Box :: struct <T type> {
 	out, reporter := generateWithPackages(t, `
 Main :: task() {
     b: types.Box<types.Pair<int, string>>
+    pair := b.value
+    x := pair.first
+    s := pair.second
+
+    assert(x == 0)
+    assert(size(s) >= 0)
 }
 `, map[string]*PackageInfo{
 		"types": typesPkg,
@@ -2470,6 +2480,9 @@ Main :: task() {
 		"types_Pair_int_string value;",
 		"} types_Box_types_Pair_int_string;",
 		"types_Box_types_Pair_int_string b;",
+		"types_Pair_int_string pair = (b).value;",
+		"intptr_t x = (pair).first;",
+		"sealString s = (pair).second;",
 	}
 
 	for _, want := range checks {
@@ -2493,6 +2506,8 @@ MakeBox :: task <T type>(value T) Box<T> {
 	out, reporter := generateWithPackages(t, `
 Main :: task() {
     b := types.MakeBox<int>(10)
+    x := b.value
+    assert(x == 10)
 }
 `, map[string]*PackageInfo{
 		"types": typesPkg,
@@ -2512,6 +2527,8 @@ Main :: task() {
 		"} types_Box_int;",
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int b = types_MakeBox_int(10);",
+		"intptr_t x = (b).value;",
+		"assert((x == 10));",
 	}
 
 	for _, want := range checks {

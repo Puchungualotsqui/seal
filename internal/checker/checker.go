@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -1685,20 +1686,7 @@ func (c *Checker) taskTypeFromGenericSignature(scope *Scope, generic *Type, args
 	}
 
 	argSubst := genericArgSubst(generic.GenericParams, args)
-	typeSubst := map[string]*Type{}
-
-	for i, param := range generic.GenericParams {
-		if i >= len(args) {
-			break
-		}
-
-		switch param.Category {
-		case ast.GenericParamType,
-			ast.GenericParamEnum,
-			ast.GenericParamUnion:
-			typeSubst[param.Name.Name] = c.typeFromGenericArg(scope, args[i])
-		}
-	}
+	typeSubst := c.genericTypeSubstFromArgs(scope, generic.GenericParams, args)
 
 	var params []*Type
 	for _, param := range generic.Params {
@@ -1768,6 +1756,58 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
 		}
 
+	case TypeStruct:
+		out := *typ
+		out.Fields = nil
+		out.GenericParams = nil
+
+		if typ.Name != "" {
+			out.Name = c.substitutedGenericDisplayName(typ.Name, typeSubst)
+		}
+
+		for _, field := range typ.Fields {
+			out.Fields = append(out.Fields, FieldInfo{
+				Name: field.Name,
+				Type: c.substituteGenericSignatureType(scope, field.Type, typeSubst, argSubst),
+				Span: field.Span,
+			})
+		}
+
+		return &out
+
+	case TypeUnion:
+		out := *typ
+		out.Members = nil
+
+		for _, member := range typ.Members {
+			out.Members = append(out.Members, c.substituteGenericSignatureType(scope, member, typeSubst, argSubst))
+		}
+
+		return &out
+
+	case TypeInterface:
+		out := *typ
+		out.InterfaceRequirements = nil
+
+		for _, req := range typ.InterfaceRequirements {
+			cloned := InterfaceRequirementInfo{
+				Name: req.Name,
+				Span: req.Span,
+			}
+
+			for _, param := range req.Params {
+				cloned.Params = append(cloned.Params, c.substituteGenericSignatureType(scope, param, typeSubst, argSubst))
+			}
+
+			for _, result := range req.Results {
+				cloned.Results = append(cloned.Results, c.substituteGenericSignatureType(scope, result, typeSubst, argSubst))
+			}
+
+			out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+		}
+
+		return &out
+
 	case TypeTask:
 		out := *typ
 		out.Params = nil
@@ -1786,6 +1826,76 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 	default:
 		return typ
 	}
+}
+
+func (c *Checker) substitutedGenericDisplayName(name string, typeSubst map[string]*Type) string {
+	if name == "" || len(typeSubst) == 0 {
+		return name
+	}
+
+	out := name
+
+	keys := make([]string, 0, len(typeSubst))
+	for key := range typeSubst {
+		keys = append(keys, key)
+	}
+
+	// Longer names first avoids replacing T inside TypeName-like params.
+	sort.Strings(keys)
+	for i, j := 0, len(keys)-1; i < j; i, j = i+1, j-1 {
+		keys[i], keys[j] = keys[j], keys[i]
+	}
+
+	for _, key := range keys {
+		replacement := typeSubst[key]
+		if replacement == nil {
+			continue
+		}
+
+		out = replaceGenericDisplayToken(out, key, replacement.String())
+	}
+
+	return out
+}
+
+func replaceGenericDisplayToken(input string, token string, replacement string) string {
+	if token == "" {
+		return input
+	}
+
+	var b strings.Builder
+
+	for i := 0; i < len(input); {
+		if strings.HasPrefix(input[i:], token) &&
+			isGenericDisplayBoundary(input, i-1) &&
+			isGenericDisplayBoundary(input, i+len(token)) {
+			b.WriteString(replacement)
+			i += len(token)
+			continue
+		}
+
+		b.WriteByte(input[i])
+		i++
+	}
+
+	return b.String()
+}
+
+func isGenericDisplayBoundary(input string, index int) bool {
+	if index < 0 || index >= len(input) {
+		return true
+	}
+
+	ch := input[index]
+
+	if ch >= 'a' && ch <= 'z' ||
+		ch >= 'A' && ch <= 'Z' ||
+		ch >= '0' && ch <= '9' ||
+		ch == '_' {
+		return false
+	}
+
+	return true
 }
 
 func (c *Checker) taskTypeFromGenericCall(scope *Scope, d *ast.TaskDecl, args []ast.GenericArg) *Type {
@@ -3597,12 +3707,8 @@ func (c *Checker) typeFromGenericTypeAst(scope *Scope, t *ast.GenericType) *Type
 
 	switch baseType.Kind {
 	case TypeStruct:
-		decl := c.structDeclForGenericBase(scope, t.Base)
-		if decl == nil {
-			return baseType
-		}
-
-		return c.specializeStructType(scope, t, baseType, decl)
+		decl, baseName := c.structDeclForGenericBase(scope, t.Base, baseType)
+		return c.specializeStructType(scope, t, baseType, decl, baseName)
 
 	case TypeInterface:
 		// Runtime generic interfaces still use the base interface representation
@@ -3614,33 +3720,63 @@ func (c *Checker) typeFromGenericTypeAst(scope *Scope, t *ast.GenericType) *Type
 	}
 }
 
-func (c *Checker) structDeclForGenericBase(scope *Scope, typ ast.Type) *ast.StructDecl {
+func (c *Checker) structDeclForGenericBase(scope *Scope, typ ast.Type, baseType *Type) (*ast.StructDecl, string) {
+	baseName := ""
+	if baseType != nil {
+		baseName = baseType.Name
+	}
+
 	named, ok := typ.(*ast.NamedType)
-	if !ok || len(named.Parts) != 1 {
-		return nil
+	if !ok || len(named.Parts) == 0 {
+		return nil, baseName
 	}
 
-	sym := scope.Lookup(named.Parts[0].Name)
-	if sym == nil {
-		return nil
+	if len(named.Parts) == 1 {
+		sym := scope.Lookup(named.Parts[0].Name)
+		if sym == nil {
+			return nil, baseName
+		}
+
+		decl, _ := sym.Node.(*ast.StructDecl)
+		return decl, baseName
 	}
 
-	decl, _ := sym.Node.(*ast.StructDecl)
-	return decl
+	pkgIdent := named.Parts[0]
+	typeIdent := named.Parts[len(named.Parts)-1]
+
+	pkgSym := scope.Lookup(pkgIdent.Name)
+	if pkgSym == nil || pkgSym.Kind != SymbolPackage || pkgSym.Package == nil {
+		return nil, baseName
+	}
+
+	member := pkgSym.Package.Symbols[typeIdent.Name]
+	if member == nil || member.Kind != SymbolType {
+		return nil, baseName
+	}
+
+	importedBaseName := pkgIdent.Name + "." + typeIdent.Name
+
+	decl, _ := member.Node.(*ast.StructDecl)
+	return decl, importedBaseName
 }
 
-func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseType *Type, decl *ast.StructDecl) *Type {
+func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseType *Type, decl *ast.StructDecl, baseName string) *Type {
 	if len(gen.Args) != len(baseType.GenericParams) {
 		return InvalidType
 	}
 
-	name := c.specializedTypeName(baseType.Name, gen.Args)
+	if baseName == "" {
+		baseName = baseType.Name
+	}
+
+	name := c.specializedTypeName(baseName, gen.Args)
 
 	if cached := c.specializedTypes[name]; cached != nil {
 		return cached
 	}
 
 	subst := genericArgSubst(baseType.GenericParams, gen.Args)
+	typeSubst := c.genericTypeSubstFromArgs(scope, baseType.GenericParams, gen.Args)
 
 	typ := &Type{
 		Kind:          TypeStruct,
@@ -3651,17 +3787,51 @@ func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseT
 	// Store before fields so recursive generic structs do not loop forever.
 	c.specializedTypes[name] = typ
 
-	for _, field := range decl.Fields {
-		fieldType := c.typeFromAstWithGenericArgs(scope, field.Type, subst)
+	if decl != nil {
+		for _, field := range decl.Fields {
+			fieldType := c.typeFromAstWithGenericArgs(scope, field.Type, subst)
 
+			typ.Fields = append(typ.Fields, FieldInfo{
+				Name: field.Name.Name,
+				Type: fieldType,
+				Span: field.Name.Span(),
+			})
+		}
+
+		return typ
+	}
+
+	// Fallback for imported signature-only types. This cannot recover generic
+	// value expressions such as [N]T perfectly, but it does correctly substitute
+	// typed generic fields such as value T.
+	for _, field := range baseType.Fields {
 		typ.Fields = append(typ.Fields, FieldInfo{
-			Name: field.Name.Name,
-			Type: fieldType,
-			Span: field.Name.Span(),
+			Name: field.Name,
+			Type: c.substituteGenericSignatureType(scope, field.Type, typeSubst, subst),
+			Span: field.Span,
 		})
 	}
 
 	return typ
+}
+
+func (c *Checker) genericTypeSubstFromArgs(scope *Scope, params []ast.GenericParam, args []ast.GenericArg) map[string]*Type {
+	typeSubst := map[string]*Type{}
+
+	for i, param := range params {
+		if i >= len(args) {
+			break
+		}
+
+		switch param.Category {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			typeSubst[param.Name.Name] = c.typeFromGenericArg(scope, args[i])
+		}
+	}
+
+	return typeSubst
 }
 
 func genericArgSubst(params []ast.GenericParam, args []ast.GenericArg) map[string]ast.GenericArg {
@@ -3727,8 +3897,10 @@ func (c *Checker) typeFromAstWithGenericArgs(scope *Scope, typ ast.Type, subst m
 			args = append(args, c.substituteGenericArg(arg, subst))
 		}
 
+		base := c.substituteTypeAst(t.Base, subst)
+
 		return c.typeFromAst(scope, &ast.GenericType{
-			Base: t.Base,
+			Base: base,
 			Args: args,
 			Loc:  t.Loc,
 		})
