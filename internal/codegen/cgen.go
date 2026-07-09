@@ -907,13 +907,55 @@ func (g *Generator) collectGenericStructInstancesFromType(typ ast.Type) {
 		g.collectGenericStructInstancesFromType(t.Elem)
 
 	case *ast.GenericType:
-		_ = g.cTypeFromGenericType(t)
+		if pkgName, typeName, ok := packageTypeNameFromAst(t.Base); ok {
+			if pkg := g.packages[pkgName]; pkg != nil {
+				if decl := pkg.Structs[typeName]; decl != nil && len(decl.GenericParams) > 0 {
+					_ = g.cTypeFromGenericType(t)
+				}
+			}
+		} else {
+			baseName := typeNameFromAst(t.Base)
+
+			if decl := g.structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
+				_ = g.cTypeFromGenericType(t)
+			} else if g.typeContextPackage != "" {
+				if pkg := g.packages[g.typeContextPackage]; pkg != nil {
+					if decl := pkg.Structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
+						_ = g.cTypeFromGenericType(t)
+					}
+				}
+			}
+		}
 
 		g.collectGenericStructInstancesFromType(t.Base)
 
 		for _, arg := range t.Args {
 			g.collectGenericStructInstancesFromGenericArg(arg)
 		}
+	}
+}
+
+func exprFromTypeAstForCGen(typ ast.Type) ast.Expr {
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) == 0 {
+			return nil
+		}
+
+		expr := ast.Expr(&ast.IdentExpr{Name: t.Parts[0]})
+
+		for i := 1; i < len(t.Parts); i++ {
+			expr = &ast.SelectorExpr{
+				Left: expr,
+				Name: t.Parts[i],
+				Loc:  t.Loc,
+			}
+		}
+
+		return expr
+
+	default:
+		return nil
 	}
 }
 
@@ -927,14 +969,6 @@ func (g *Generator) collectGenericStructInstancesFromGenericArg(arg ast.GenericA
 			return
 		}
 
-		// A generic expression used as a generic argument can mean either:
-		//
-		//   Box<int>      // type argument
-		//   Identity<int> // task argument
-		//
-		// Do not blindly reinterpret every GenericExpr as a type. First check
-		// whether it names a local or imported generic task. Task arguments are
-		// handled by collectGenericTaskArgInstance.
 		if gen, ok := arg.Expr.(*ast.GenericExpr); ok {
 			switch base := gen.Base.(type) {
 			case *ast.IdentExpr:
@@ -1043,16 +1077,21 @@ func (g *Generator) collectGenericStructInstancesFromGenericArgsForParams(params
 		}
 
 		switch params[i].Category {
+		case ast.GenericParamTask:
+			// Important: task arguments such as Swap<int> look syntactically
+			// like generic expressions, but they are not generic type/struct
+			// instances. Register/collect them as task instances only.
+			g.collectGenericTaskArgInstance(arg)
+
 		case ast.GenericParamType,
 			ast.GenericParamEnum,
 			ast.GenericParamUnion:
 			g.collectGenericStructInstancesFromGenericArg(arg)
 
-		case ast.GenericParamTask:
-			g.collectGenericTaskArgInstance(arg)
-
 		default:
-			if arg.Kind == ast.GenericArgExpr {
+			// Value parameters can contain type-looking expressions in places
+			// like size(T), but should not reinterpret task arguments as types.
+			if arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
 				g.collectGenericStructInstancesFromExpr(arg.Expr)
 			}
 		}
@@ -1076,8 +1115,14 @@ func (g *Generator) emitGenericStructInstance(name string, visiting map[string]b
 		return
 	}
 
+	if isInvalidCStructName(name) {
+		g.emittedGenericStructs[name] = true
+		return
+	}
+
 	info := g.genericStructs[name]
-	if info == nil {
+	if info == nil || info.Decl == nil || isInvalidCStructName(info.Name) || isInvalidCStructName(info.Decl.Name.Name) {
+		g.emittedGenericStructs[name] = true
 		return
 	}
 
@@ -1945,8 +1990,14 @@ func (g *Generator) emitImportedGenericStructInstance(name string, visiting map[
 		return
 	}
 
+	if isInvalidCStructName(name) {
+		g.emittedImportedGenericStructs[name] = true
+		return
+	}
+
 	info := g.importedGenericStructs[name]
-	if info == nil || info.Decl == nil {
+	if info == nil || info.Decl == nil || isInvalidCStructName(info.Name) || isInvalidCStructName(info.TypeName) || isInvalidCStructName(info.Decl.Name.Name) {
+		g.emittedImportedGenericStructs[name] = true
 		return
 	}
 
@@ -2058,6 +2109,10 @@ func (g *Generator) emitStructs(file *ast.File) {
 		}
 
 		if len(d.GenericParams) > 0 {
+			continue
+		}
+
+		if isInvalidCStructName(d.Name.Name) {
 			continue
 		}
 
@@ -6662,7 +6717,14 @@ func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
 }
 
 func (g *Generator) registerImportedGenericStructInstance(packageName string, typeName string, decl *ast.StructDecl, args []ast.GenericArg) string {
+	if packageName == "" || typeName == "" || decl == nil || isInvalidCStructName(typeName) || isInvalidCStructName(decl.Name.Name) {
+		return CInvalid.Name
+	}
+
 	name := g.specializedImportedStructCName(packageName, typeName, decl, args)
+	if isInvalidCStructName(name) {
+		return CInvalid.Name
+	}
 
 	if _, exists := g.importedGenericStructs[name]; exists {
 		g.addImportedGenericStructRequest(packageName, typeName, args)
@@ -6707,8 +6769,29 @@ func (g *Generator) specializedImportedStructCName(packageName string, typeName 
 	return strings.Join(parts, "_")
 }
 
+func isInvalidCType(t CType) bool {
+	return t.Name == "" ||
+		t.SealName == "<invalid>" ||
+		strings.Contains(t.Name, "/*invalid*/") ||
+		strings.Contains(t.SealName, "<invalid>")
+}
+
+func isInvalidCStructName(name string) bool {
+	return name == "" ||
+		strings.Contains(name, "/*invalid*/") ||
+		strings.Contains(name, "<invalid>") ||
+		strings.ContainsAny(name, " \t\r\n*-/+()[]{}.;,")
+}
+
 func (g *Generator) registerGenericStructInstance(decl *ast.StructDecl, args []ast.GenericArg) string {
+	if decl == nil || isInvalidCStructName(decl.Name.Name) {
+		return CInvalid.Name
+	}
+
 	name := g.specializedStructCName(decl, args)
+	if isInvalidCStructName(name) {
+		return CInvalid.Name
+	}
 
 	if _, exists := g.genericStructs[name]; exists {
 		return name

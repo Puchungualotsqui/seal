@@ -835,7 +835,7 @@ Player :: struct {
 
 	typesC := string(typesBytes)
 
-	if !strings.Contains(typesC, "typedef struct types_Player {") {
+	if !strings.Contains(typesC, "typedef struct Player {") {
 		t.Fatalf("expected types.c to contain Player definition, got:\n%s", typesC)
 	}
 }
