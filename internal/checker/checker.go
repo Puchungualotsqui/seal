@@ -420,18 +420,18 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 	}
 
 	var out []operatorOverloadLookup
-	seen := map[*Symbol]bool{}
+	seen := map[string]bool{}
 
-	add := func(sym *Symbol, lookupScope *Scope, displayName string) {
+	add := func(key string, sym *Symbol, lookupScope *Scope, displayName string) {
 		if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
 			return
 		}
 
-		if seen[sym] {
+		if seen[key] {
 			return
 		}
 
-		seen[sym] = true
+		seen[key] = true
 		out = append(out, operatorOverloadLookup{
 			Symbol: sym,
 			Scope:  lookupScope,
@@ -439,7 +439,7 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 		})
 	}
 
-	add(scope.Lookup(name), scope, name)
+	add(name, scope.Lookup(name), scope, name)
 
 	for _, typ := range argTypes {
 		pkgName, ok := packageNameFromType(typ)
@@ -458,7 +458,9 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 		}
 
 		pkgScope := c.scopeForPackageInfo(pkgName, pkgSym.Package)
-		add(member, pkgScope, pkgName+"."+name)
+		qualifiedMember := c.importedPackageMemberSymbol(pkgName, member)
+
+		add(pkgName+"."+name, qualifiedMember, pkgScope, pkgName+"."+name)
 	}
 
 	return out
@@ -858,6 +860,126 @@ func (c *Checker) declareBuiltins(scope *Scope) {
 			Builtin: true,
 		})
 	}
+}
+
+func (c *Checker) importedPackageMemberSymbol(packageName string, sym *Symbol) *Symbol {
+	if sym == nil {
+		return nil
+	}
+
+	out := *sym
+
+	if out.Type != nil {
+		out.Type = c.qualifyImportedTypeForPackage(packageName, out.Type)
+	}
+
+	if out.Overload != nil {
+		overload := *out.Overload
+		overload.Candidates = nil
+
+		for _, candidate := range out.Overload.Candidates {
+			overload.Candidates = append(overload.Candidates, c.importedPackageMemberSymbol(packageName, candidate))
+		}
+
+		out.Overload = &overload
+
+		// Imported overloads already carry exported candidate signatures.
+		// Do not re-prepare them against the imported package scope, because
+		// that would rebuild candidates with unqualified local type names.
+		out.Node = nil
+	}
+
+	return &out
+}
+
+func (c *Checker) qualifyImportedTypeForPackage(packageName string, typ *Type) *Type {
+	return c.qualifyImportedTypeForPackageSeen(packageName, typ, map[*Type]*Type{})
+}
+
+func (c *Checker) qualifyImportedTypeForPackageSeen(packageName string, typ *Type, seen map[*Type]*Type) *Type {
+	if typ == nil {
+		return nil
+	}
+
+	if packageName == "" {
+		return typ
+	}
+
+	if cached := seen[typ]; cached != nil {
+		return cached
+	}
+
+	out := *typ
+	seen[typ] = &out
+
+	switch typ.Kind {
+	case TypeStruct,
+		TypeDistinct,
+		TypeEnum,
+		TypeUnion,
+		TypeInterface:
+		if out.Name != "" && !strings.Contains(out.Name, ".") {
+			out.Name = packageName + "." + out.Name
+		}
+	}
+
+	out.Elem = c.qualifyImportedTypeForPackageSeen(packageName, typ.Elem, seen)
+	out.Underlying = c.qualifyImportedTypeForPackageSeen(packageName, typ.Underlying, seen)
+
+	out.Fields = nil
+	for _, field := range typ.Fields {
+		out.Fields = append(out.Fields, FieldInfo{
+			Name:    field.Name,
+			Type:    c.qualifyImportedTypeForPackageSeen(packageName, field.Type, seen),
+			TypeAst: field.TypeAst,
+			Span:    field.Span,
+		})
+	}
+
+	out.Members = nil
+	for _, member := range typ.Members {
+		out.Members = append(out.Members, c.qualifyImportedTypeForPackageSeen(packageName, member, seen))
+	}
+
+	out.InterfaceRequirements = nil
+	for _, req := range typ.InterfaceRequirements {
+		cloned := InterfaceRequirementInfo{
+			Name: req.Name,
+			Span: req.Span,
+		}
+
+		for _, param := range req.Params {
+			cloned.Params = append(cloned.Params, c.qualifyImportedTypeForPackageSeen(packageName, param, seen))
+		}
+
+		for _, result := range req.Results {
+			cloned.Results = append(cloned.Results, c.qualifyImportedTypeForPackageSeen(packageName, result, seen))
+		}
+
+		out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+	}
+
+	out.Implements = nil
+	for _, iface := range typ.Implements {
+		out.Implements = append(out.Implements, c.qualifyImportedTypeForPackageSeen(packageName, iface, seen))
+	}
+
+	out.Params = nil
+	for _, param := range typ.Params {
+		out.Params = append(out.Params, c.qualifyImportedTypeForPackageSeen(packageName, param, seen))
+	}
+
+	out.Results = nil
+	for _, result := range typ.Results {
+		out.Results = append(out.Results, c.qualifyImportedTypeForPackageSeen(packageName, result, seen))
+	}
+
+	out.ParamDefaults = append([]ast.Expr(nil), typ.ParamDefaults...)
+	out.ParamHasDefault = append([]bool(nil), typ.ParamHasDefault...)
+	out.ParamIsVariadic = append([]bool(nil), typ.ParamIsVariadic...)
+	out.GenericParams = append([]ast.GenericParam(nil), typ.GenericParams...)
+
+	return &out
 }
 
 func (c *Checker) declarePackages(scope *Scope) {
@@ -3592,6 +3714,8 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 		return InvalidType
 	}
 
+	member = c.importedPackageMemberSymbol(pkgSym.Name, member)
+
 	switch member.Kind {
 	case SymbolTask:
 		return c.checkDirectTaskCall(member, argTypes, argSpans, span)
@@ -3923,7 +4047,12 @@ func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) 
 		return InvalidType
 	}
 
-	return member.Type
+	qualified := c.importedPackageMemberSymbol(pkgSym.Name, member)
+	if qualified == nil {
+		return InvalidType
+	}
+
+	return qualified.Type
 }
 
 func (c *Checker) checkArrayLiteralExpr(scope *Scope, e *ast.ArrayLiteralExpr) *Type {
@@ -4063,7 +4192,7 @@ func (c *Checker) typeFromAst(scope *Scope, typ ast.Type) *Type {
 				return InvalidType
 			}
 
-			return memberSym.Type
+			return c.qualifyImportedTypeForPackage(first.Name, memberSym.Type)
 		}
 
 		name := t.Parts[0]
@@ -5159,7 +5288,7 @@ func (c *Checker) typeFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 					}
 
 					if member.Kind == SymbolType {
-						return member.Type
+						return c.qualifyImportedTypeForPackage(id.Name.Name, member.Type)
 					}
 
 					c.diags.Add(e.Name.Span(), fmt.Sprintf("package symbol %s.%s is not a type", id.Name.Name, e.Name.Name))
@@ -5303,7 +5432,7 @@ func (c *Checker) packageTaskSymbolFromSelector(scope *Scope, e *ast.SelectorExp
 		return nil
 	}
 
-	return member
+	return c.importedPackageMemberSymbol(id.Name.Name, member)
 }
 
 func (c *Checker) taskSymbolFromGenericExprBase(scope *Scope, base ast.Expr) *Symbol {
@@ -5686,7 +5815,12 @@ func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, le
 		evalName = pkgName + "." + candidate.Name
 	}
 
-	return c.evalPureTaskConstBody(bestScope, evalName, span, taskDecl, []genericConstValue{left, right})
+	value, ok := c.evalPureTaskConstBody(bestScope, evalName, span, taskDecl, []genericConstValue{left, right})
+	if ok && candidate.Type != nil && len(candidate.Type.Results) == 1 {
+		value.Type = candidate.Type.Results[0]
+	}
+
+	return value, ok
 }
 
 func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
@@ -5871,7 +6005,12 @@ func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[st
 		evalName = sym.Name
 	}
 
-	return c.evalPureTaskConstBody(evalScope, evalName, e.Callee.Span(), taskDecl, argValues)
+	value, ok := c.evalPureTaskConstBody(evalScope, evalName, e.Callee.Span(), taskDecl, argValues)
+	if ok && sym.Type != nil && len(sym.Type.Results) == 1 {
+		value.Type = sym.Type.Results[0]
+	}
+
+	return value, ok
 }
 
 func (c *Checker) taskSymbolAndScopeFromConstCallCallee(scope *Scope, callee ast.Expr) (*Symbol, *Scope, string) {
@@ -5901,7 +6040,9 @@ func (c *Checker) taskSymbolAndScopeFromConstCallCallee(scope *Scope, callee ast
 		}
 
 		evalScope := c.scopeForPackageInfo(id.Name.Name, pkgSym.Package)
-		return member, evalScope, id.Name.Name + "." + member.Name
+		qualifiedMember := c.importedPackageMemberSymbol(id.Name.Name, member)
+
+		return qualifiedMember, evalScope, id.Name.Name + "." + member.Name
 	}
 
 	return nil, scope, ""
@@ -6780,6 +6921,8 @@ func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.Sele
 		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package %s has no symbol %q", pkgSym.Name, selector.Name.Name))
 		return []*Type{InvalidType}
 	}
+
+	member = c.importedPackageMemberSymbol(pkgSym.Name, member)
 
 	switch member.Kind {
 	case SymbolTask:
