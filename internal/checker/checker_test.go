@@ -2642,8 +2642,8 @@ Main :: task() {
 		t.Fatalf("expected checker diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `generic task parameter "F" expects task(int) int, got task(int) string`) {
-		t.Fatalf("expected wrong generic task signature diagnostic, got:\n%s", reporter.String())
+	if !strings.Contains(reporter.String(), `generic task parameter "F" result 1 expects int, got string`) {
+		t.Fatalf("expected wrong generic task result diagnostic, got:\n%s", reporter.String())
 	}
 }
 
@@ -3111,8 +3111,14 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `generic task parameter "F" expects task(int) int, got task(string) string`) {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	out := reporter.String()
+
+	if !strings.Contains(out, `generic task parameter "F" parameter 1 expects int, got string`) {
+		t.Fatalf("expected imported generic task parameter mismatch diagnostic, got:\n%s", out)
+	}
+
+	if !strings.Contains(out, `generic task parameter "F" result 1 expects int, got string`) {
+		t.Fatalf("expected imported generic task result mismatch diagnostic, got:\n%s", out)
 	}
 }
 
@@ -3221,4 +3227,204 @@ Main :: task() {
 	if !strings.Contains(reporter.String(), "cannot assign [4]int to [5]int") {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
+}
+
+func assertCheckerDiagnosticContains(t *testing.T, reporter *diag.Reporter, want string) {
+	t.Helper()
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics containing %q, got none", want)
+	}
+
+	if !strings.Contains(reporter.String(), want) {
+		t.Fatalf("expected diagnostics to contain %q, got:\n%s", want, reporter.String())
+	}
+}
+
+func TestGenericTaskConstraintAcceptsMultiReturnTask(t *testing.T) {
+	reporter := checkSource(t, `
+Swap :: task <T type>(a T, b T) T, T {
+    return b, a
+}
+
+ApplySwap :: task <T type, F task[(T, T) T, T]>(a T, b T) T, T {
+    return F(a, b)
+}
+
+Main :: task() {
+    x, y := ApplySwap<int, Swap<int>>(1, 2)
+    assert(x == 2)
+    assert(y == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTaskConstraintRejectsParameterCountMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+One :: task(a int) int {
+    return a
+}
+
+Apply :: task <F task[(int, int) int]>(a int, b int) int {
+    return F(a, b)
+}
+
+Main :: task() {
+    x := Apply<One>(1, 2)
+    assert(x == 1)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" expects task with 2 parameter(s), got 1`)
+}
+
+func TestGenericTaskConstraintRejectsParameterTypeMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+StringInput :: task(value string) int {
+    return 0
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<StringInput>(1)
+    assert(x == 0)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" parameter 1 expects int, got string`)
+}
+
+func TestGenericTaskConstraintRejectsResultCountMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+Pair :: task(value int) int, int {
+    return value, value
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<Pair>(1)
+    assert(x == 1)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" expects task with 1 result value(s), got 2`)
+}
+
+func TestGenericTaskConstraintRejectsResultTypeMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+ToString :: task(value int) string {
+    return "x"
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<ToString>(1)
+    assert(x == 1)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" result 1 expects int, got string`)
+}
+
+func TestGenericTaskConstraintRejectsMultiReturnResultTypeMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+BadSwap :: task(a int, b int) int, string {
+    return b, "x"
+}
+
+ApplySwap :: task <F task[(int, int) int, int]>(a int, b int) int, int {
+    return F(a, b)
+}
+
+Main :: task() {
+    x, y := ApplySwap<BadSwap>(1, 2)
+    assert(x == 2)
+    assert(y == 1)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" result 2 expects int, got string`)
+}
+
+func TestGenericTaskConstraintDependingOnTypeParamRejectsSpecializedMismatch(t *testing.T) {
+	reporter := checkSource(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, Identity<string>>(1)
+    assert(x == 1)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" parameter 1 expects int, got string`)
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" result 1 expects int, got string`)
+}
+
+func TestGenericTaskConstraintRejectsVariadicTaskArgument(t *testing.T) {
+	reporter := checkSource(t, `
+TakeMany :: task(values ...int) int {
+    return 0
+}
+
+Apply :: task <F task[(int) int]>(value int) int {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<TakeMany>(1)
+    assert(x == 0)
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" expects non-variadic task`)
+}
+
+func TestImportedGenericTaskConstraintRejectsSpecializedMismatch(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "util", `
+Identity :: task <T type>(value T) T {
+    return value
+}
+`)
+
+	reporter := checkWithPackages(
+		t,
+		`
+Apply :: task <T type, F task[(T) T]>(value T) T {
+    return F(value)
+}
+
+Main :: task() {
+    x := Apply<int, util.Identity<string>>(1)
+    assert(x == 1)
+}
+`,
+		map[string]*resolver.PackageInfo{
+			"util": resolverPkg,
+		},
+		map[string]*PackageInfo{
+			"util": checkerPkg,
+		},
+	)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" parameter 1 expects int, got string`)
+	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" result 1 expects int, got string`)
 }

@@ -4568,14 +4568,13 @@ func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, 
 			return
 		}
 
+		if argType.Kind == TypeInvalid {
+			return
+		}
+
 		expected := c.taskTypeFromGenericTaskParamWithGenericArgs(scope, param, subst)
-		if c.genericTaskParamHasSignatureConstraint(param) &&
-			argType.Kind != TypeInvalid &&
-			!c.sameType(argType, expected) {
-			c.diags.Add(
-				arg.Span(),
-				fmt.Sprintf("generic task parameter %q expects %s, got %s", param.Name.Name, expected.String(), argType.String()),
-			)
+		if c.genericTaskParamHasSignatureConstraint(param) {
+			c.checkGenericTaskArgumentSignature(arg.Span(), param.Name.Name, expected, argType)
 		}
 
 	case ast.GenericParamInt:
@@ -4603,6 +4602,109 @@ func (c *Checker) checkGenericArgAgainstParam(scope *Scope, arg ast.GenericArg, 
 		c.checkAssignable(expected, got, arg.Span())
 		c.checkGenericArgIsCompileTimeValue(scope, arg, param)
 	}
+}
+
+func (c *Checker) checkGenericTaskArgumentSignature(span source.Span, paramName string, expected *Type, actual *Type) {
+	if expected == nil || actual == nil {
+		return
+	}
+
+	if expected.Kind == TypeInvalid || actual.Kind == TypeInvalid {
+		return
+	}
+
+	if expected.Kind != TypeTask {
+		return
+	}
+
+	if actual.Kind != TypeTask {
+		c.diags.Add(span, fmt.Sprintf("generic task parameter %q expects task, got %s", paramName, actual.String()))
+		return
+	}
+
+	if actual.IsVariadic || taskTypeHasVariadicParam(actual) {
+		c.diags.Add(span, fmt.Sprintf("generic task parameter %q expects non-variadic task, got %s", paramName, actual.String()))
+	}
+
+	if len(actual.Params) != len(expected.Params) {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"generic task parameter %q expects task with %d parameter(s), got %d",
+				paramName,
+				len(expected.Params),
+				len(actual.Params),
+			),
+		)
+	} else {
+		for i := range expected.Params {
+			if typeIsInvalid(expected.Params[i]) || typeIsInvalid(actual.Params[i]) {
+				continue
+			}
+
+			if !c.sameType(expected.Params[i], actual.Params[i]) {
+				c.diags.Add(
+					span,
+					fmt.Sprintf(
+						"generic task parameter %q parameter %d expects %s, got %s",
+						paramName,
+						i+1,
+						expected.Params[i].String(),
+						actual.Params[i].String(),
+					),
+				)
+			}
+		}
+	}
+
+	if len(actual.Results) != len(expected.Results) {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"generic task parameter %q expects task with %d result value(s), got %d",
+				paramName,
+				len(expected.Results),
+				len(actual.Results),
+			),
+		)
+	} else {
+		for i := range expected.Results {
+			if typeIsInvalid(expected.Results[i]) || typeIsInvalid(actual.Results[i]) {
+				continue
+			}
+
+			if !c.sameType(expected.Results[i], actual.Results[i]) {
+				c.diags.Add(
+					span,
+					fmt.Sprintf(
+						"generic task parameter %q result %d expects %s, got %s",
+						paramName,
+						i+1,
+						expected.Results[i].String(),
+						actual.Results[i].String(),
+					),
+				)
+			}
+		}
+	}
+}
+
+func taskTypeHasVariadicParam(taskType *Type) bool {
+	if taskType == nil {
+		return false
+	}
+
+	for _, isVariadic := range taskType.ParamIsVariadic {
+		if isVariadic {
+			return true
+		}
+	}
+
+	return false
+}
+
+func typeIsInvalid(t *Type) bool {
+	return t == nil || t.Kind == TypeInvalid
 }
 
 func (c *Checker) exprFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
