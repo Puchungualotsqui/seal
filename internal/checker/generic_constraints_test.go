@@ -479,3 +479,179 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestCheckGenericValueConstraintAllowsPureOperatorOverload(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+Over :: pure task(age Matrix) bool {
+    return age.years > 18
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+UseAge :: task <age Matrix[Over(age) || age == "vampire"]>() {}
+
+Main :: task() {
+    UseAge<Matrix{years = 999}>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsPureOperatorOverloadFalse(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+Over :: pure task(age Matrix) bool {
+    return age.years > 18
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+UseAge :: task <age Matrix[Over(age) || age == "vampire"]>() {}
+
+Main :: task() {
+    UseAge<Matrix{years = 10}>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed`) {
+		t.Fatalf("expected failed operator-overload constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsNonPureOperatorOverload(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+UseAge :: task <age Matrix[age == "vampire"]>() {}
+
+Main :: task() {
+    UseAge<Matrix{years = 999}>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint operator "==" candidate "IsVampireAge" must be pure`) {
+		t.Fatalf("expected non-pure operator-overload diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintAllowsDerivedNotEqualOperatorOverload(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+UseMortalAge :: task <age Matrix[age != "vampire"]>() {}
+
+Main :: task() {
+    UseMortalAge<Matrix{years = 10}>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsDerivedNotEqualOperatorOverloadFalse(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+UseMortalAge :: task <age Matrix[age != "vampire"]>() {}
+
+Main :: task() {
+    UseMortalAge<Matrix{years = 999}>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed`) {
+		t.Fatalf("expected failed derived != overload constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintAllowsOperatorOverloadDeclaredAfterUse(t *testing.T) {
+	reporter := checkSource(t, `
+Matrix :: struct {
+    years int
+}
+
+UseAge :: task <age Matrix[age == "vampire"]>() {}
+
+IsVampireAge :: pure task(age Matrix, tag string) bool {
+    return age.years == 999 && tag == "vampire"
+}
+
+== :: overload {
+    IsVampireAge
+}
+
+Main :: task() {
+    UseAge<Matrix{years = 999}>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

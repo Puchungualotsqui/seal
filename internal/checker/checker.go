@@ -366,6 +366,9 @@ type Checker struct {
 	currentResults []*Type
 
 	preparingTasks map[*ast.TaskDecl]bool
+
+	preparingOverloads map[*ast.OverloadDecl]bool
+	preparedOverloads  map[*ast.OverloadDecl]bool
 }
 
 func New(diags *diag.Reporter) *Checker {
@@ -374,10 +377,12 @@ func New(diags *diag.Reporter) *Checker {
 
 func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Checker {
 	c := &Checker{
-		diags:            diags,
-		packages:         packages,
-		specializedTypes: map[string]*Type{},
-		preparingTasks:   map[*ast.TaskDecl]bool{},
+		diags:              diags,
+		packages:           packages,
+		specializedTypes:   map[string]*Type{},
+		preparingTasks:     map[*ast.TaskDecl]bool{},
+		preparingOverloads: map[*ast.OverloadDecl]bool{},
+		preparedOverloads:  map[*ast.OverloadDecl]bool{},
 	}
 
 	c.global = NewScope(nil)
@@ -902,6 +907,23 @@ func (c *Checker) prepareTaskSymbolType(scope *Scope, sym *Symbol, d *ast.TaskDe
 	return taskType
 }
 
+func (c *Checker) ensureOverloadSymbolPrepared(scope *Scope, sym *Symbol) {
+	if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+		return
+	}
+
+	decl, ok := sym.Node.(*ast.OverloadDecl)
+	if !ok {
+		return
+	}
+
+	if scope == nil {
+		scope = c.global
+	}
+
+	c.prepareOverloadDecl(scope, decl)
+}
+
 func (c *Checker) ensureTaskSymbolPrepared(scope *Scope, sym *Symbol) {
 	if sym == nil || sym.Kind != SymbolTask {
 		return
@@ -952,10 +974,29 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 }
 
 func (c *Checker) prepareOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
-	sym := scope.LookupLocal(d.Name)
+	if d == nil {
+		return
+	}
+
+	if scope == nil {
+		scope = c.global
+	}
+
+	sym := scope.Lookup(d.Name)
 	if sym == nil || sym.Overload == nil {
 		return
 	}
+
+	if c.preparedOverloads[d] {
+		return
+	}
+
+	if c.preparingOverloads[d] {
+		return
+	}
+
+	c.preparingOverloads[d] = true
+	defer delete(c.preparingOverloads, d)
 
 	var candidates []*Symbol
 
@@ -971,6 +1012,8 @@ func (c *Checker) prepareOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
 			continue
 		}
 
+		c.ensureTaskSymbolPrepared(scope, candidate)
+
 		if candidate.Type == nil || candidate.Type.Kind != TypeTask {
 			c.diags.Add(name.Span(), fmt.Sprintf("overload candidate %q has invalid task type", name.Name))
 			continue
@@ -980,6 +1023,7 @@ func (c *Checker) prepareOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
 	}
 
 	sym.Overload.Candidates = candidates
+	c.preparedOverloads[d] = true
 }
 
 func (c *Checker) prepareDistinctDecl(scope *Scope, d *ast.DistinctDecl) {
@@ -2888,6 +2932,8 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 		return InvalidType, false
 	}
 
+	c.ensureOverloadSymbolPrepared(scope, sym)
+
 	info := sym.Overload
 	result := c.resolveOverload(info, argTypes)
 
@@ -3629,6 +3675,8 @@ func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Sp
 }
 
 func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+	c.ensureOverloadSymbolPrepared(nil, sym)
+
 	info := sym.Overload
 	if info == nil {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
@@ -5221,13 +5269,18 @@ const (
 	genericConstBool
 	genericConstInt
 	genericConstString
+	genericConstStruct
 )
 
 type genericConstValue struct {
-	Kind        genericConstKind
+	Kind genericConstKind
+	Type *Type
+
 	BoolValue   bool
 	IntValue    int64
 	StringValue string
+
+	StructFields map[string]genericConstValue
 }
 
 func (c *Checker) evalGenericConstBool(scope *Scope, expr ast.Expr) (bool, bool) {
@@ -5250,7 +5303,11 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 
 	switch e := expr.(type) {
 	case *ast.BoolLitExpr:
-		return genericConstValue{Kind: genericConstBool, BoolValue: e.Value}, true
+		return genericConstValue{
+			Kind:      genericConstBool,
+			Type:      BoolType,
+			BoolValue: e.Value,
+		}, true
 
 	case *ast.IntLitExpr:
 		value, err := strconv.ParseInt(e.Value, 10, 64)
@@ -5258,7 +5315,11 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 			return genericConstValue{}, false
 		}
 
-		return genericConstValue{Kind: genericConstInt, IntValue: value}, true
+		return genericConstValue{
+			Kind:     genericConstInt,
+			Type:     UntypedIntType,
+			IntValue: value,
+		}, true
 
 	case *ast.StringLitExpr:
 		value, err := strconv.Unquote(e.Value)
@@ -5266,7 +5327,14 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 			return genericConstValue{}, false
 		}
 
-		return genericConstValue{Kind: genericConstString, StringValue: value}, true
+		return genericConstValue{
+			Kind:        genericConstString,
+			Type:        StringType,
+			StringValue: value,
+		}, true
+
+	case *ast.CompoundLiteralExpr:
+		return c.evalGenericConstCompoundLiteral(scope, e, env)
 
 	case *ast.IdentExpr:
 		if env != nil {
@@ -5302,14 +5370,14 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstBool, BoolValue: !value.BoolValue}, true
+			return genericConstValue{Kind: genericConstBool, Type: BoolType, BoolValue: !value.BoolValue}, true
 
 		case token.Minus:
 			if value.Kind != genericConstInt {
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstInt, IntValue: -value.IntValue}, true
+			return genericConstValue{Kind: genericConstInt, Type: value.Type, IntValue: -value.IntValue}, true
 		}
 
 		return genericConstValue{}, false
@@ -5325,13 +5393,108 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 			return genericConstValue{}, false
 		}
 
-		return evalGenericConstBinary(e.Op, left, right)
+		return c.evalGenericConstBinaryWithOverloads(scope, e.Op, left, right, e.Span())
 
 	case *ast.CallExpr:
 		return c.evalGenericConstCall(scope, e, env)
 	}
 
 	return genericConstValue{}, false
+}
+
+func genericConstEqual(left genericConstValue, right genericConstValue) (bool, bool) {
+	if left.Kind != right.Kind {
+		return false, false
+	}
+
+	switch left.Kind {
+	case genericConstBool:
+		return left.BoolValue == right.BoolValue, true
+
+	case genericConstInt:
+		return left.IntValue == right.IntValue, true
+
+	case genericConstString:
+		return left.StringValue == right.StringValue, true
+	}
+
+	return false, false
+}
+
+func (c *Checker) evalGenericConstBinaryWithOverloads(scope *Scope, op token.Kind, left genericConstValue, right genericConstValue, span source.Span) (genericConstValue, bool) {
+	if value, ok := evalGenericConstBuiltinBinary(op, left, right); ok {
+		return value, true
+	}
+
+	if op == token.NotEq {
+		if value, ok := c.evalGenericConstOperatorOverload(scope, "!=", left, right, span); ok {
+			return value, true
+		}
+
+		value, ok := c.evalGenericConstOperatorOverload(scope, "==", left, right, span)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		if value.Kind != genericConstBool {
+			return genericConstValue{}, false
+		}
+
+		value.BoolValue = !value.BoolValue
+		return value, true
+	}
+
+	return c.evalGenericConstOperatorOverload(scope, op.String(), left, right, span)
+}
+
+func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, left genericConstValue, right genericConstValue, span source.Span) (genericConstValue, bool) {
+	if scope == nil {
+		scope = c.global
+	}
+
+	sym := scope.Lookup(name)
+	if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+		return genericConstValue{}, false
+	}
+
+	c.ensureOverloadSymbolPrepared(scope, sym)
+
+	argTypes := []*Type{left.Type, right.Type}
+	result := c.resolveOverload(sym.Overload, argTypes)
+
+	if !result.Matched {
+		return genericConstValue{}, false
+	}
+
+	if result.Ambiguous {
+		c.diags.Add(span, fmt.Sprintf("ambiguous generic constraint operator overload %q with operand types (%s)", name, c.formatTypes(argTypes)))
+		return genericConstValue{}, false
+	}
+
+	candidate := result.Candidate
+	c.ensureTaskSymbolPrepared(scope, candidate)
+
+	if candidate == nil || candidate.Type == nil || candidate.Type.Kind != TypeTask {
+		return genericConstValue{}, false
+	}
+
+	if !candidate.Type.IsPure && !candidate.Type.IsTrustedPure {
+		c.diags.Add(span, fmt.Sprintf("generic constraint operator %q candidate %q must be pure", name, candidate.Name))
+		return genericConstValue{}, false
+	}
+
+	if len(candidate.Type.Results) != 1 {
+		c.diags.Add(span, fmt.Sprintf("generic constraint operator %q candidate %q must return exactly 1 value", name, candidate.Name))
+		return genericConstValue{}, false
+	}
+
+	taskDecl, ok := candidate.Node.(*ast.TaskDecl)
+	if !ok || taskDecl.Body == nil {
+		c.diags.Add(span, fmt.Sprintf("generic constraint operator %q candidate %q cannot be evaluated because its body is unavailable", name, candidate.Name))
+		return genericConstValue{}, false
+	}
+
+	return c.evalPureTaskConstBody(scope, taskDecl, []genericConstValue{left, right})
 }
 
 func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
@@ -5345,27 +5508,17 @@ func (c *Checker) evalGenericConstSelectorWithEnv(scope *Scope, receiver ast.Exp
 
 	switch r := receiver.(type) {
 	case *ast.CompoundLiteralExpr:
-		for _, literalField := range r.Fields {
-			if literalField.Name.Name == field.Name {
-				return c.evalGenericConstExprWithEnv(scope, literalField.Value, env)
-			}
+		value, ok := c.evalGenericConstCompoundLiteral(scope, r, env)
+		if !ok {
+			return genericConstValue{}, false
 		}
 
-		litType := c.typeFromAst(scope, r.Type)
-		if litType != nil && litType.Kind == TypeStruct {
-			for i, structField := range litType.Fields {
-				if structField.Name == field.Name && i < len(r.Values) {
-					return c.evalGenericConstExprWithEnv(scope, r.Values[i], env)
-				}
-			}
-		}
-
-		return genericConstValue{}, false
+		return genericConstSelectField(value, field.Name)
 
 	case *ast.IdentExpr:
 		if env != nil {
-			if _, ok := env[r.Name.Name]; ok {
-				return genericConstValue{}, false
+			if value, ok := env[r.Name.Name]; ok {
+				return genericConstSelectField(value, field.Name)
 			}
 		}
 
@@ -5412,6 +5565,61 @@ func (c *Checker) evalGenericConstSelectorWithEnv(scope *Scope, receiver ast.Exp
 	return genericConstValue{}, false
 }
 
+func (c *Checker) evalGenericConstCompoundLiteral(scope *Scope, e *ast.CompoundLiteralExpr, env map[string]genericConstValue) (genericConstValue, bool) {
+	if e == nil {
+		return genericConstValue{}, false
+	}
+
+	litType := c.typeFromAst(scope, e.Type)
+	if litType == nil || litType.Kind != TypeStruct {
+		return genericConstValue{}, false
+	}
+
+	out := genericConstValue{
+		Kind:         genericConstStruct,
+		Type:         litType,
+		StructFields: map[string]genericConstValue{},
+	}
+
+	for _, field := range e.Fields {
+		value, ok := c.evalGenericConstExprWithEnv(scope, field.Value, env)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		if fieldType := c.lookupField(litType, field.Name.Name); fieldType != nil {
+			value.Type = fieldType
+		}
+
+		out.StructFields[field.Name.Name] = value
+	}
+
+	for i, valueExpr := range e.Values {
+		if i >= len(litType.Fields) {
+			return genericConstValue{}, false
+		}
+
+		value, ok := c.evalGenericConstExprWithEnv(scope, valueExpr, env)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		value.Type = litType.Fields[i].Type
+		out.StructFields[litType.Fields[i].Name] = value
+	}
+
+	return out, true
+}
+
+func genericConstSelectField(value genericConstValue, name string) (genericConstValue, bool) {
+	if value.Kind != genericConstStruct {
+		return genericConstValue{}, false
+	}
+
+	field, ok := value.StructFields[name]
+	return field, ok
+}
+
 func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[string]genericConstValue) (genericConstValue, bool) {
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		if id, ok := gen.Base.(*ast.IdentExpr); ok && id.Name.Name == "cast" && len(e.Args) == 1 {
@@ -5427,7 +5635,7 @@ func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[st
 			return genericConstValue{}, false
 		}
 
-		return genericConstValue{Kind: genericConstInt, IntValue: int64(len(value.StringValue))}, true
+		return genericConstValue{Kind: genericConstInt, Type: UintType, IntValue: int64(len(value.StringValue))}, true
 	}
 
 	sym := c.taskSymbolFromConstCallCallee(scope, e.Callee)
@@ -5547,16 +5755,24 @@ func (c *Checker) evalPureTaskConstBody(scope *Scope, d *ast.TaskDecl, args []ge
 	return genericConstValue{}, false
 }
 
-func evalGenericConstBinary(op token.Kind, left genericConstValue, right genericConstValue) (genericConstValue, bool) {
+func evalGenericConstBuiltinBinary(op token.Kind, left genericConstValue, right genericConstValue) (genericConstValue, bool) {
 	switch op {
 	case token.AndAnd:
 		if left.Kind == genericConstBool && right.Kind == genericConstBool {
-			return genericConstValue{Kind: genericConstBool, BoolValue: left.BoolValue && right.BoolValue}, true
+			return genericConstValue{
+				Kind:      genericConstBool,
+				Type:      BoolType,
+				BoolValue: left.BoolValue && right.BoolValue,
+			}, true
 		}
 
 	case token.OrOr:
 		if left.Kind == genericConstBool && right.Kind == genericConstBool {
-			return genericConstValue{Kind: genericConstBool, BoolValue: left.BoolValue || right.BoolValue}, true
+			return genericConstValue{
+				Kind:      genericConstBool,
+				Type:      BoolType,
+				BoolValue: left.BoolValue || right.BoolValue,
+			}, true
 		}
 
 	case token.EqEq, token.NotEq:
@@ -5569,32 +5785,36 @@ func evalGenericConstBinary(op token.Kind, left genericConstValue, right generic
 			value = !value
 		}
 
-		return genericConstValue{Kind: genericConstBool, BoolValue: value}, true
+		return genericConstValue{
+			Kind:      genericConstBool,
+			Type:      BoolType,
+			BoolValue: value,
+		}, true
 
 	case token.Lt, token.LtEq, token.Gt, token.GtEq:
 		if left.Kind == genericConstInt && right.Kind == genericConstInt {
 			switch op {
 			case token.Lt:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue < right.IntValue}, true
+				return genericConstBoolValue(left.IntValue < right.IntValue), true
 			case token.LtEq:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue <= right.IntValue}, true
+				return genericConstBoolValue(left.IntValue <= right.IntValue), true
 			case token.Gt:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue > right.IntValue}, true
+				return genericConstBoolValue(left.IntValue > right.IntValue), true
 			case token.GtEq:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.IntValue >= right.IntValue}, true
+				return genericConstBoolValue(left.IntValue >= right.IntValue), true
 			}
 		}
 
 		if left.Kind == genericConstString && right.Kind == genericConstString {
 			switch op {
 			case token.Lt:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue < right.StringValue}, true
+				return genericConstBoolValue(left.StringValue < right.StringValue), true
 			case token.LtEq:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue <= right.StringValue}, true
+				return genericConstBoolValue(left.StringValue <= right.StringValue), true
 			case token.Gt:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue > right.StringValue}, true
+				return genericConstBoolValue(left.StringValue > right.StringValue), true
 			case token.GtEq:
-				return genericConstValue{Kind: genericConstBool, BoolValue: left.StringValue >= right.StringValue}, true
+				return genericConstBoolValue(left.StringValue >= right.StringValue), true
 			}
 		}
 
@@ -5605,46 +5825,43 @@ func evalGenericConstBinary(op token.Kind, left genericConstValue, right generic
 
 		switch op {
 		case token.Plus:
-			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue + right.IntValue}, true
+			return genericConstIntValue(left.IntValue + right.IntValue), true
 		case token.Minus:
-			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue - right.IntValue}, true
+			return genericConstIntValue(left.IntValue - right.IntValue), true
 		case token.Star:
-			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue * right.IntValue}, true
+			return genericConstIntValue(left.IntValue * right.IntValue), true
 		case token.Slash:
 			if right.IntValue == 0 {
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue / right.IntValue}, true
+			return genericConstIntValue(left.IntValue / right.IntValue), true
 		case token.Percent:
 			if right.IntValue == 0 {
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstInt, IntValue: left.IntValue % right.IntValue}, true
+			return genericConstIntValue(left.IntValue % right.IntValue), true
 		}
 	}
 
 	return genericConstValue{}, false
 }
 
-func genericConstEqual(left genericConstValue, right genericConstValue) (bool, bool) {
-	if left.Kind != right.Kind {
-		return false, false
+func genericConstBoolValue(value bool) genericConstValue {
+	return genericConstValue{
+		Kind:      genericConstBool,
+		Type:      BoolType,
+		BoolValue: value,
 	}
+}
 
-	switch left.Kind {
-	case genericConstBool:
-		return left.BoolValue == right.BoolValue, true
-
-	case genericConstInt:
-		return left.IntValue == right.IntValue, true
-
-	case genericConstString:
-		return left.StringValue == right.StringValue, true
+func genericConstIntValue(value int64) genericConstValue {
+	return genericConstValue{
+		Kind:     genericConstInt,
+		Type:     UntypedIntType,
+		IntValue: value,
 	}
-
-	return false, false
 }
 
 func (c *Checker) valueFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
@@ -6376,6 +6593,8 @@ func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.Sele
 }
 
 func (c *Checker) checkOverloadCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+	c.ensureOverloadSymbolPrepared(nil, sym)
+
 	info := sym.Overload
 	if info == nil {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
