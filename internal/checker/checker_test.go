@@ -4,12 +4,51 @@ import (
 	"strings"
 	"testing"
 
+	"seal/internal/ast"
 	"seal/internal/diag"
 	"seal/internal/lexer"
 	"seal/internal/parser"
 	"seal/internal/resolver"
 	"seal/internal/source"
 )
+
+func parseCheckerFile(t *testing.T, packageName string, input string) (*ast.File, *diag.Reporter) {
+	t.Helper()
+
+	file := source.NewFile(packageName+".seal", input)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	return parsed, reporter
+}
+
+func checkSource(t *testing.T, input string) *diag.Reporter {
+	t.Helper()
+
+	parsed, reporter := parseCheckerFile(t, "test", input)
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+	if reporter.HasErrors() {
+		return reporter
+	}
+
+	c := New(reporter)
+	c.CheckFile(parsed)
+
+	return reporter
+}
 
 func check(t *testing.T, input string) (*Scope, *diag.Reporter) {
 	t.Helper()
