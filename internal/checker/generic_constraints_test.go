@@ -337,3 +337,145 @@ Main :: task() {
 		t.Fatalf("expected imported task signature constraint diagnostic, got:\n%s", reporter.String())
 	}
 }
+
+func TestCheckGenericValueConstraintAllowsPureTaskPredicate(t *testing.T) {
+	reporter := checkSource(t, `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsPureTaskPredicateFalse(t *testing.T) {
+	reporter := checkSource(t, `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<18>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed: Over(18)`) {
+		t.Fatalf("expected failed pure task constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintAllowsPureTaskPredicateInBooleanExpression(t *testing.T) {
+	reporter := checkSource(t, `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[Over(Age) && Age != 90]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsPureTaskPredicateInBooleanExpression(t *testing.T) {
+	reporter := checkSource(t, `
+Over :: pure task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[Over(Age) && Age != 90]>() {}
+
+Main :: task() {
+    UseAge<90>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint failed: Over(90) && 90 != 90`) {
+		t.Fatalf("expected failed composed pure task constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsNonPureTaskPredicate(t *testing.T) {
+	reporter := checkSource(t, `
+Over :: task(n int) bool {
+    return n > 18
+}
+
+UseAge :: task <Age int[Over(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint call "Over" must be pure`) {
+		t.Fatalf("expected non-pure constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintRejectsPureTaskPredicateWrongReturnType(t *testing.T) {
+	reporter := checkSource(t, `
+Bad :: pure task(n int) int {
+    return n
+}
+
+UseAge :: task <Age int[Bad(Age)]>() {}
+
+Main :: task() {
+    UseAge<21>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(reporter.String(), `generic constraint must be bool, got int`) {
+		t.Fatalf("expected bool constraint diagnostic, got:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericValueConstraintAllowsPureTaskDeclaredAfterUse(t *testing.T) {
+	reporter := checkSource(t, `
+UseAge :: task <Age int[Over(Age)]>() {}
+
+Over :: pure task(n int) bool {
+    return n > 18
+}
+
+Main :: task() {
+    UseAge<21>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

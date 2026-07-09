@@ -364,6 +364,8 @@ type Checker struct {
 	specializedTypes map[string]*Type
 
 	currentResults []*Type
+
+	preparingTasks map[*ast.TaskDecl]bool
 }
 
 func New(diags *diag.Reporter) *Checker {
@@ -375,6 +377,7 @@ func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Ch
 		diags:            diags,
 		packages:         packages,
 		specializedTypes: map[string]*Type{},
+		preparingTasks:   map[*ast.TaskDecl]bool{},
 	}
 
 	c.global = NewScope(nil)
@@ -874,6 +877,52 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 	}
 }
 
+func (c *Checker) prepareTaskSymbolType(scope *Scope, sym *Symbol, d *ast.TaskDecl) *Type {
+	if sym == nil || d == nil {
+		return InvalidType
+	}
+
+	if sym.Type != nil && sym.Type.Kind == TypeTask {
+		return sym.Type
+	}
+
+	if c.preparingTasks[d] {
+		if sym.Type != nil {
+			return sym.Type
+		}
+
+		return InvalidType
+	}
+
+	c.preparingTasks[d] = true
+	taskType := c.taskTypeFromDecl(scope, d)
+	delete(c.preparingTasks, d)
+
+	sym.Type = taskType
+	return taskType
+}
+
+func (c *Checker) ensureTaskSymbolPrepared(scope *Scope, sym *Symbol) {
+	if sym == nil || sym.Kind != SymbolTask {
+		return
+	}
+
+	if sym.Type != nil && sym.Type.Kind == TypeTask {
+		return
+	}
+
+	taskDecl, ok := sym.Node.(*ast.TaskDecl)
+	if !ok {
+		return
+	}
+
+	if scope == nil {
+		scope = c.global
+	}
+
+	c.prepareTaskSymbolType(scope, sym, taskDecl)
+}
+
 func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 	switch d := decl.(type) {
 	case *ast.DistinctDecl:
@@ -891,7 +940,7 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 	case *ast.TaskDecl:
 		sym := scope.LookupLocal(d.Name.Name)
 		if sym != nil {
-			sym.Type = c.taskTypeFromDecl(scope, d)
+			c.prepareTaskSymbolType(scope, sym, d)
 		}
 
 	case *ast.InterfaceDecl:
@@ -3383,6 +3432,8 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 }
 
 func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+	c.ensureTaskSymbolPrepared(nil, sym)
+
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
 		return InvalidType
@@ -5075,6 +5126,10 @@ func (c *Checker) checkGenericArgIsCompileTimeValue(scope *Scope, arg ast.Generi
 		return
 	}
 
+	if _, ok := c.evalGenericConstExpr(scope, arg.Expr); ok {
+		return
+	}
+
 	if !c.isCompileTimeGenericExpr(scope, arg.Expr) {
 		c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q requires a compile-time value argument", param.Name.Name))
 	}
@@ -5185,6 +5240,10 @@ func (c *Checker) evalGenericConstBool(scope *Scope, expr ast.Expr) (bool, bool)
 }
 
 func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericConstValue, bool) {
+	return c.evalGenericConstExprWithEnv(scope, expr, nil)
+}
+
+func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env map[string]genericConstValue) (genericConstValue, bool) {
 	if expr == nil {
 		return genericConstValue{}, false
 	}
@@ -5210,6 +5269,12 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 		return genericConstValue{Kind: genericConstString, StringValue: value}, true
 
 	case *ast.IdentExpr:
+		if env != nil {
+			if value, ok := env[e.Name.Name]; ok {
+				return value, true
+			}
+		}
+
 		sym := scope.Lookup(e.Name.Name)
 		if sym == nil || sym.Kind != SymbolConst {
 			return genericConstValue{}, false
@@ -5220,13 +5285,13 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 			return genericConstValue{}, false
 		}
 
-		return c.evalGenericConstExpr(scope, decl.Value)
+		return c.evalGenericConstExprWithEnv(scope, decl.Value, env)
 
 	case *ast.SelectorExpr:
-		return c.evalGenericConstSelector(scope, e.Left, e.Name)
+		return c.evalGenericConstSelectorWithEnv(scope, e.Left, e.Name, env)
 
 	case *ast.UnaryExpr:
-		value, ok := c.evalGenericConstExpr(scope, e.Expr)
+		value, ok := c.evalGenericConstExprWithEnv(scope, e.Expr, env)
 		if !ok {
 			return genericConstValue{}, false
 		}
@@ -5250,12 +5315,12 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 		return genericConstValue{}, false
 
 	case *ast.BinaryExpr:
-		left, ok := c.evalGenericConstExpr(scope, e.Left)
+		left, ok := c.evalGenericConstExprWithEnv(scope, e.Left, env)
 		if !ok {
 			return genericConstValue{}, false
 		}
 
-		right, ok := c.evalGenericConstExpr(scope, e.Right)
+		right, ok := c.evalGenericConstExprWithEnv(scope, e.Right, env)
 		if !ok {
 			return genericConstValue{}, false
 		}
@@ -5263,28 +5328,17 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 		return evalGenericConstBinary(e.Op, left, right)
 
 	case *ast.CallExpr:
-		if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-			if id, ok := gen.Base.(*ast.IdentExpr); ok && id.Name.Name == "cast" && len(e.Args) == 1 {
-				return c.evalGenericConstExpr(scope, e.Args[0])
-			}
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && len(e.Args) == 1 {
-			value, ok := c.evalGenericConstExpr(scope, e.Args[0])
-			if !ok || value.Kind != genericConstString {
-				return genericConstValue{}, false
-			}
-
-			return genericConstValue{Kind: genericConstInt, IntValue: int64(len(value.StringValue))}, true
-		}
-
-		return genericConstValue{}, false
+		return c.evalGenericConstCall(scope, e, env)
 	}
 
 	return genericConstValue{}, false
 }
 
 func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, field ast.Ident) (genericConstValue, bool) {
+	return c.evalGenericConstSelectorWithEnv(scope, receiver, field, nil)
+}
+
+func (c *Checker) evalGenericConstSelectorWithEnv(scope *Scope, receiver ast.Expr, field ast.Ident, env map[string]genericConstValue) (genericConstValue, bool) {
 	if receiver == nil {
 		return genericConstValue{}, false
 	}
@@ -5293,7 +5347,7 @@ func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, fiel
 	case *ast.CompoundLiteralExpr:
 		for _, literalField := range r.Fields {
 			if literalField.Name.Name == field.Name {
-				return c.evalGenericConstExpr(scope, literalField.Value)
+				return c.evalGenericConstExprWithEnv(scope, literalField.Value, env)
 			}
 		}
 
@@ -5301,7 +5355,7 @@ func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, fiel
 		if litType != nil && litType.Kind == TypeStruct {
 			for i, structField := range litType.Fields {
 				if structField.Name == field.Name && i < len(r.Values) {
-					return c.evalGenericConstExpr(scope, r.Values[i])
+					return c.evalGenericConstExprWithEnv(scope, r.Values[i], env)
 				}
 			}
 		}
@@ -5309,6 +5363,12 @@ func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, fiel
 		return genericConstValue{}, false
 
 	case *ast.IdentExpr:
+		if env != nil {
+			if _, ok := env[r.Name.Name]; ok {
+				return genericConstValue{}, false
+			}
+		}
+
 		sym := scope.Lookup(r.Name.Name)
 		if sym == nil {
 			return genericConstValue{}, false
@@ -5320,7 +5380,7 @@ func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, fiel
 				return genericConstValue{}, false
 			}
 
-			return c.evalGenericConstSelector(scope, decl.Value, field)
+			return c.evalGenericConstSelectorWithEnv(scope, decl.Value, field, env)
 		}
 
 		if sym.Kind == SymbolPackage && sym.Package != nil {
@@ -5334,22 +5394,154 @@ func (c *Checker) evalGenericConstSelector(scope *Scope, receiver ast.Expr, fiel
 				return genericConstValue{}, false
 			}
 
-			return c.evalGenericConstExpr(scope, decl.Value)
+			return c.evalGenericConstExprWithEnv(scope, decl.Value, env)
 		}
 
 		return genericConstValue{}, false
 
 	case *ast.SelectorExpr:
-		value, ok := c.evalGenericConstSelector(scope, r.Left, r.Name)
+		value, ok := c.evalGenericConstSelectorWithEnv(scope, r.Left, r.Name, env)
 		if !ok {
 			return genericConstValue{}, false
 		}
 
-		// For now, nested field selection can only continue through named
-		// constants or compound literals, not through already-flattened scalar
-		// values.
 		_ = value
 		return genericConstValue{}, false
+	}
+
+	return genericConstValue{}, false
+}
+
+func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[string]genericConstValue) (genericConstValue, bool) {
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		if id, ok := gen.Base.(*ast.IdentExpr); ok && id.Name.Name == "cast" && len(e.Args) == 1 {
+			return c.evalGenericConstExprWithEnv(scope, e.Args[0], env)
+		}
+
+		return genericConstValue{}, false
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && len(e.Args) == 1 {
+		value, ok := c.evalGenericConstExprWithEnv(scope, e.Args[0], env)
+		if !ok || value.Kind != genericConstString {
+			return genericConstValue{}, false
+		}
+
+		return genericConstValue{Kind: genericConstInt, IntValue: int64(len(value.StringValue))}, true
+	}
+
+	sym := c.taskSymbolFromConstCallCallee(scope, e.Callee)
+	if sym == nil {
+		return genericConstValue{}, false
+	}
+
+	c.ensureTaskSymbolPrepared(scope, sym)
+
+	if sym.Type == nil || sym.Type.Kind != TypeTask {
+		return genericConstValue{}, false
+	}
+
+	if !sym.Type.IsPure && !sym.Type.IsTrustedPure {
+		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q must be pure", sym.Name))
+		return genericConstValue{}, false
+	}
+
+	if len(sym.Type.Results) != 1 {
+		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q must return exactly 1 value", sym.Name))
+		return genericConstValue{}, false
+	}
+
+	var argValues []genericConstValue
+	for _, arg := range e.Args {
+		value, ok := c.evalGenericConstExprWithEnv(scope, arg, env)
+		if !ok {
+			return genericConstValue{}, false
+		}
+
+		argValues = append(argValues, value)
+	}
+
+	taskDecl, ok := sym.Node.(*ast.TaskDecl)
+	if !ok || taskDecl.Body == nil {
+		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q cannot be evaluated because its body is unavailable", sym.Name))
+		return genericConstValue{}, false
+	}
+
+	return c.evalPureTaskConstBody(scope, taskDecl, argValues)
+}
+
+func (c *Checker) taskSymbolFromConstCallCallee(scope *Scope, callee ast.Expr) *Symbol {
+	switch x := callee.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(x.Name.Name)
+		if sym == nil || sym.Kind != SymbolTask {
+			return nil
+		}
+
+		return sym
+
+	case *ast.SelectorExpr:
+		id, ok := x.Left.(*ast.IdentExpr)
+		if !ok {
+			return nil
+		}
+
+		pkgSym := scope.Lookup(id.Name.Name)
+		if pkgSym == nil || pkgSym.Kind != SymbolPackage || pkgSym.Package == nil {
+			return nil
+		}
+
+		member := pkgSym.Package.Symbols[x.Name.Name]
+		if member == nil || member.Kind != SymbolTask {
+			return nil
+		}
+
+		return member
+	}
+
+	return nil
+}
+
+func (c *Checker) evalPureTaskConstBody(scope *Scope, d *ast.TaskDecl, args []genericConstValue) (genericConstValue, bool) {
+	if d == nil || d.Body == nil {
+		return genericConstValue{}, false
+	}
+
+	if len(args) != len(d.Params) {
+		return genericConstValue{}, false
+	}
+
+	env := map[string]genericConstValue{}
+
+	for i, param := range d.Params {
+		env[param.Name.Name] = args[i]
+	}
+
+	for _, stmt := range d.Body.Stmts {
+		switch s := stmt.(type) {
+		case *ast.ReturnStmt:
+			if len(s.Values) != 1 {
+				return genericConstValue{}, false
+			}
+
+			return c.evalGenericConstExprWithEnv(scope, s.Values[0], env)
+
+		case *ast.DeclStmt:
+			constDecl, ok := s.Decl.(*ast.ConstDecl)
+			if !ok {
+				return genericConstValue{}, false
+			}
+
+			value, ok := c.evalGenericConstExprWithEnv(scope, constDecl.Value, env)
+			if !ok {
+				return genericConstValue{}, false
+			}
+
+			env[constDecl.Name.Name] = value
+
+		default:
+			return genericConstValue{}, false
+		}
 	}
 
 	return genericConstValue{}, false
@@ -6142,6 +6334,8 @@ func (c *Checker) checkAssertCall(args []ast.Expr, argTypes []*Type, span source
 }
 
 func (c *Checker) checkDirectTaskCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+	c.ensureTaskSymbolPrepared(nil, sym)
+
 	if sym.Type == nil || sym.Type.Kind != TypeTask {
 		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
 		return []*Type{InvalidType}
