@@ -23,6 +23,8 @@ type LoadedPackage struct {
 	CCode        string
 	CPath        string
 	NativeCFiles []string
+
+	CodegenInfo *cgen.PackageInfo
 }
 
 func LoadAndCheckPackage(

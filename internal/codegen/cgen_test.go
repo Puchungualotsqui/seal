@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"seal/internal/ast"
 	"seal/internal/checker"
 	"seal/internal/diag"
 	"seal/internal/lexer"
@@ -2618,6 +2619,232 @@ Main :: task() {
 		"types_Box_types_Buffer_int_4 b;",
 		"intptr_t x = ((b).value).data[0];",
 		"assert((x == 0));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestImportedGenericTaskRecordsInstanceRequest(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+
+MakeBox :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+`)
+
+	file := source.NewFile("test.seal", `
+Main :: task() {
+    b := types.MakeBox<int>(10)
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.NewWithPackages(reporter, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	})
+	r.ResolveFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := checker.NewWithPackages(reporter, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+	c.CheckFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	g := NewWithPackages(reporter, "", map[string]*PackageInfo{
+		"types": typesPkg,
+	})
+	_ = g.Generate(parsed)
+
+	reqs := g.RequestedGenericInstances()
+
+	var sawTask bool
+	var sawStruct bool
+
+	for _, req := range reqs {
+		if req.PackageName == "types" && req.SymbolName == "MakeBox" && req.Kind == GenericInstanceTask {
+			sawTask = true
+		}
+
+		if req.PackageName == "types" && req.SymbolName == "Box" && req.Kind == GenericInstanceStruct {
+			sawStruct = true
+		}
+	}
+
+	if !sawTask {
+		t.Fatalf("expected request for task types.MakeBox<int>, got %#v", reqs)
+	}
+
+	if !sawStruct {
+		t.Fatalf("expected request for struct types.Box<int>, got %#v", reqs)
+	}
+}
+
+func TestRequestedGenericTaskEmitsPackagePrefixedDefinition(t *testing.T) {
+	file := source.NewFile("types.seal", `
+Box :: struct <T type> {
+    value T
+}
+
+MakeBox :: task <T type>(value T) Box<T> {
+    return Box<T>{value = value}
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := checker.New(reporter)
+	c.CheckFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	g := NewWithPackages(reporter, "types", nil)
+	g.AddRequestedInstances([]GenericInstanceRequest{
+		{
+			Kind:        GenericInstanceTask,
+			PackageName: "types",
+			SymbolName:  "MakeBox",
+			Args: []ast.GenericArg{
+				{
+					Kind: ast.GenericArgExpr,
+					Expr: &ast.IdentExpr{
+						Name: ast.Ident{
+							Name: "int",
+							Loc:  source.NewSpan(file, 0, 0),
+						},
+					},
+					Loc: source.NewSpan(file, 0, 0),
+				},
+			},
+		},
+	})
+
+	out := g.Generate(parsed)
+
+	checks := []string{
+		"typedef struct types_Box_int {",
+		"intptr_t value;",
+		"} types_Box_int;",
+		"types_Box_int types_MakeBox_int(intptr_t value);",
+		"types_Box_int types_MakeBox_int(intptr_t value) {",
+		"return __seal_return_value_",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestRequestedGenericStructEmitsPackagePrefixedDefinition(t *testing.T) {
+	file := source.NewFile("types.seal", `
+Buffer :: struct <T type, N int> {
+    data [N]T
+}
+`)
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+	if reporter.HasErrors() {
+		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+	if reporter.HasErrors() {
+		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+	}
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+	}
+
+	c := checker.New(reporter)
+	c.CheckFile(parsed)
+	if reporter.HasErrors() {
+		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+	}
+
+	g := NewWithPackages(reporter, "types", nil)
+	g.AddRequestedInstances([]GenericInstanceRequest{
+		{
+			Kind:        GenericInstanceStruct,
+			PackageName: "types",
+			SymbolName:  "Buffer",
+			Args: []ast.GenericArg{
+				{
+					Kind: ast.GenericArgExpr,
+					Expr: &ast.IdentExpr{
+						Name: ast.Ident{
+							Name: "int",
+							Loc:  source.NewSpan(file, 0, 0),
+						},
+					},
+					Loc: source.NewSpan(file, 0, 0),
+				},
+				{
+					Kind: ast.GenericArgExpr,
+					Expr: &ast.IntLitExpr{
+						Value: "4",
+						Loc:   source.NewSpan(file, 0, 0),
+					},
+					Loc: source.NewSpan(file, 0, 0),
+				},
+			},
+		},
+	})
+
+	out := g.Generate(parsed)
+
+	checks := []string{
+		"typedef struct types_Buffer_int_4 {",
+		"intptr_t data[4];",
+		"} types_Buffer_int_4;",
 	}
 
 	for _, want := range checks {
