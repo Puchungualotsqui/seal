@@ -3428,3 +3428,410 @@ Main :: task() {
 	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" parameter 1 expects int, got string`)
 	assertCheckerDiagnosticContains(t, reporter, `generic task parameter "F" result 1 expects int, got string`)
 }
+
+func TestGenericTypeArgumentRejectsEnum(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+UseType :: task <T type>() {}
+
+Main :: task() {
+    UseType<Status>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "T" expects concrete stored data type, got Status`)
+}
+
+func TestGenericTypeArgumentRejectsUnion(t *testing.T) {
+	reporter := checkSource(t, `
+Value :: union {
+    int
+    string
+}
+
+UseType :: task <T type>() {}
+
+Main :: task() {
+    UseType<Value>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "T" expects concrete stored data type, got Value`)
+}
+
+func TestGenericTypeArgumentRejectsTask(t *testing.T) {
+	reporter := checkSource(t, `
+Identity :: task(value int) int {
+    return value
+}
+
+UseType :: task <T type>() {}
+
+Main :: task() {
+    UseType<Identity>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `expected type argument, got value "Identity"`)
+}
+
+func TestGenericTypeArgumentRejectsSpecializedGenericTask(t *testing.T) {
+	reporter := checkSource(t, `
+Identity :: task <T type>(value T) T {
+    return value
+}
+
+UseType :: task <T type>() {}
+
+Main :: task() {
+    UseType<Identity<int>>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `"Identity" is not a type`)
+}
+
+func TestGenericEnumArgumentAcceptsEnum(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+UseEnum :: task <E enum>() {}
+
+Main :: task() {
+    UseEnum<Status>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericEnumArgumentRejectsNonEnum(t *testing.T) {
+	reporter := checkSource(t, `
+UseEnum :: task <E enum>() {}
+
+Main :: task() {
+    UseEnum<int>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "E" expects enum type, got int`)
+}
+
+func TestGenericEnumArgumentRejectsStruct(t *testing.T) {
+	reporter := checkSource(t, `
+Player :: struct {
+    health int
+}
+
+UseEnum :: task <E enum>() {}
+
+Main :: task() {
+    UseEnum<Player>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "E" expects enum type, got Player`)
+}
+
+func TestGenericUnionArgumentAcceptsUnion(t *testing.T) {
+	reporter := checkSource(t, `
+Value :: union {
+    int
+    string
+}
+
+UseUnion :: task <U union>() {}
+
+Main :: task() {
+    UseUnion<Value>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericUnionArgumentRejectsNonUnion(t *testing.T) {
+	reporter := checkSource(t, `
+UseUnion :: task <U union>() {}
+
+Main :: task() {
+    UseUnion<int>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "U" expects union type, got int`)
+}
+
+func TestGenericUnionArgumentRejectsStruct(t *testing.T) {
+	reporter := checkSource(t, `
+Player :: struct {
+    health int
+}
+
+UseUnion :: task <U union>() {}
+
+Main :: task() {
+    UseUnion<Player>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "U" expects union type, got Player`)
+}
+
+func TestGenericTaskArgumentAcceptsTask(t *testing.T) {
+	reporter := checkSource(t, `
+Identity :: task(value int) int {
+    return value
+}
+
+UseTask :: task <F task[(int) int]>() {}
+
+Main :: task() {
+    UseTask<Identity>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTaskArgumentRejectsType(t *testing.T) {
+	reporter := checkSource(t, `
+UseTask :: task <F task[(int) int]>() {}
+
+Main :: task() {
+    UseTask<int>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `expected task argument`)
+}
+
+func TestGenericTaskArgumentRejectsStructType(t *testing.T) {
+	reporter := checkSource(t, `
+Player :: struct {
+    health int
+}
+
+UseTask :: task <F task[(int) int]>() {}
+
+Main :: task() {
+    UseTask<Player>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `expected task argument, got "Player"`)
+}
+
+func TestGenericIntValueArgumentAcceptsLiteral(t *testing.T) {
+	reporter := checkSource(t, `
+UseInt :: task <N int>() {}
+
+Main :: task() {
+    UseInt<3>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericIntValueArgumentAcceptsConstExpr(t *testing.T) {
+	reporter := checkSource(t, `
+Base :: 2
+UseInt :: task <N int>() {}
+
+Main :: task() {
+    UseInt<Base + 3>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericIntValueArgumentRejectsString(t *testing.T) {
+	reporter := checkSource(t, `
+UseInt :: task <N int>() {}
+
+Main :: task() {
+    UseInt<"x">()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `cannot assign string to int`)
+}
+
+func TestGenericIntValueArgumentRejectsRuntimeValue(t *testing.T) {
+	reporter := checkSource(t, `
+UseInt :: task <N int>() {}
+
+Main :: task() {
+    x := 10
+    UseInt<x>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "N" requires a compile-time value argument`)
+}
+
+func TestGenericBoolValueArgumentAcceptsLiteral(t *testing.T) {
+	reporter := checkSource(t, `
+UseBool :: task <B bool>() {}
+
+Main :: task() {
+    UseBool<true>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericBoolValueArgumentAcceptsConstExpr(t *testing.T) {
+	reporter := checkSource(t, `
+Enabled :: true
+UseBool :: task <B bool>() {}
+
+Main :: task() {
+    UseBool<!Enabled || true>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericBoolValueArgumentRejectsInt(t *testing.T) {
+	reporter := checkSource(t, `
+UseBool :: task <B bool>() {}
+
+Main :: task() {
+    UseBool<1>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `cannot assign untyped int to bool`)
+}
+
+func TestGenericBoolValueArgumentRejectsRuntimeValue(t *testing.T) {
+	reporter := checkSource(t, `
+UseBool :: task <B bool>() {}
+
+Main :: task() {
+    flag := true
+    UseBool<flag>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "B" requires a compile-time value argument`)
+}
+
+func TestGenericStringValueArgumentAcceptsLiteral(t *testing.T) {
+	reporter := checkSource(t, `
+UseString :: task <S string>() {}
+
+Main :: task() {
+    UseString<"hello">()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericStringValueArgumentAcceptsConst(t *testing.T) {
+	reporter := checkSource(t, `
+Name :: "seal"
+UseString :: task <S string>() {}
+
+Main :: task() {
+    UseString<Name>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericStringValueArgumentRejectsBool(t *testing.T) {
+	reporter := checkSource(t, `
+UseString :: task <S string>() {}
+
+Main :: task() {
+    UseString<true>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `cannot assign bool to string`)
+}
+
+func TestGenericStringValueArgumentRejectsRuntimeValue(t *testing.T) {
+	reporter := checkSource(t, `
+UseString :: task <S string>() {}
+
+Main :: task() {
+    name := "seal"
+    UseString<name>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "S" requires a compile-time value argument`)
+}
+
+func TestGenericTypedValueArgumentAcceptsMatchingConst(t *testing.T) {
+	reporter := checkSource(t, `
+UseValue :: task <N int>() {}
+
+Main :: task() {
+    UseValue<1 + 2>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestGenericTypedValueArgumentRejectsWrongType(t *testing.T) {
+	reporter := checkSource(t, `
+UseValue :: task <N int>() {}
+
+Main :: task() {
+    UseValue<"bad">()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `cannot assign string to int`)
+}
+
+func TestGenericTypedValueArgumentRejectsRuntimeValue(t *testing.T) {
+	reporter := checkSource(t, `
+UseValue :: task <N int>() {}
+
+Main :: task() {
+    n := 3
+    UseValue<n>()
+}
+`)
+
+	assertCheckerDiagnosticContains(t, reporter, `generic parameter "N" requires a compile-time value argument`)
+}
