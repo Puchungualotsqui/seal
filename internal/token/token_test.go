@@ -50,3 +50,53 @@ func TestKindString(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupInterfaceKeywords(t *testing.T) {
+	tests := []struct {
+		text string
+		want Kind
+	}{
+		{"interface", KeywordInterface},
+		{"impl", KeywordImpl},
+		{"using", KeywordUsing},
+		{"self", KeywordSelf},
+		{"dyn", KeywordDyn},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.text, func(t *testing.T) {
+			if got := LookupIdent(tt.text); got != tt.want {
+				t.Fatalf(
+					"LookupIdent(%q) = %v; want %v",
+					tt.text,
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}
+
+func TestInterfaceKeywordStrings(t *testing.T) {
+	tests := []struct {
+		kind Kind
+		want string
+	}{
+		{KeywordInterface, "interface"},
+		{KeywordImpl, "impl"},
+		{KeywordUsing, "using"},
+		{KeywordSelf, "self"},
+		{KeywordDyn, "dyn"},
+	}
+
+	for _, tt := range tests {
+		if got := tt.kind.String(); got != tt.want {
+			t.Errorf(
+				"%v.String() = %q; want %q",
+				tt.kind,
+				got,
+				tt.want,
+			)
+		}
+	}
+}

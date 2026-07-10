@@ -53,6 +53,7 @@ type ConstDecl struct {
 }
 
 func (*ConstDecl) declNode() {}
+
 func (d *ConstDecl) Span() source.Span {
 	return d.Loc
 }
@@ -250,6 +251,12 @@ type StructDecl struct {
 	Loc           source.Span
 }
 
+func (*StructDecl) declNode() {}
+
+func (d *StructDecl) Span() source.Span {
+	return d.Loc
+}
+
 type DeclStmt struct {
 	Decl Decl
 	Loc  source.Span
@@ -259,11 +266,6 @@ func (*DeclStmt) stmtNode() {}
 
 func (s *DeclStmt) Span() source.Span {
 	return s.Loc
-}
-
-func (*StructDecl) declNode() {}
-func (d *StructDecl) Span() source.Span {
-	return d.Loc
 }
 
 type Field struct {
@@ -297,6 +299,7 @@ type TaskDecl struct {
 }
 
 func (*TaskDecl) declNode() {}
+
 func (d *TaskDecl) Span() source.Span {
 	return d.Loc
 }
@@ -308,6 +311,7 @@ type EnumDecl struct {
 }
 
 func (*EnumDecl) declNode() {}
+
 func (d *EnumDecl) Span() source.Span {
 	return d.Loc
 }
@@ -320,22 +324,39 @@ type UnionDecl struct {
 }
 
 func (*UnionDecl) declNode() {}
+
 func (d *UnionDecl) Span() source.Span {
 	return d.Loc
 }
 
+// InterfaceDecl describes either a static/default interface or a dynamic
+// interface.
+//
+// Static/default interface:
+//
+//	Reader :: interface <Out type> {
+//		Read :: task(self *self) Out
+//	}
+//
+// Dynamic interface:
+//
+//	Reader :: dyn interface <Out type> {
+//		Read :: task(self *self) Out
+//	}
+//
+// The implementing type is represented inside requirements by the builtin
+// InterfaceSelfType. It is deliberately not included in GenericParams.
 type InterfaceDecl struct {
 	Name          Ident
 	GenericParams []GenericParam
 
 	// false:
 	//
-	//     Enemy :: interface <T type> { ... }
+	//     Reader :: interface <Out type> { ... }
 	//
 	// true:
 	//
-	//     Enemy :: dyn interface <T type> { ... }
-	//
+	//     Reader :: dyn interface <Out type> { ... }
 	IsDyn bool
 
 	Requirements []*TaskSignature
@@ -343,25 +364,88 @@ type InterfaceDecl struct {
 }
 
 func (*InterfaceDecl) declNode() {}
+
 func (d *InterfaceDecl) Span() source.Span {
 	return d.Loc
 }
 
+// TaskSignature describes an interface requirement.
+//
+// Requirements have no body. They may have multiple result types and may
+// reference InterfaceSelfType anywhere in their parameter or result types.
+//
+// Example:
+//
+//	Read :: task(self *self) (Out, bool)
 type TaskSignature struct {
-	Name    Ident
+	Name Ident
+
+	IsPure        bool
+	IsTrustedPure bool
+
 	Params  []Param
 	Results []Type
 	Loc     source.Span
 }
 
+func (s *TaskSignature) Span() source.Span {
+	if s == nil {
+		return source.Span{}
+	}
+	return s.Loc
+}
+
+// ImplDecl describes either a manual interface implementation or an explicit
+// delegated implementation.
+//
+// Manual implementation:
+//
+//	Reader<T> :: impl <T type> Box<T> {
+//		Read :: task(self *Box<T>) T {
+//			return self.value
+//		}
+//	}
+//
+// Delegated implementation:
+//
+//	Positioned :: impl Entity using transform
+//
+// Nested delegated implementation:
+//
+//	Positioned :: impl Entity using components.transform
+//
+// Interface identifies the interface specialization pattern:
+//
+//	Reader<T>
+//
+// GenericParams belong to the impl declaration:
+//
+//	<T type>
+//
+// Target identifies the implementing type pattern:
+//
+//	Box<T>
+//
+// A manual impl contains Entries and has an empty UsingPath.
+// A delegated impl contains a UsingPath and should have no Entries.
 type ImplDecl struct {
-	// Interface is usually a generic type:
-	//
-	//     Drawable<Sprite> :: impl { ... }
-	//
 	Interface Type
-	Entries   []ImplEntry
-	Loc       source.Span
+
+	GenericParams []GenericParam
+	Target        Type
+
+	Entries []ImplEntry
+
+	// UsingPath is an explicit field path used for interface delegation.
+	//
+	//     using transform
+	//     using components.transform
+	//
+	// Each path component is stored separately. An empty path means this is a
+	// manual implementation.
+	UsingPath []Ident
+
+	Loc source.Span
 }
 
 func (*ImplDecl) declNode() {}
@@ -370,22 +454,42 @@ func (d *ImplDecl) Span() source.Span {
 	return d.Loc
 }
 
+func (d *ImplDecl) IsDelegated() bool {
+	return d != nil && len(d.UsingPath) > 0
+}
+
+func (d *ImplDecl) IsManual() bool {
+	return d != nil && len(d.UsingPath) == 0
+}
+
+// ImplEntry describes one manually implemented interface requirement.
+//
+// Inline implementation:
+//
+//	Read :: task(self *Box<T>) T {
+//		return self.value
+//	}
+//
+// Alias implementation:
+//
+//	Read :: ReadBox
+//
+// Alias implementations remain part of the AST so they may continue to be
+// supported independently from using-based whole-interface delegation.
 type ImplEntry struct {
 	Name Ident
 
-	// Inline implementation:
-	//
-	//     Draw :: task(s *Sprite) { ... }
-	//
-	Task *TaskDecl
-
-	// Alias implementation:
-	//
-	//     Draw :: DrawSprite
-	//
+	Task  *TaskDecl
 	Alias Expr
 
 	Loc source.Span
+}
+
+func (e *ImplEntry) Span() source.Span {
+	if e == nil {
+		return source.Span{}
+	}
+	return e.Loc
 }
 
 type OverloadDecl struct {
@@ -395,6 +499,7 @@ type OverloadDecl struct {
 }
 
 func (*OverloadDecl) declNode() {}
+
 func (d *OverloadDecl) Span() source.Span {
 	return d.Loc
 }
@@ -426,6 +531,7 @@ type DirectiveDecl struct {
 }
 
 func (*DirectiveDecl) declNode() {}
+
 func (d *DirectiveDecl) Span() source.Span {
 	return d.Loc
 }
@@ -440,7 +546,30 @@ type NamedType struct {
 }
 
 func (*NamedType) typeNode() {}
+
 func (t *NamedType) Span() source.Span {
+	return t.Loc
+}
+
+// InterfaceSelfType represents the builtin `self` type available inside
+// interface requirement signatures.
+//
+// Example:
+//
+//	Reader :: interface <Out type> {
+//		Read :: task(self *self) Out
+//	}
+//
+// The parser may construct this node anywhere `self` appears in a type
+// position. The checker is responsible for rejecting it outside an interface
+// requirement scope.
+type InterfaceSelfType struct {
+	Loc source.Span
+}
+
+func (*InterfaceSelfType) typeNode() {}
+
+func (t *InterfaceSelfType) Span() source.Span {
 	return t.Loc
 }
 
@@ -450,6 +579,7 @@ type PointerType struct {
 }
 
 func (*PointerType) typeNode() {}
+
 func (t *PointerType) Span() source.Span {
 	return t.Loc
 }
@@ -462,6 +592,7 @@ type ArrayType struct {
 }
 
 func (*ArrayType) typeNode() {}
+
 func (t *ArrayType) Span() source.Span {
 	return t.Loc
 }
@@ -473,6 +604,7 @@ type GenericType struct {
 }
 
 func (*GenericType) typeNode() {}
+
 func (t *GenericType) Span() source.Span {
 	return t.Loc
 }
@@ -487,6 +619,7 @@ type BlockStmt struct {
 }
 
 func (*BlockStmt) stmtNode() {}
+
 func (s *BlockStmt) Span() source.Span {
 	return s.Loc
 }
@@ -497,6 +630,7 @@ type ReturnStmt struct {
 }
 
 func (*ReturnStmt) stmtNode() {}
+
 func (s *ReturnStmt) Span() source.Span {
 	return s.Loc
 }
@@ -507,6 +641,7 @@ type DeferStmt struct {
 }
 
 func (*DeferStmt) stmtNode() {}
+
 func (s *DeferStmt) Span() source.Span {
 	return s.Loc
 }
@@ -517,6 +652,7 @@ type SealStmt struct {
 }
 
 func (*SealStmt) stmtNode() {}
+
 func (s *SealStmt) Span() source.Span {
 	return s.Loc
 }
@@ -527,6 +663,7 @@ type ExprStmt struct {
 }
 
 func (*ExprStmt) stmtNode() {}
+
 func (s *ExprStmt) Span() source.Span {
 	return s.Loc
 }
@@ -539,6 +676,7 @@ type AssignStmt struct {
 }
 
 func (*AssignStmt) stmtNode() {}
+
 func (s *AssignStmt) Span() source.Span {
 	return s.Loc
 }
@@ -553,6 +691,7 @@ type VarDeclStmt struct {
 }
 
 func (*VarDeclStmt) stmtNode() {}
+
 func (s *VarDeclStmt) Span() source.Span {
 	return s.Loc
 }
@@ -577,18 +716,22 @@ type IfStmt struct {
 }
 
 func (*IfStmt) stmtNode() {}
+
 func (s *IfStmt) Span() source.Span {
 	return s.Loc
 }
 
 type SwitchStmt struct {
 	// For normal enum switch:
+	//
 	//     switch err { ... }
 	//
 	// For union switch:
+	//
 	//     switch shape in s { ... }
 	//
 	// For any type switch:
+	//
 	//     switch value type { ... }
 	BindName      Ident
 	Target        Expr
@@ -640,6 +783,7 @@ type ForStmt struct {
 }
 
 func (*ForStmt) stmtNode() {}
+
 func (s *ForStmt) Span() source.Span {
 	return s.Loc
 }
@@ -653,6 +797,7 @@ type IdentExpr struct {
 }
 
 func (*IdentExpr) exprNode() {}
+
 func (e *IdentExpr) Span() source.Span {
 	return e.Name.Span()
 }
@@ -663,6 +808,7 @@ type DotIdentExpr struct {
 }
 
 func (*DotIdentExpr) exprNode() {}
+
 func (e *DotIdentExpr) Span() source.Span {
 	return e.Loc
 }
@@ -673,6 +819,7 @@ type IntLitExpr struct {
 }
 
 func (*IntLitExpr) exprNode() {}
+
 func (e *IntLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -683,6 +830,7 @@ type FloatLitExpr struct {
 }
 
 func (*FloatLitExpr) exprNode() {}
+
 func (e *FloatLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -693,6 +841,7 @@ type StringLitExpr struct {
 }
 
 func (*StringLitExpr) exprNode() {}
+
 func (e *StringLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -703,6 +852,7 @@ type CStringLitExpr struct {
 }
 
 func (*CStringLitExpr) exprNode() {}
+
 func (e *CStringLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -713,6 +863,7 @@ type CharLitExpr struct {
 }
 
 func (*CharLitExpr) exprNode() {}
+
 func (e *CharLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -723,6 +874,7 @@ type BoolLitExpr struct {
 }
 
 func (*BoolLitExpr) exprNode() {}
+
 func (e *BoolLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -732,6 +884,7 @@ type NilLitExpr struct {
 }
 
 func (*NilLitExpr) exprNode() {}
+
 func (e *NilLitExpr) Span() source.Span {
 	return e.Loc
 }
@@ -743,6 +896,7 @@ type UnaryExpr struct {
 }
 
 func (*UnaryExpr) exprNode() {}
+
 func (e *UnaryExpr) Span() source.Span {
 	return e.Loc
 }
@@ -755,6 +909,7 @@ type BinaryExpr struct {
 }
 
 func (*BinaryExpr) exprNode() {}
+
 func (e *BinaryExpr) Span() source.Span {
 	return e.Loc
 }
@@ -766,6 +921,7 @@ type CallExpr struct {
 }
 
 func (*CallExpr) exprNode() {}
+
 func (e *CallExpr) Span() source.Span {
 	return e.Loc
 }
@@ -788,6 +944,7 @@ type SelectorExpr struct {
 }
 
 func (*SelectorExpr) exprNode() {}
+
 func (e *SelectorExpr) Span() source.Span {
 	return e.Loc
 }
@@ -799,6 +956,7 @@ type GenericExpr struct {
 }
 
 func (*GenericExpr) exprNode() {}
+
 func (e *GenericExpr) Span() source.Span {
 	return e.Loc
 }
@@ -810,6 +968,7 @@ type IndexExpr struct {
 }
 
 func (*IndexExpr) exprNode() {}
+
 func (e *IndexExpr) Span() source.Span {
 	return e.Loc
 }
@@ -820,6 +979,7 @@ type ArrayLiteralExpr struct {
 }
 
 func (*ArrayLiteralExpr) exprNode() {}
+
 func (e *ArrayLiteralExpr) Span() source.Span {
 	return e.Loc
 }
@@ -837,6 +997,7 @@ type CompoundLiteralExpr struct {
 }
 
 func (*CompoundLiteralExpr) exprNode() {}
+
 func (e *CompoundLiteralExpr) Span() source.Span {
 	return e.Loc
 }

@@ -409,3 +409,92 @@ Bad :: struct($T, #N) {
 		t.Fatalf("expected diagnostics for old generic markers")
 	}
 }
+
+func TestLexInterfaceSyntax(t *testing.T) {
+	file := source.NewFile("test.seal", `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Reader<T> :: impl <T type> Box<T> using inner
+`)
+
+	reporter := diag.NewReporter()
+	lexer := New(file, reporter)
+	tokens := lexer.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected lexer diagnostics:\n%s", reporter.String())
+	}
+
+	var kinds []token.Kind
+	for _, tok := range tokens {
+		kinds = append(kinds, tok.Kind)
+	}
+
+	expected := []token.Kind{
+		// Reader :: interface <Out type> {
+		token.Ident,
+		token.ColonColon,
+		token.KeywordInterface,
+		token.Lt,
+		token.Ident,
+		token.KeywordType,
+		token.Gt,
+		token.LBrace,
+
+		// Read :: task(self *self) Out
+		token.Ident,
+		token.ColonColon,
+		token.KeywordTask,
+		token.LParen,
+		token.KeywordSelf,
+		token.Star,
+		token.KeywordSelf,
+		token.RParen,
+		token.Ident,
+
+		token.RBrace,
+
+		// Reader<T> :: impl <T type> Box<T> using inner
+		token.Ident,
+		token.Lt,
+		token.Ident,
+		token.Gt,
+		token.ColonColon,
+		token.KeywordImpl,
+		token.Lt,
+		token.Ident,
+		token.KeywordType,
+		token.Gt,
+		token.Ident,
+		token.Lt,
+		token.Ident,
+		token.Gt,
+		token.KeywordUsing,
+		token.Ident,
+
+		token.EOF,
+	}
+
+	if len(kinds) != len(expected) {
+		t.Fatalf(
+			"got %d tokens, want %d\ngot:  %v\nwant: %v",
+			len(kinds),
+			len(expected),
+			kinds,
+			expected,
+		)
+	}
+
+	for i := range expected {
+		if kinds[i] != expected[i] {
+			t.Fatalf(
+				"token %d = %v; want %v",
+				i,
+				kinds[i],
+				expected[i],
+			)
+		}
+	}
+}

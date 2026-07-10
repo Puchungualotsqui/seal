@@ -62,10 +62,25 @@ func (p *Parser) parseDecl() ast.Decl {
 	if nameTok.Kind == token.Ident {
 		p.advance()
 
-		name = ast.Ident{Name: nameTok.Lexeme, Loc: nameTok.Span}
+		name = ast.Ident{
+			Name: nameTok.Lexeme,
+			Loc:  nameTok.Span,
+		}
+
+		parts := []ast.Ident{name}
+
+		for p.match(token.Dot) {
+			part := p.expectIdent("expected declaration name after '.'")
+			if part.Name == "" {
+				return nil
+			}
+
+			parts = append(parts, part)
+		}
+
 		declHead = &ast.NamedType{
-			Parts: []ast.Ident{name},
-			Loc:   name.Span(),
+			Parts: parts,
+			Loc:   p.span(start, parts[len(parts)-1].Span().End),
 		}
 
 		if p.at(token.Lt) {
@@ -478,6 +493,7 @@ func (p *Parser) parseInterfaceDecl(name ast.Ident, start int, isDyn bool) ast.D
 
 	for !p.at(token.RBrace) && !p.at(token.EOF) {
 		reqStart := p.peek().Span.Start
+
 		reqName := p.expectIdent("expected interface requirement name")
 		if reqName.Name == "" {
 			p.synchronizeDeclBody()
@@ -489,6 +505,28 @@ func (p *Parser) parseInterfaceDecl(name ast.Ident, start int, isDyn bool) ast.D
 			continue
 		}
 
+		isPure := false
+		isTrustedPure := false
+
+		if p.match(token.At) {
+			dir := p.expectIdent("expected directive name after '@'")
+			if dir.Name != "trusted_pure" {
+				p.diags.Add(
+					dir.Span(),
+					fmt.Sprintf("unsupported interface requirement directive @%s", dir.Name),
+				)
+				p.synchronizeDeclBody()
+				continue
+			}
+
+			isTrustedPure = true
+			isPure = true
+		}
+
+		if p.match(token.KeywordPure) {
+			isPure = true
+		}
+
 		if !p.expect(token.KeywordTask, "expected 'task' in interface requirement") {
 			p.synchronizeDeclBody()
 			continue
@@ -497,11 +535,28 @@ func (p *Parser) parseInterfaceDecl(name ast.Ident, start int, isDyn bool) ast.D
 		params := p.parseParamList()
 		results := p.parseInterfaceResultTypes()
 
+		if p.at(token.LBrace) {
+			p.errorHere("interface requirement must not have a body")
+			body := p.parseBlock()
+			if body == nil {
+				p.synchronizeDeclBody()
+			}
+		}
+
+		end := p.previous().Span.End
+		if len(results) > 0 {
+			end = results[len(results)-1].Span().End
+		} else if len(params) > 0 {
+			end = params[len(params)-1].Type.Span().End
+		}
+
 		requirements = append(requirements, &ast.TaskSignature{
-			Name:    reqName,
-			Params:  params,
-			Results: results,
-			Loc:     p.span(reqStart, p.previous().Span.End),
+			Name:          reqName,
+			IsPure:        isPure,
+			IsTrustedPure: isTrustedPure,
+			Params:        params,
+			Results:       results,
+			Loc:           p.span(reqStart, end),
 		})
 	}
 
@@ -517,7 +572,39 @@ func (p *Parser) parseInterfaceDecl(name ast.Ident, start int, isDyn bool) ast.D
 }
 
 func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
-	if !p.expect(token.LBrace, "expected '{' after impl declaration") {
+	genericParams := p.parseGenericParamsIfPresent()
+
+	targetType := p.parseType()
+	if targetType == nil {
+		p.errorHere("expected implementing type after impl declaration")
+		p.synchronizeTopLevel()
+		return nil
+	}
+
+	if p.match(token.KeywordUsing) {
+		usingPath := p.parseUsingPath()
+		if len(usingPath) == 0 {
+			return nil
+		}
+
+		end := usingPath[len(usingPath)-1].Span().End
+
+		if p.at(token.LBrace) {
+			p.errorHere("delegated impl cannot contain an impl block")
+			p.skipBalancedBlock()
+			end = p.previous().Span.End
+		}
+
+		return &ast.ImplDecl{
+			Interface:     interfaceType,
+			GenericParams: genericParams,
+			Target:        targetType,
+			UsingPath:     usingPath,
+			Loc:           p.span(start, end),
+		}
+	}
+
+	if !p.expect(token.LBrace, "expected '{' or 'using' after implementing type") {
 		return nil
 	}
 
@@ -537,9 +624,33 @@ func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 			continue
 		}
 
+		isPure := false
+		isTrustedPure := false
+
+		if p.match(token.At) {
+			dir := p.expectIdent("expected directive name after '@'")
+			if dir.Name != "trusted_pure" {
+				p.diags.Add(
+					dir.Span(),
+					fmt.Sprintf("unsupported impl entry directive @%s", dir.Name),
+				)
+				p.synchronizeDeclBody()
+				continue
+			}
+
+			isTrustedPure = true
+			isPure = true
+		}
+
+		if p.match(token.KeywordPure) {
+			isPure = true
+		}
+
 		if p.match(token.KeywordTask) {
+			taskGenericParams := p.parseGenericParamsIfPresent()
 			params := p.parseParamList()
 			results := p.parseResultTypesUntilBodyOrDeclEnd()
+
 			body := p.parseBlock()
 			if body == nil {
 				p.synchronizeDeclBody()
@@ -547,11 +658,14 @@ func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 			}
 
 			task := &ast.TaskDecl{
-				Name:    name,
-				Params:  params,
-				Results: results,
-				Body:    body,
-				Loc:     p.span(entryStart, body.Span().End),
+				Name:          name,
+				GenericParams: taskGenericParams,
+				IsPure:        isPure,
+				IsTrustedPure: isTrustedPure,
+				Params:        params,
+				Results:       results,
+				Body:          body,
+				Loc:           p.span(entryStart, body.Span().End),
 			}
 
 			entries = append(entries, ast.ImplEntry{
@@ -560,6 +674,12 @@ func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 				Loc:  task.Span(),
 			})
 
+			continue
+		}
+
+		if isPure || isTrustedPure {
+			p.errorHere("expected 'task' after impl entry purity modifier")
+			p.synchronizeDeclBody()
 			continue
 		}
 
@@ -582,10 +702,34 @@ func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 	endTok := p.expectToken(token.RBrace, "expected '}' after impl block")
 
 	return &ast.ImplDecl{
-		Interface: interfaceType,
-		Entries:   entries,
-		Loc:       p.span(start, endTok.Span.End),
+		Interface:     interfaceType,
+		GenericParams: genericParams,
+		Target:        targetType,
+		Entries:       entries,
+		Loc:           p.span(start, endTok.Span.End),
 	}
+}
+
+func (p *Parser) parseUsingPath() []ast.Ident {
+	var path []ast.Ident
+
+	first := p.expectIdent("expected field path after 'using'")
+	if first.Name == "" {
+		return nil
+	}
+
+	path = append(path, first)
+
+	for p.match(token.Dot) {
+		part := p.expectIdent("expected field name after '.' in using path")
+		if part.Name == "" {
+			return path
+		}
+
+		path = append(path, part)
+	}
+
+	return path
 }
 
 func (p *Parser) parseOverloadDecl(name string, start int) ast.Decl {
@@ -1040,7 +1184,7 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 	start := p.peek().Span.Start
 
 	switch p.peek().Kind {
-	case token.Star, token.LBracket:
+	case token.Star, token.LBracket, token.KeywordSelf:
 		t := p.parseType()
 		if t == nil {
 			return ast.GenericArg{}
@@ -1105,6 +1249,33 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 	}
 }
 
+func (p *Parser) parseParenthesizedResultTypes() []ast.Type {
+	if !p.match(token.LParen) {
+		return nil
+	}
+
+	var results []ast.Type
+
+	for !p.at(token.RParen) && !p.at(token.EOF) {
+		result := p.parseType()
+		if result == nil {
+			p.errorHere("expected result type")
+			p.synchronizeUntil(token.Comma, token.RParen)
+			p.match(token.Comma)
+			continue
+		}
+
+		results = append(results, result)
+
+		if !p.match(token.Comma) {
+			break
+		}
+	}
+
+	p.expect(token.RParen, "expected ')' after result types")
+	return results
+}
+
 func (p *Parser) parseParamList() []ast.Param {
 	if !p.expect(token.LParen, "expected '(' before parameter list") {
 		return nil
@@ -1113,9 +1284,9 @@ func (p *Parser) parseParamList() []ast.Param {
 	var params []ast.Param
 
 	for !p.at(token.RParen) && !p.at(token.EOF) {
-		names := []ast.Ident{}
+		var names []ast.Ident
 
-		firstName := p.expectIdent("expected parameter name")
+		firstName := p.expectParamName("expected parameter name")
 		if firstName.Name == "" {
 			p.synchronizeUntil(token.Comma, token.RParen)
 			p.match(token.Comma)
@@ -1125,12 +1296,16 @@ func (p *Parser) parseParamList() []ast.Param {
 		names = append(names, firstName)
 
 		for p.match(token.Comma) {
-			if !p.at(token.Ident) {
+			if !p.at(token.Ident) && !p.at(token.KeywordSelf) {
 				p.backup()
 				break
 			}
 
-			nextName := p.expectIdent("expected parameter name")
+			nextName := p.expectParamName("expected parameter name")
+			if nextName.Name == "" {
+				break
+			}
+
 			names = append(names, nextName)
 		}
 
@@ -1174,7 +1349,29 @@ func (p *Parser) parseParamList() []ast.Param {
 	return params
 }
 
+func (p *Parser) skipBalancedBlock() {
+	if !p.match(token.LBrace) {
+		return
+	}
+
+	depth := 1
+
+	for !p.at(token.EOF) && depth > 0 {
+		switch p.advance().Kind {
+		case token.LBrace:
+			depth++
+
+		case token.RBrace:
+			depth--
+		}
+	}
+}
+
 func (p *Parser) parseResultTypesUntilBodyOrDeclEnd() []ast.Type {
+	if p.at(token.LParen) {
+		return p.parseParenthesizedResultTypes()
+	}
+
 	var results []ast.Type
 
 	for !p.at(token.LBrace) &&
@@ -1196,6 +1393,10 @@ func (p *Parser) parseResultTypesUntilBodyOrDeclEnd() []ast.Type {
 }
 
 func (p *Parser) parseExternResultTypes() []ast.Type {
+	if p.at(token.LParen) {
+		return p.parseParenthesizedResultTypes()
+	}
+
 	var results []ast.Type
 
 	for !p.at(token.RBrace) &&
@@ -1263,6 +1464,11 @@ func (p *Parser) parseType() ast.Type {
 			Inferred: inferred,
 			Elem:     elem,
 			Loc:      p.span(start, elem.Span().End),
+		}
+
+	case p.match(token.KeywordSelf):
+		t = &ast.InterfaceSelfType{
+			Loc: p.previous().Span,
 		}
 
 	case p.at(token.Ident):
@@ -1876,10 +2082,12 @@ func (p *Parser) parsePrefix() ast.Expr {
 	start := p.peek().Span.Start
 
 	switch {
-	case p.match(token.Ident):
+	case p.at(token.Ident) || p.at(token.KeywordSelf):
+		tok := p.advance()
+
 		id := ast.Ident{
-			Name: p.previous().Lexeme,
-			Loc:  p.previous().Span,
+			Name: tok.Lexeme,
+			Loc:  tok.Span,
 		}
 
 		return &ast.IdentExpr{Name: id}
@@ -1963,6 +2171,67 @@ func (p *Parser) parsePrefix() ast.Expr {
 
 	p.errorHere("expected expression")
 	return nil
+}
+
+func (p *Parser) looksLikeDeclStartAt(pos int) bool {
+	if pos < 0 || pos >= len(p.tokens) {
+		return false
+	}
+
+	kind := p.tokens[pos].Kind
+
+	if p.isDeclName(kind) && kind != token.Ident {
+		return pos+1 < len(p.tokens) &&
+			p.tokens[pos+1].Kind == token.ColonColon
+	}
+
+	if kind != token.Ident {
+		return false
+	}
+
+	i := pos + 1
+
+	// Package-qualified declaration head:
+	//
+	//     io.Reader
+	for i+1 < len(p.tokens) &&
+		p.tokens[i].Kind == token.Dot &&
+		p.tokens[i+1].Kind == token.Ident {
+		i += 2
+	}
+
+	// Generic declaration head:
+	//
+	//     Reader<T>
+	//     io.Reader<Box<T>>
+	if i < len(p.tokens) && p.tokens[i].Kind == token.Lt {
+		depth := 0
+
+		for i < len(p.tokens) {
+			switch p.tokens[i].Kind {
+			case token.Lt:
+				depth++
+
+			case token.Gt:
+				depth--
+				if depth == 0 {
+					i++
+					goto genericDone
+				}
+
+			case token.EOF:
+				return false
+			}
+
+			i++
+		}
+
+		return false
+	}
+
+genericDone:
+	return i < len(p.tokens) &&
+		p.tokens[i].Kind == token.ColonColon
 }
 
 func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
@@ -2303,14 +2572,13 @@ func (p *Parser) parseCompoundLiteral(t ast.Type, start int) ast.Expr {
 }
 
 func (p *Parser) parseInterfaceResultTypes() []ast.Type {
+	if p.at(token.LParen) {
+		return p.parseParenthesizedResultTypes()
+	}
+
 	var results []ast.Type
 
 	for !p.at(token.RBrace) && !p.at(token.EOF) {
-		// Next interface requirement starts here:
-		//
-		// Health :: task(...)
-		//
-		// So the previous requirement has no more result types.
 		if p.at(token.Ident) && p.peekNext().Kind == token.ColonColon {
 			break
 		}
@@ -2433,6 +2701,20 @@ func (p *Parser) isDeclName(kind token.Kind) bool {
 	}
 }
 
+func (p *Parser) expectParamName(message string) ast.Ident {
+	if !p.at(token.Ident) && !p.at(token.KeywordSelf) {
+		p.errorHere(message)
+		return ast.Ident{}
+	}
+
+	tok := p.advance()
+
+	return ast.Ident{
+		Name: tok.Lexeme,
+		Loc:  tok.Span,
+	}
+}
+
 func (p *Parser) expectIdent(message string) ast.Ident {
 	if !p.at(token.Ident) {
 		p.errorHere(message)
@@ -2538,7 +2820,7 @@ func (p *Parser) span(start int, end int) source.Span {
 
 func (p *Parser) synchronizeTopLevel() {
 	for !p.at(token.EOF) {
-		if p.at(token.Ident) && p.peekNext().Kind == token.ColonColon {
+		if p.looksLikeDeclStartAt(p.pos) {
 			return
 		}
 
@@ -2587,19 +2869,20 @@ func (p *Parser) synchronizeUntil(kinds ...token.Kind) {
 func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 	start := p.peek().Span.Start
 
-	// Special case:
+	// Special cases:
 	//
 	//     switch err {
+	//     switch self {
 	//
-	// The normal expression parser sees `err { ... }` and thinks this is a
-	// compound literal. In a switch head, `{` starts the switch body, not a
-	// literal.
-	if p.at(token.Ident) {
+	// The normal expression parser sees `name { ... }` and may interpret it
+	// as a compound literal. In a switch head, `{` starts the switch body.
+	if p.at(token.Ident) || p.at(token.KeywordSelf) {
+		tok := p.advance()
+
 		id := ast.Ident{
-			Name: p.peek().Lexeme,
-			Loc:  p.peek().Span,
+			Name: tok.Lexeme,
+			Loc:  tok.Span,
 		}
-		p.advance()
 
 		var expr ast.Expr = &ast.IdentExpr{Name: id}
 
@@ -2619,16 +2902,17 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 		}
 	}
 
-	// Non-ident expressions can use the normal parser.
-	// This supports things like:
-	//
-	//     switch GetError() { ... }
-	//     switch 1 + 2 { ... }
-	//
-	// The important ambiguous case is bare Ident followed by `{`.
+	// Non-identifier expressions can use the normal parser.
 	expr := p.parseExpr(0)
 	if expr == nil {
-		p.diags.Add(source.NewSpan(p.peek().Span.File, start, p.peek().Span.End), "expected switch expression")
+		p.diags.Add(
+			source.NewSpan(
+				p.peek().Span.File,
+				start,
+				p.peek().Span.End,
+			),
+			"expected switch expression",
+		)
 	}
 
 	return expr

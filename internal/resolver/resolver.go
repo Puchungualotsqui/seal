@@ -117,6 +117,13 @@ type Scope struct {
 	Parent  *Scope
 	Symbols map[string]*Symbol
 	TaskID  int
+
+	// InterfaceRequirements records callable interface requirement names
+	// separately from ordinary lexical symbols.
+	//
+	// Several interfaces may declare the same requirement name, so these
+	// must not be represented as ordinary symbols.
+	InterfaceRequirements map[string]struct{}
 }
 
 func NewScope(kind ScopeKind, parent *Scope) *Scope {
@@ -126,10 +133,11 @@ func NewScope(kind ScopeKind, parent *Scope) *Scope {
 	}
 
 	return &Scope{
-		Kind:    kind,
-		Parent:  parent,
-		Symbols: map[string]*Symbol{},
-		TaskID:  taskID,
+		Kind:                  kind,
+		Parent:                parent,
+		Symbols:               map[string]*Symbol{},
+		TaskID:                taskID,
+		InterfaceRequirements: map[string]struct{}{},
 	}
 }
 
@@ -145,6 +153,28 @@ func (s *Scope) LookupVisible(name string) *Symbol {
 	}
 
 	return nil
+}
+
+func (s *Scope) DeclareInterfaceRequirement(name string) {
+	if s == nil || name == "" {
+		return
+	}
+
+	s.InterfaceRequirements[name] = struct{}{}
+}
+
+func (s *Scope) HasVisibleInterfaceRequirement(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	for scope := s; scope != nil; scope = scope.Parent {
+		if _, ok := scope.InterfaceRequirements[name]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 type Resolver struct {
@@ -175,6 +205,15 @@ func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Re
 type PackageInfo struct {
 	Name    string
 	Symbols map[string]*PackageSymbol
+
+	// InterfaceRequirements contains exported interface requirement names.
+	//
+	// They are not ordinary package symbols because calls such as:
+	//
+	//     Read(reader)
+	//
+	// are resolved by argument types in the checker.
+	InterfaceRequirements map[string]struct{}
 }
 
 type PackageSymbol struct {
@@ -392,7 +431,24 @@ func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 		r.declareSymbol(scope, d.Name.Name, SymbolUnion, d.Name.Span(), d)
 
 	case *ast.InterfaceDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolInterface, d.Name.Span(), d)
+		sym := r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolInterface,
+			d.Name.Span(),
+			d,
+		)
+		if sym == nil {
+			return
+		}
+
+		for _, requirement := range d.Requirements {
+			if requirement == nil {
+				continue
+			}
+
+			scope.DeclareInterfaceRequirement(requirement.Name.Name)
+		}
 
 	case *ast.OverloadDecl:
 		r.declareSymbol(scope, d.Name, SymbolOverload, d.Span(), d)
@@ -481,30 +537,153 @@ func (r *Resolver) resolveInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
 	r.declareGenericParams(scope, d.GenericParams)
 	r.resolveGenericParams(scope, d.GenericParams)
 
+	seenRequirements := map[string]source.Span{}
+
 	for _, req := range d.Requirements {
+		if req == nil {
+			continue
+		}
+
+		if previous, exists := seenRequirements[req.Name.Name]; exists {
+			r.diags.Add(
+				req.Name.Span(),
+				fmt.Sprintf(
+					"duplicate interface requirement %q, previous declaration at %s",
+					req.Name.Name,
+					previous.String(),
+				),
+			)
+		} else {
+			seenRequirements[req.Name.Name] = req.Name.Span()
+		}
+
+		seenParams := map[string]source.Span{}
+
 		for _, param := range req.Params {
-			r.resolveType(scope, param.Type)
+			if param.Name.Name != "" && param.Name.Name != "_" {
+				if previous, exists := seenParams[param.Name.Name]; exists {
+					r.diags.Add(
+						param.Name.Span(),
+						fmt.Sprintf(
+							"duplicate interface requirement parameter %q, previous declaration at %s",
+							param.Name.Name,
+							previous.String(),
+						),
+					)
+				} else {
+					seenParams[param.Name.Name] = param.Name.Span()
+				}
+			}
+
+			if param.Type != nil {
+				r.resolveInterfaceRequirementType(scope, param.Type)
+			}
 
 			if param.HasDefault {
 				r.diags.Add(
 					param.Name.Span(),
-					fmt.Sprintf("interface requirement parameter %q cannot have a default value", param.Name.Name),
+					fmt.Sprintf(
+						"interface requirement parameter %q cannot have a default value",
+						param.Name.Name,
+					),
 				)
 			}
 		}
 
 		for _, result := range req.Results {
-			r.resolveType(scope, result)
+			if result != nil {
+				r.resolveInterfaceRequirementType(scope, result)
+			}
 		}
 	}
 }
 
-func (r *Resolver) resolveImplDecl(scope *Scope, d *ast.ImplDecl) {
-	r.resolveType(scope, d.Interface)
+func (r *Resolver) resolveInterfaceRequirementType(scope *Scope, typ ast.Type) {
+	r.resolveTypeWithInterfaceSelf(scope, typ, true)
+}
 
-	implScope := NewScope(ScopeDecl, scope)
+func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
+	implScope := NewScope(ScopeDecl, parent)
 
-	for _, entry := range d.Entries {
+	r.declareGenericParams(implScope, d.GenericParams)
+	r.resolveGenericParams(implScope, d.GenericParams)
+
+	if d.Interface != nil {
+		r.resolveType(implScope, d.Interface)
+	}
+
+	if d.Target != nil {
+		r.resolveType(implScope, d.Target)
+	}
+
+	if len(d.UsingPath) > 0 {
+		if len(d.Entries) > 0 {
+			r.diags.Add(
+				d.Span(),
+				"delegated impl cannot contain manual impl entries",
+			)
+		}
+
+		seenEmpty := false
+		for _, part := range d.UsingPath {
+			if part.Name == "" {
+				seenEmpty = true
+				break
+			}
+		}
+
+		if seenEmpty {
+			r.diags.Add(
+				d.Span(),
+				"using path contains an empty field name",
+			)
+		}
+
+		// Field names in a using path are not normal lexical symbols.
+		// Their existence and types are resolved by the checker from Target.
+		return
+	}
+
+	seenEntries := map[string]source.Span{}
+
+	for i := range d.Entries {
+		entry := &d.Entries[i]
+
+		if previous, exists := seenEntries[entry.Name.Name]; exists {
+			r.diags.Add(
+				entry.Name.Span(),
+				fmt.Sprintf(
+					"duplicate impl entry %q, previous declaration at %s",
+					entry.Name.Name,
+					previous.String(),
+				),
+			)
+		} else {
+			seenEntries[entry.Name.Name] = entry.Name.Span()
+		}
+
+		if entry.Task != nil && entry.Alias != nil {
+			r.diags.Add(
+				entry.Span(),
+				fmt.Sprintf(
+					"impl entry %q cannot contain both a task and an alias",
+					entry.Name.Name,
+				),
+			)
+			continue
+		}
+
+		if entry.Task == nil && entry.Alias == nil {
+			r.diags.Add(
+				entry.Span(),
+				fmt.Sprintf(
+					"impl entry %q has no implementation",
+					entry.Name.Name,
+				),
+			)
+			continue
+		}
+
 		if entry.Task != nil {
 			r.resolveTaskDecl(implScope, entry.Task)
 		}
@@ -639,7 +818,23 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 }
 
 func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
+	r.resolveTypeWithInterfaceSelf(scope, typ, false)
+}
+
+func (r *Resolver) resolveTypeWithInterfaceSelf(
+	scope *Scope,
+	typ ast.Type,
+	allowInterfaceSelf bool,
+) {
 	switch t := typ.(type) {
+	case *ast.InterfaceSelfType:
+		if !allowInterfaceSelf {
+			r.diags.Add(
+				t.Span(),
+				`"self" type is only available inside interface requirements`,
+			)
+		}
+
 	case *ast.NamedType:
 		if len(t.Parts) == 0 {
 			return
@@ -658,27 +853,51 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 			}
 
 			if sym.Kind.IsRuntime() {
-				r.diags.Add(first.Span(), fmt.Sprintf("%q is a runtime symbol, not a type", first.Name))
+				r.diags.Add(
+					first.Span(),
+					fmt.Sprintf("%q is a runtime symbol, not a type", first.Name),
+				)
 			} else {
-				r.diags.Add(first.Span(), fmt.Sprintf("%q is not a type", first.Name))
+				r.diags.Add(
+					first.Span(),
+					fmt.Sprintf("%q is not a type", first.Name),
+				)
 			}
+
 			return
 		}
 
 		if sym.Kind != SymbolPackage {
-			r.diags.Add(first.Span(), fmt.Sprintf("%q is not a package", first.Name))
+			r.diags.Add(
+				first.Span(),
+				fmt.Sprintf("%q is not a package", first.Name),
+			)
 			return
 		}
 
 		if sym.Package == nil {
-			r.diags.Add(first.Span(), fmt.Sprintf("package %q has no symbol table", first.Name))
+			r.diags.Add(
+				first.Span(),
+				fmt.Sprintf("package %q has no symbol table", first.Name),
+			)
+			return
+		}
+
+		if len(t.Parts) != 2 {
+			r.diags.Add(
+				t.Span(),
+				"package-qualified types currently support exactly one package and one member",
+			)
 			return
 		}
 
 		memberName := t.Parts[1].Name
 		member := sym.Package.Symbols[memberName]
 		if member == nil {
-			r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package %s has no type %q", first.Name, memberName))
+			r.diags.Add(
+				t.Parts[1].Span(),
+				fmt.Sprintf("package %s has no type %q", first.Name, memberName),
+			)
 			return
 		}
 
@@ -686,26 +905,79 @@ func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
 			return
 		}
 
-		r.diags.Add(t.Parts[1].Span(), fmt.Sprintf("package symbol %s.%s is not a type", first.Name, memberName))
-		return
+		r.diags.Add(
+			t.Parts[1].Span(),
+			fmt.Sprintf(
+				"package symbol %s.%s is not a type",
+				first.Name,
+				memberName,
+			),
+		)
 
 	case *ast.PointerType:
-		r.resolveType(scope, t.Elem)
+		r.resolveTypeWithInterfaceSelf(scope, t.Elem, allowInterfaceSelf)
 
 	case *ast.ArrayType:
 		if !t.Inferred && t.Len != nil {
 			r.resolveExpr(scope, t.Len)
 		}
 
-		r.resolveType(scope, t.Elem)
+		r.resolveTypeWithInterfaceSelf(scope, t.Elem, allowInterfaceSelf)
 
 	case *ast.GenericType:
-		r.resolveType(scope, t.Base)
+		r.resolveTypeWithInterfaceSelf(scope, t.Base, allowInterfaceSelf)
 
 		for _, arg := range t.Args {
-			r.resolveGenericArg(scope, arg)
+			r.resolveGenericArgWithInterfaceSelf(
+				scope,
+				arg,
+				allowInterfaceSelf,
+			)
 		}
 	}
+}
+
+func (r *Resolver) resolveGenericArgWithInterfaceSelf(
+	scope *Scope,
+	arg ast.GenericArg,
+	allowInterfaceSelf bool,
+) {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		if arg.Type != nil {
+			r.resolveTypeWithInterfaceSelf(
+				scope,
+				arg.Type,
+				allowInterfaceSelf,
+			)
+		}
+
+	case ast.GenericArgExpr:
+		if arg.Expr != nil {
+			r.resolveExpr(scope, arg.Expr)
+		}
+	}
+}
+
+func (r *Resolver) resolveCallCallee(scope *Scope, callee ast.Expr) {
+	if callee == nil {
+		return
+	}
+
+	// Interface requirements are not ordinary lexical symbols.
+	//
+	//     Read(reader)
+	//
+	// If no ordinary symbol named Read exists but Read is a visible interface
+	// requirement, defer candidate selection to the checker.
+	if id, ok := callee.(*ast.IdentExpr); ok {
+		if scope.LookupVisible(id.Name.Name) == nil &&
+			scope.HasVisibleInterfaceRequirement(id.Name.Name) {
+			return
+		}
+	}
+
+	r.resolveExpr(scope, callee)
 }
 
 func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
@@ -738,7 +1010,8 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		r.resolveExpr(scope, e.Right)
 
 	case *ast.CallExpr:
-		r.resolveExpr(scope, e.Callee)
+		r.resolveCallCallee(scope, e.Callee)
+
 		for _, arg := range e.Args {
 			r.resolveExpr(scope, arg)
 		}
@@ -864,13 +1137,18 @@ func (r *Resolver) declarePackages() {
 			Builtin: true,
 			Package: pkg,
 		}
+
+		for requirementName := range pkg.InterfaceRequirements {
+			r.global.DeclareInterfaceRequirement(requirementName)
+		}
 	}
 }
 
 func ExportPackage(name string, scope *Scope) *PackageInfo {
 	info := &PackageInfo{
-		Name:    name,
-		Symbols: map[string]*PackageSymbol{},
+		Name:                  name,
+		Symbols:               map[string]*PackageSymbol{},
+		InterfaceRequirements: map[string]struct{}{},
 	}
 
 	if scope == nil {
@@ -880,6 +1158,18 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 	for symbolName, sym := range scope.Symbols {
 		if sym == nil || sym.Builtin {
 			continue
+		}
+
+		if sym.Kind == SymbolInterface {
+			if decl, ok := sym.Node.(*ast.InterfaceDecl); ok && decl != nil {
+				for _, requirement := range decl.Requirements {
+					if requirement == nil || requirement.Name.Name == "" {
+						continue
+					}
+
+					info.InterfaceRequirements[requirement.Name.Name] = struct{}{}
+				}
+			}
 		}
 
 		switch sym.Kind {

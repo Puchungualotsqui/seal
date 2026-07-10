@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"seal/internal/ast"
@@ -273,12 +274,16 @@ Shape :: union {
     Rectangle,
 }
 
-Enemy :: interface <T type> {
-    Damage :: task(e *T, damage int)
-    Health :: task(e *T) int
+Soldier :: struct {
+    health int
 }
 
-Enemy<Soldier> :: impl {
+Enemy :: interface {
+    Damage :: task(self *self, damage int)
+    Health :: task(self *self) int
+}
+
+Enemy :: impl Soldier {
     Damage :: DamageSoldier
     Health :: SoldierHealth
 }
@@ -288,8 +293,8 @@ Enemy<Soldier> :: impl {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if len(file.Decls) != 4 {
-		t.Fatalf("expected 4 decls, got %d", len(file.Decls))
+	if len(file.Decls) != 5 {
+		t.Fatalf("expected 5 decls, got %d", len(file.Decls))
 	}
 
 	if _, ok := file.Decls[0].(*ast.EnumDecl); !ok {
@@ -300,17 +305,30 @@ Enemy<Soldier> :: impl {
 		t.Fatalf("expected UnionDecl")
 	}
 
-	if _, ok := file.Decls[2].(*ast.InterfaceDecl); !ok {
+	if _, ok := file.Decls[2].(*ast.StructDecl); !ok {
+		t.Fatalf("expected StructDecl")
+	}
+
+	if _, ok := file.Decls[3].(*ast.InterfaceDecl); !ok {
 		t.Fatalf("expected InterfaceDecl")
 	}
 
-	impl, ok := file.Decls[3].(*ast.ImplDecl)
+	impl, ok := file.Decls[4].(*ast.ImplDecl)
 	if !ok {
 		t.Fatalf("expected ImplDecl")
 	}
 
 	if len(impl.Entries) != 2 {
 		t.Fatalf("expected 2 impl entries, got %d", len(impl.Entries))
+	}
+
+	target, ok := impl.Target.(*ast.NamedType)
+	if !ok {
+		t.Fatalf("impl target is %T, want *ast.NamedType", impl.Target)
+	}
+
+	if len(target.Parts) != 1 || target.Parts[0].Name != "Soldier" {
+		t.Fatalf("unexpected impl target: %#v", target.Parts)
 	}
 }
 
@@ -1067,5 +1085,304 @@ Apply :: task <T type, F task[(T) T]>(value T) T {
 
 	if file == nil {
 		t.Fatalf("expected file")
+	}
+}
+
+func parseInterfaceTestSource(
+	t *testing.T,
+	text string,
+) (*ast.File, *diag.Reporter) {
+	t.Helper()
+
+	file := source.NewFile("test.seal", text)
+	reporter := diag.NewReporter()
+
+	tokens := lexer.New(file, reporter).LexAll()
+	parsed := New(tokens, reporter).ParseFile()
+
+	return parsed, reporter
+}
+
+func requireNoParserDiagnostics(
+	t *testing.T,
+	reporter *diag.Reporter,
+) {
+	t.Helper()
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestParseGenericInterfaceAndManualImpl(t *testing.T) {
+	file, reporter := parseInterfaceTestSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+`)
+
+	requireNoParserDiagnostics(t, reporter)
+
+	if len(file.Decls) != 3 {
+		t.Fatalf("got %d declarations, want 3", len(file.Decls))
+	}
+
+	iface, ok := file.Decls[0].(*ast.InterfaceDecl)
+	if !ok {
+		t.Fatalf("declaration 0 is %T, want *ast.InterfaceDecl", file.Decls[0])
+	}
+
+	if iface.IsDyn {
+		t.Fatalf("Reader should be a static/default interface")
+	}
+
+	if len(iface.GenericParams) != 1 ||
+		iface.GenericParams[0].Name.Name != "Out" {
+		t.Fatalf("unexpected interface generic parameters: %#v", iface.GenericParams)
+	}
+
+	if len(iface.Requirements) != 1 {
+		t.Fatalf(
+			"got %d requirements, want 1",
+			len(iface.Requirements),
+		)
+	}
+
+	requirement := iface.Requirements[0]
+	if requirement.Name.Name != "Read" {
+		t.Fatalf(
+			"requirement name = %q, want Read",
+			requirement.Name.Name,
+		)
+	}
+
+	if len(requirement.Params) != 1 {
+		t.Fatalf(
+			"got %d requirement parameters, want 1",
+			len(requirement.Params),
+		)
+	}
+
+	if requirement.Params[0].Name.Name != "self" {
+		t.Fatalf(
+			"receiver name = %q, want self",
+			requirement.Params[0].Name.Name,
+		)
+	}
+
+	ptr, ok := requirement.Params[0].Type.(*ast.PointerType)
+	if !ok {
+		t.Fatalf(
+			"receiver type is %T, want *ast.PointerType",
+			requirement.Params[0].Type,
+		)
+	}
+
+	if _, ok := ptr.Elem.(*ast.InterfaceSelfType); !ok {
+		t.Fatalf(
+			"pointer element is %T, want *ast.InterfaceSelfType",
+			ptr.Elem,
+		)
+	}
+
+	impl, ok := file.Decls[2].(*ast.ImplDecl)
+	if !ok {
+		t.Fatalf("declaration 2 is %T, want *ast.ImplDecl", file.Decls[2])
+	}
+
+	if impl.IsDelegated() {
+		t.Fatalf("manual impl was parsed as delegated")
+	}
+
+	if len(impl.GenericParams) != 1 ||
+		impl.GenericParams[0].Name.Name != "T" {
+		t.Fatalf("unexpected impl generic parameters: %#v", impl.GenericParams)
+	}
+
+	if _, ok := impl.Interface.(*ast.GenericType); !ok {
+		t.Fatalf(
+			"impl interface is %T, want *ast.GenericType",
+			impl.Interface,
+		)
+	}
+
+	if _, ok := impl.Target.(*ast.GenericType); !ok {
+		t.Fatalf(
+			"impl target is %T, want *ast.GenericType",
+			impl.Target,
+		)
+	}
+
+	if len(impl.Entries) != 1 || impl.Entries[0].Task == nil {
+		t.Fatalf("unexpected impl entries: %#v", impl.Entries)
+	}
+
+	body := impl.Entries[0].Task.Body
+	if body == nil || len(body.Stmts) != 1 {
+		t.Fatalf("unexpected Read body: %#v", body)
+	}
+
+	ret, ok := body.Stmts[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Values) != 1 {
+		t.Fatalf("Read body statement is %#v", body.Stmts[0])
+	}
+
+	selector, ok := ret.Values[0].(*ast.SelectorExpr)
+	if !ok {
+		t.Fatalf(
+			"return expression is %T, want *ast.SelectorExpr",
+			ret.Values[0],
+		)
+	}
+
+	selfExpr, ok := selector.Left.(*ast.IdentExpr)
+	if !ok || selfExpr.Name.Name != "self" {
+		t.Fatalf("selector left side is %#v, want self", selector.Left)
+	}
+
+	if selector.Name.Name != "value" {
+		t.Fatalf("selected field = %q, want value", selector.Name.Name)
+	}
+}
+
+func TestParseNestedDelegatedImpl(t *testing.T) {
+	file, reporter := parseInterfaceTestSource(t, `
+Positioned :: impl Entity using components.transform
+`)
+
+	requireNoParserDiagnostics(t, reporter)
+
+	if len(file.Decls) != 1 {
+		t.Fatalf("got %d declarations, want 1", len(file.Decls))
+	}
+
+	impl, ok := file.Decls[0].(*ast.ImplDecl)
+	if !ok {
+		t.Fatalf("declaration is %T, want *ast.ImplDecl", file.Decls[0])
+	}
+
+	if !impl.IsDelegated() {
+		t.Fatalf("expected delegated impl")
+	}
+
+	if len(impl.Entries) != 0 {
+		t.Fatalf("delegated impl has %d manual entries", len(impl.Entries))
+	}
+
+	if len(impl.UsingPath) != 2 {
+		t.Fatalf(
+			"using path has %d parts, want 2",
+			len(impl.UsingPath),
+		)
+	}
+
+	if impl.UsingPath[0].Name != "components" ||
+		impl.UsingPath[1].Name != "transform" {
+		t.Fatalf("unexpected using path: %#v", impl.UsingPath)
+	}
+}
+
+func TestParseImportedGenericInterfaceImpl(t *testing.T) {
+	file, reporter := parseInterfaceTestSource(t, `
+io.Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+`)
+
+	requireNoParserDiagnostics(t, reporter)
+
+	impl, ok := file.Decls[0].(*ast.ImplDecl)
+	if !ok {
+		t.Fatalf("declaration is %T, want *ast.ImplDecl", file.Decls[0])
+	}
+
+	genericInterface, ok := impl.Interface.(*ast.GenericType)
+	if !ok {
+		t.Fatalf(
+			"interface is %T, want *ast.GenericType",
+			impl.Interface,
+		)
+	}
+
+	named, ok := genericInterface.Base.(*ast.NamedType)
+	if !ok {
+		t.Fatalf(
+			"interface base is %T, want *ast.NamedType",
+			genericInterface.Base,
+		)
+	}
+
+	if len(named.Parts) != 2 ||
+		named.Parts[0].Name != "io" ||
+		named.Parts[1].Name != "Reader" {
+		t.Fatalf("unexpected imported interface name: %#v", named.Parts)
+	}
+
+	if len(impl.GenericParams) != 1 ||
+		impl.GenericParams[0].Name.Name != "T" {
+		t.Fatalf("unexpected impl generic parameters: %#v", impl.GenericParams)
+	}
+}
+
+func TestParseDynamicInterfaceMultireturnRequirement(t *testing.T) {
+	file, reporter := parseInterfaceTestSource(t, `
+Reader :: dyn interface <Out type> {
+	Read :: task(self *self) (Out, bool)
+}
+`)
+
+	requireNoParserDiagnostics(t, reporter)
+
+	iface, ok := file.Decls[0].(*ast.InterfaceDecl)
+	if !ok {
+		t.Fatalf("declaration is %T, want *ast.InterfaceDecl", file.Decls[0])
+	}
+
+	if !iface.IsDyn {
+		t.Fatalf("expected dynamic interface")
+	}
+
+	requirement := iface.Requirements[0]
+	if len(requirement.Results) != 2 {
+		t.Fatalf(
+			"got %d results, want 2",
+			len(requirement.Results),
+		)
+	}
+}
+
+func TestParseDelegatedImplRejectsBlock(t *testing.T) {
+	_, reporter := parseInterfaceTestSource(t, `
+Positioned :: impl Entity using transform {
+	Position :: task(self *Entity) Vec3 {
+		return self.transform.position
+	}
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected parser diagnostic")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"delegated impl cannot contain an impl block",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }

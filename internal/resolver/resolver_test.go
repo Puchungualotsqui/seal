@@ -325,3 +325,215 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func resolveInterfaceTestSource(
+	t *testing.T,
+	text string,
+	packages map[string]*PackageInfo,
+) (*ast.File, *Scope, *diag.Reporter) {
+	t.Helper()
+
+	file := source.NewFile("test.seal", text)
+	reporter := diag.NewReporter()
+
+	tokens := lexer.New(file, reporter).LexAll()
+	parsed := parser.New(tokens, reporter).ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected lexer/parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	resolver := NewWithPackages(reporter, packages)
+	scope := resolver.ResolveFile(parsed)
+
+	return parsed, scope, reporter
+}
+
+func TestResolveGenericInterfaceImplAndRequirementCall(t *testing.T) {
+	_, _, reporter := resolveInterfaceTestSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<Reader<int>>(&box)
+	value := Read(reader)
+}
+`, nil)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveRejectsInterfaceSelfTypeOutsideRequirement(t *testing.T) {
+	_, _, reporter := resolveInterfaceTestSource(t, `
+Bad :: struct {
+	value self
+}
+`, nil)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected resolver diagnostic")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		`"self" type is only available inside interface requirements`,
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveDelegatedImplDoesNotTreatUsingPathAsSymbols(t *testing.T) {
+	_, _, reporter := resolveInterfaceTestSource(t, `
+Vec3 :: struct {
+	x f32
+	y f32
+	z f32
+}
+
+Positioned :: interface {
+	Position :: task(self *self) Vec3
+}
+
+Transform :: struct {
+	position Vec3
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) Vec3 {
+		return self.position
+	}
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Entity :: struct {
+	components Components
+}
+
+Positioned :: impl Entity using components.transform
+`, nil)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveImportedInterfaceImplAndRequirementCall(t *testing.T) {
+	packages := map[string]*PackageInfo{
+		"io": {
+			Name: "io",
+			Symbols: map[string]*PackageSymbol{
+				"Reader": {
+					Name: "Reader",
+					Kind: SymbolInterface,
+				},
+			},
+			InterfaceRequirements: map[string]struct{}{
+				"Read": {},
+			},
+		},
+	}
+
+	_, _, reporter := resolveInterfaceTestSource(t, `
+Box :: struct <T type> {
+	value T
+}
+
+io.Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<io.Reader<int>>(&box)
+	value := Read(reader)
+}
+`, packages)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveRejectsDuplicateInterfaceRequirementParameters(t *testing.T) {
+	_, _, reporter := resolveInterfaceTestSource(t, `
+Bad :: interface {
+	Compare :: task(value *self, value *self) bool
+}
+`, nil)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected resolver diagnostic")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		`duplicate interface requirement parameter "value"`,
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestExportPackageIncludesInterfaceRequirementNames(t *testing.T) {
+	_, scope, reporter := resolveInterfaceTestSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+`, nil)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	pkg := ExportPackage("io", scope)
+
+	if pkg == nil {
+		t.Fatalf("expected exported package")
+	}
+
+	if _, ok := pkg.InterfaceRequirements["Read"]; !ok {
+		t.Fatalf(
+			"exported package does not contain requirement Read: %#v",
+			pkg.InterfaceRequirements,
+		)
+	}
+}

@@ -1307,8 +1307,8 @@ Main :: task() {
 
 func TestArrayOfInterfaceValuesIsValid(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
+		Enemy :: interface {
+    Health :: task(e *self) int
 }
 
 Goblin :: struct {
@@ -1319,14 +1319,14 @@ GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Enemy<Goblin> :: impl {
+Enemy :: impl Goblin {
     Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
-    enemies: [1]Enemy<Goblin> = [e]
+    e := cast<Enemy>(&g)
+    enemies: [1]Enemy = [e]
 }
 `)
 
@@ -1926,25 +1926,25 @@ Main :: task() {
 
 func TestInterfaceAssignmentAndDispatch(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
+		Enemy :: interface {
+    Health :: task(e *self) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Enemy<Goblin> :: impl {
-    Health :: Health
+Enemy :: impl Goblin {
+    Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
+    e := cast<Enemy>(&g)
     hp := Health(e)
     assert(hp == 10)
 }
@@ -1957,16 +1957,12 @@ Main :: task() {
 
 func TestInterfaceCanBeNil(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
-}
-
-Goblin :: struct {
-    hp int
+		Enemy :: interface {
+    Health :: task(e *self) int
 }
 
 Main :: task() {
-    e: Enemy<Goblin> = nil
+    e: Enemy = nil
 }
 `)
 	if reporter.HasErrors() {
@@ -1974,46 +1970,17 @@ Main :: task() {
 	}
 }
 
-func TestRejectInterfaceAssignmentWithoutImpl(t *testing.T) {
-	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
-}
-
-Goblin :: struct {
-    hp int
-}
-
-GoblinHealth :: task(g *Goblin) int {
-    return g.hp
-}
-
-Main :: task() {
-    g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "cannot assign *Goblin to interface Enemy") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
 func TestRejectImplMissingRequirement(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
+		Enemy :: interface {
+    Health :: task(e *self) int
 }
 
 Goblin :: struct {
     hp int
 }
 
-Enemy<Goblin> :: impl {
+Enemy :: impl Goblin {
 }
 `)
 
@@ -2028,8 +1995,8 @@ Enemy<Goblin> :: impl {
 
 func TestRejectInterfaceMethodSyntax(t *testing.T) {
 	_, reporter := check(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
+		Enemy :: interface {
+    Health :: task(e *self) int
 }
 
 Goblin :: struct {
@@ -2040,13 +2007,13 @@ GoblinHealth :: task(g *Goblin) int {
     return g.hp
 }
 
-Enemy<Goblin> :: impl {
+Enemy :: impl Goblin {
     Health :: GoblinHealth
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
+    e := cast<Enemy>(&g)
     hp := e.Health()
 }
 `)
@@ -4321,4 +4288,511 @@ Main :: task() {
 	c.CheckFile(file)
 
 	assertCheckerDiagnosticContains(t, reporter, `recursive generic constraint evaluation through "A"`)
+}
+
+func TestCheckLocalStaticInterface(t *testing.T) {
+	reporter := checkSource(t, `
+Vec3 :: struct {
+	x f32
+	y f32
+	z f32
+}
+
+Positioned :: interface {
+	Position :: task(self *self) Vec3
+}
+
+Transform :: struct {
+	position Vec3
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) Vec3 {
+		return self.position
+	}
+}
+
+Main :: task() {
+	transform := Transform{}
+	positioned := cast<Positioned>(&transform)
+	position := Position(positioned)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckGenericInterfaceAndImpl(t *testing.T) {
+	reporter := checkSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<Reader<int>>(&box)
+	value := Read(reader)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImplRejectsMissingRequirement(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+	SetPosition :: task(self *self, value int)
+}
+
+Entity :: struct {
+	position int
+}
+
+Positioned :: impl Entity {
+	Position :: task(self *Entity) int {
+		return self.position
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`missing requirement "SetPosition"`,
+	)
+}
+
+func TestCheckImplRejectsWrongReceiverType(t *testing.T) {
+	reporter := checkSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct {
+	value int
+}
+
+Reader<int> :: impl Box {
+	Read :: task(self Box) int {
+		return self.value
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Read" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsExtraEntry(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+Readable :: impl Box {
+	Read :: task(self *Box) int {
+		return self.value
+	}
+
+	Write :: task(self *Box, value int) {
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Write" is not a requirement`,
+	)
+}
+
+func TestCheckInterfaceCastRejectsMissingImpl(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+Main :: task() {
+	box := Box{value = 10}
+	reader := cast<Readable>(&box)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot cast *Box to Readable: no matching implementation`,
+	)
+}
+
+func TestCheckInterfaceAssignmentRequiresExplicitCast(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+Readable :: impl Box {
+	Read :: task(self *Box) int {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box{value = 10}
+	reader: Readable = &box
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`use cast<Readable>(value)`,
+	)
+}
+
+func TestCheckInterfaceMultireturn(t *testing.T) {
+	reporter := checkSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) (Out, bool)
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) (T, bool) {
+		return self.value, true
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<Reader<int>>(&box)
+	value, ok := Read(reader)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckDelegatedImpl(t *testing.T) {
+	reporter := checkSource(t, `
+Vec3 :: struct {
+	x f32
+	y f32
+	z f32
+}
+
+Positioned :: interface {
+	Position :: task(self *self) Vec3
+	SetPosition :: task(self *self, value Vec3)
+}
+
+Transform :: struct {
+	position Vec3
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) Vec3 {
+		return self.position
+	}
+
+	SetPosition :: task(self *Transform, value Vec3) {
+		self.position = value
+	}
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+
+Main :: task() {
+	entity := Entity{}
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckNestedDelegatedImpl(t *testing.T) {
+	reporter := checkSource(t, `
+Vec3 :: struct {
+	x f32
+	y f32
+	z f32
+}
+
+Positioned :: interface {
+	Position :: task(self *self) Vec3
+}
+
+Transform :: struct {
+	position Vec3
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) Vec3 {
+		return self.position
+	}
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Entity :: struct {
+	components Components
+}
+
+Positioned :: impl Entity using components.transform
+
+Main :: task() {
+	entity := Entity{}
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckDelegatedImplRejectsNonImplementingField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`selected type Transform does not implement the interface`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsCycle(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+A :: struct {
+	b *B
+}
+
+B :: struct {
+	a *A
+}
+
+Positioned :: impl A using b
+Positioned :: impl B using a
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cyclic delegated implementation`,
+	)
+}
+
+func TestCheckInterfaceCastRejectsAmbiguousImpl(t *testing.T) {
+	reporter := checkSource(t, `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Reader<int> :: impl Box<int> {
+	Read :: task(self *Box<int>) int {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<Reader<int>>(&box)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`ambiguous implementation of Reader<int> for Box<int>`,
+	)
+}
+
+func TestCheckInterfaceRejectsSelfResult(t *testing.T) {
+	reporter := checkSource(t, `
+Cloneable :: interface {
+	Clone :: task(self *self) self
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`interface requirement results cannot currently contain "self"`,
+	)
+}
+
+func TestCheckImportedInterfaceWithLocalImpl(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "io", `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Box :: struct <T type> {
+	value T
+}
+
+io.Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	reader := cast<io.Reader<int>>(&box)
+	value := Read(reader)
+}
+`, map[string]*resolver.PackageInfo{
+		"io": resolverPkg,
+	}, map[string]*PackageInfo{
+		"io": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckImportedGenericImpl(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "boxes", `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Reader<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+	box := boxes.Box<int>{value = 10}
+	reader := cast<boxes.Reader<int>>(&box)
+	value := Read(reader)
+}
+`, map[string]*resolver.PackageInfo{
+		"boxes": resolverPkg,
+	}, map[string]*PackageInfo{
+		"boxes": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckRejectsOrphanImpl(t *testing.T) {
+	_, resolverIO, checkerIO := exportCheckerPackage(t, "io", `
+Reader :: interface <Out type> {
+	Read :: task(self *self) Out
+}
+`)
+
+	_, resolverBoxes, checkerBoxes := exportCheckerPackage(t, "boxes", `
+Box :: struct <T type> {
+	value T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+io.Reader<int> :: impl boxes.Box<int> {
+	Read :: task(self *boxes.Box<int>) int {
+		return self.value
+	}
+}
+`, map[string]*resolver.PackageInfo{
+		"io":    resolverIO,
+		"boxes": resolverBoxes,
+	}, map[string]*PackageInfo{
+		"io":    checkerIO,
+		"boxes": checkerBoxes,
+	})
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`orphan impl is not allowed`,
+	)
 }

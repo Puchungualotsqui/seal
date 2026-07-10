@@ -32,6 +32,8 @@ const (
 	KeywordEnum
 	KeywordBitSet
 	KeywordImpl
+	KeywordUsing
+	KeywordSelf
 	KeywordOverload
 	KeywordImport
 	KeywordSwitch
@@ -108,6 +110,8 @@ var keywordKinds = map[string]Kind{
 	"enum":      KeywordEnum,
 	"bit_set":   KeywordBitSet,
 	"impl":      KeywordImpl,
+	"using":     KeywordUsing,
+	"self":      KeywordSelf,
 	"overload":  KeywordOverload,
 	"import":    KeywordImport,
 	"switch":    KeywordSwitch,
@@ -153,10 +157,6 @@ func (k Kind) String() string {
 	case CharLit:
 		return "CharLit"
 
-	case KeywordDyn:
-		return "dyn"
-	case KeywordType:
-		return "type"
 	case KeywordTask:
 		return "task"
 	case KeywordPure:
@@ -177,6 +177,10 @@ func (k Kind) String() string {
 		return "bit_set"
 	case KeywordImpl:
 		return "impl"
+	case KeywordUsing:
+		return "using"
+	case KeywordSelf:
+		return "self"
 	case KeywordOverload:
 		return "overload"
 	case KeywordImport:
@@ -197,6 +201,10 @@ func (k Kind) String() string {
 		return "return"
 	case KeywordDefer:
 		return "defer"
+	case KeywordDyn:
+		return "dyn"
+	case KeywordType:
+		return "type"
 	case KeywordSeal:
 		return "seal"
 	case KeywordConst:
