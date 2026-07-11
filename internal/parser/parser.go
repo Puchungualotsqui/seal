@@ -1167,9 +1167,16 @@ func (p *Parser) parseGenericArgsUntil(end token.Kind) []ast.GenericArg {
 	var args []ast.GenericArg
 
 	for !p.at(end) && !p.at(token.EOF) {
+		before := p.pos
 		arg := p.parseGenericArg()
+
 		if arg.Kind != ast.GenericArgInvalid {
 			args = append(args, arg)
+		}
+
+		// Defensive recovery: every iteration must consume input.
+		if p.pos == before {
+			p.advance()
 		}
 
 		if !p.match(token.Comma) {
@@ -1182,6 +1189,38 @@ func (p *Parser) parseGenericArgsUntil(end token.Kind) []ast.GenericArg {
 
 func (p *Parser) parseGenericArg() ast.GenericArg {
 	start := p.peek().Span.Start
+
+	if p.at(token.KeywordDyn) {
+		dynTok := p.advance()
+
+		p.diags.Add(
+			dynTok.Span,
+			"'dyn' is only valid in an interface declaration",
+		)
+
+		// Recover from:
+		//
+		//     cast<dyn Positioned>(value)
+		//
+		// Consume the following type without producing an additional
+		// generic-argument diagnostic.
+		if p.at(token.Star) ||
+			p.at(token.LBracket) ||
+			p.at(token.KeywordSelf) ||
+			p.at(token.Ident) {
+			_ = p.parseType()
+		}
+
+		end := dynTok.Span.End
+		if p.pos > 0 {
+			end = p.previous().Span.End
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgInvalid,
+			Loc:  p.span(start, end),
+		}
+	}
 
 	switch p.peek().Kind {
 	case token.Star, token.LBracket, token.KeywordSelf:
@@ -1197,18 +1236,6 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 		}
 
 	case token.Ident:
-		// Builtin type arguments:
-		//
-		//     Box<int>
-		//
-		// User-defined generic names are intentionally parsed as expressions:
-		//
-		//     Box<Pair<int, string>>
-		//     UseTask<Identity<int>>
-		//
-		// The checker later decides whether the expression is a type
-		// specialization or a task specialization from the expected generic
-		// parameter category.
 		if isBuiltinGenericTypeName(p.peek().Lexeme) {
 			t := p.parseType()
 			if t == nil {

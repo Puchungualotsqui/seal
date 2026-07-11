@@ -4009,3 +4009,116 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCastToDeclaredDynamicInterfaceWithoutDynTypeModifier(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: dyn interface {
+    X :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+XTransform :: task(value *Transform) int {
+    return value.x
+}
+
+Positioned :: impl Transform {
+    X :: XTransform
+}
+
+Main :: task() {
+    transform := Transform{x = 42}
+    positioned := cast<Positioned>(&transform)
+    x := X(positioned)
+    assert(x == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Positioned_vtable {",
+		"Positioned_vtable *vtable;",
+		"static Positioned_vtable Positioned_Transform_vtable",
+		".vtable = &Positioned_Transform_vtable",
+		"(positioned).vtable->X((positioned).data)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestInterfaceDispatchModeComesFromDeclaration(t *testing.T) {
+	out, reporter := generate(t, `
+StaticPositioned :: interface {
+    X :: task(value *self) int
+}
+
+DynamicPositioned :: dyn interface {
+    X :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+XTransform :: task(value *Transform) int {
+    return value.x
+}
+
+StaticPositioned :: impl Transform {
+    X :: XTransform
+}
+
+DynamicPositioned :: impl Transform {
+    X :: XTransform
+}
+
+Main :: task() {
+    transform := Transform{x = 42}
+
+    staticPositioned := cast<StaticPositioned>(&transform)
+    dynamicPositioned := cast<DynamicPositioned>(&transform)
+
+    assert(X(staticPositioned) == 42)
+    assert(X(dynamicPositioned) == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct StaticPositioned {",
+		"uintptr_t tag;",
+		"#define StaticPositioned_Tag_Transform",
+		"switch (receiver.tag)",
+
+		"typedef struct DynamicPositioned_vtable {",
+		"DynamicPositioned_vtable *vtable;",
+		".vtable = &DynamicPositioned_Transform_vtable",
+		"(dynamicPositioned).vtable->X((dynamicPositioned).data)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}

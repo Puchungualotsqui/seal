@@ -1386,3 +1386,36 @@ Positioned :: impl Entity using transform {
 		)
 	}
 }
+
+func TestRejectDynInterfaceTypeInCast(t *testing.T) {
+	_, reporter := parse(t, `
+Positioned :: interface {
+    X :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+Main :: task() {
+    transform := Transform{x = 42}
+    positioned := cast<dyn Positioned>(&transform)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatal("expected dyn in cast type to be rejected")
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"'dyn' is only valid in an interface declaration",
+	) {
+		t.Fatalf(
+			"expected dyn diagnostic, got:\n%s",
+			got,
+		)
+	}
+}
