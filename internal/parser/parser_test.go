@@ -83,7 +83,7 @@ Vec2 :: struct {
 func TestParseGenericStructDecl(t *testing.T) {
 	file, reporter := parse(t, `
 Buffer :: struct <T type, N int> {
-    data [N]T
+    data Array<T, N>
     len int
 }
 `)
@@ -92,10 +92,23 @@ Buffer :: struct <T type, N int> {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	decl := file.Decls[0].(*ast.StructDecl)
+	if len(file.Decls) != 1 {
+		t.Fatalf("expected 1 declaration, got %d", len(file.Decls))
+	}
+
+	decl, ok := file.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf(
+			"expected StructDecl, got %T",
+			file.Decls[0],
+		)
+	}
 
 	if len(decl.GenericParams) != 2 {
-		t.Fatalf("expected 2 generic params, got %d", len(decl.GenericParams))
+		t.Fatalf(
+			"expected 2 generic params, got %d",
+			len(decl.GenericParams),
+		)
 	}
 
 	if decl.GenericParams[0].Category != ast.GenericParamType {
@@ -104,6 +117,44 @@ Buffer :: struct <T type, N int> {
 
 	if decl.GenericParams[1].Category != ast.GenericParamInt {
 		t.Fatalf("expected second param to be int param")
+	}
+
+	if len(decl.Fields) != 2 {
+		t.Fatalf(
+			"expected 2 fields, got %d",
+			len(decl.Fields),
+		)
+	}
+
+	arrayType, ok := decl.Fields[0].Type.(*ast.GenericType)
+	if !ok {
+		t.Fatalf(
+			"data field type is %T, expected *ast.GenericType",
+			decl.Fields[0].Type,
+		)
+	}
+
+	base, ok := arrayType.Base.(*ast.NamedType)
+	if !ok {
+		t.Fatalf(
+			"array base is %T, expected *ast.NamedType",
+			arrayType.Base,
+		)
+	}
+
+	if len(base.Parts) != 1 ||
+		base.Parts[0].Name != "Array" {
+		t.Fatalf(
+			"expected Array generic base, got %#v",
+			base.Parts,
+		)
+	}
+
+	if len(arrayType.Args) != 2 {
+		t.Fatalf(
+			"expected 2 Array arguments, got %d",
+			len(arrayType.Args),
+		)
 	}
 }
 
@@ -616,26 +667,77 @@ Main :: task() {
 
 func TestParseSpreadCallArgument(t *testing.T) {
 	file, reporter := parse(t, `
-Main :: task() {
-    a: []int = [1, 2, 3]
-    Sum(a...)
+Main :: task(values ...int) {
+    Sum(values...)
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	mainDecl := file.Decls[0].(*ast.TaskDecl)
-	stmt := mainDecl.Body.Stmts[1].(*ast.ExprStmt)
-	call := stmt.Expr.(*ast.CallExpr)
+	mainDecl, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(mainDecl.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(mainDecl.Body.Stmts),
+		)
+	}
+
+	stmt, ok := mainDecl.Body.Stmts[0].(*ast.ExprStmt)
+	if !ok {
+		t.Fatalf(
+			"expected ExprStmt, got %T",
+			mainDecl.Body.Stmts[0],
+		)
+	}
+
+	call, ok := stmt.Expr.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"expected CallExpr, got %T",
+			stmt.Expr,
+		)
+	}
 
 	if len(call.Args) != 1 {
-		t.Fatalf("expected 1 call arg, got %d", len(call.Args))
+		t.Fatalf(
+			"expected 1 call argument, got %d",
+			len(call.Args),
+		)
 	}
 
-	if _, ok := call.Args[0].(*ast.SpreadExpr); !ok {
-		t.Fatalf("expected spread arg, got %T", call.Args[0])
+	spread, ok := call.Args[0].(*ast.SpreadExpr)
+	if !ok {
+		t.Fatalf(
+			"expected SpreadExpr, got %T",
+			call.Args[0],
+		)
+	}
+
+	inner, ok := spread.Expr.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"spread operand is %T, expected *ast.IdentExpr",
+			spread.Expr,
+		)
+	}
+
+	if inner.Name.Name != "values" {
+		t.Fatalf(
+			"spread operand is %q, expected values",
+			inner.Name.Name,
+		)
 	}
 }
 
@@ -940,16 +1042,83 @@ Main :: task() {
 func TestParseGenericValueConstraintExpression(t *testing.T) {
 	file, reporter := parse(t, `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    data Array<T, N>
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected parser diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if file == nil {
-		t.Fatalf("expected file")
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	decl, ok := file.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf(
+			"expected StructDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(decl.GenericParams) != 2 {
+		t.Fatalf(
+			"expected 2 generic parameters, got %d",
+			len(decl.GenericParams),
+		)
+	}
+
+	nParam := decl.GenericParams[1]
+
+	if nParam.Category != ast.GenericParamInt {
+		t.Fatalf(
+			"expected int generic parameter, got %s",
+			nParam.Category,
+		)
+	}
+
+	if len(nParam.Constraints) != 1 {
+		t.Fatalf(
+			"expected 1 constraint, got %d",
+			len(nParam.Constraints),
+		)
+	}
+
+	constraint, ok :=
+		nParam.Constraints[0].(*ast.GenericExprConstraint)
+	if !ok {
+		t.Fatalf(
+			"constraint is %T, expected *ast.GenericExprConstraint",
+			nParam.Constraints[0],
+		)
+	}
+
+	if _, ok := constraint.Expr.(*ast.BinaryExpr); !ok {
+		t.Fatalf(
+			"constraint expression is %T, expected *ast.BinaryExpr",
+			constraint.Expr,
+		)
+	}
+
+	if len(decl.Fields) != 1 {
+		t.Fatalf(
+			"expected 1 field, got %d",
+			len(decl.Fields),
+		)
+	}
+
+	if _, ok := decl.Fields[0].Type.(*ast.GenericType); !ok {
+		t.Fatalf(
+			"data field type is %T, expected *ast.GenericType",
+			decl.Fields[0].Type,
+		)
 	}
 }
 
@@ -1313,6 +1482,138 @@ Main :: task() {
 		t.Fatalf(
 			"expected dyn diagnostic, got:\n%s",
 			got,
+		)
+	}
+}
+
+func TestParseReceiverOwnedOverloadDecls(t *testing.T) {
+	file, reporter := parse(t, `
+[] :: overload {
+    GetAt
+}
+
+[]= :: overload {
+    SetAt
+}
+
+len :: overload {
+    Length
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 3 {
+		t.Fatalf(
+			"expected 3 declarations, got %d",
+			len(file.Decls),
+		)
+	}
+
+	getOverload, ok := file.Decls[0].(*ast.OverloadDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration 0 is %T, expected *ast.OverloadDecl",
+			file.Decls[0],
+		)
+	}
+
+	if getOverload.Name != "[]" {
+		t.Fatalf(
+			"overload name is %q, expected []",
+			getOverload.Name,
+		)
+	}
+
+	setOverload, ok := file.Decls[1].(*ast.OverloadDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration 1 is %T, expected *ast.OverloadDecl",
+			file.Decls[1],
+		)
+	}
+
+	if setOverload.Name != "[]=" {
+		t.Fatalf(
+			"overload name is %q, expected []=",
+			setOverload.Name,
+		)
+	}
+
+	lenOverload, ok := file.Decls[2].(*ast.OverloadDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration 2 is %T, expected *ast.OverloadDecl",
+			file.Decls[2],
+		)
+	}
+
+	if lenOverload.Name != "len" {
+		t.Fatalf(
+			"overload name is %q, expected len",
+			lenOverload.Name,
+		)
+	}
+}
+
+func TestParseIndexReadAndWrite(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task(values Buffer) {
+    first := values[0]
+    values[1] = 42
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	mainDecl := file.Decls[0].(*ast.TaskDecl)
+
+	if len(mainDecl.Body.Stmts) != 2 {
+		t.Fatalf(
+			"expected 2 statements, got %d",
+			len(mainDecl.Body.Stmts),
+		)
+	}
+
+	readDecl, ok :=
+		mainDecl.Body.Stmts[0].(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement 0 is %T, expected *ast.VarDeclStmt",
+			mainDecl.Body.Stmts[0],
+		)
+	}
+
+	if _, ok := readDecl.Value.(*ast.IndexExpr); !ok {
+		t.Fatalf(
+			"read value is %T, expected *ast.IndexExpr",
+			readDecl.Value,
+		)
+	}
+
+	writeStmt, ok :=
+		mainDecl.Body.Stmts[1].(*ast.AssignStmt)
+	if !ok {
+		t.Fatalf(
+			"statement 1 is %T, expected *ast.AssignStmt",
+			mainDecl.Body.Stmts[1],
+		)
+	}
+
+	if _, ok := writeStmt.Left.(*ast.IndexExpr); !ok {
+		t.Fatalf(
+			"assignment left side is %T, expected *ast.IndexExpr",
+			writeStmt.Left,
 		)
 	}
 }

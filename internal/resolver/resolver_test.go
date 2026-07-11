@@ -295,14 +295,16 @@ Sum :: task(values ...int) int {
     return 0
 }
 
-Main :: task() {
-    a: []int = [1, 2, 3]
-    Sum(a...)
+Main :: task(values ...int) {
+    Sum(values...)
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
@@ -534,6 +536,53 @@ Reader :: interface <Out type> {
 		t.Fatalf(
 			"exported package does not contain requirement Read: %#v",
 			pkg.InterfaceRequirements,
+		)
+	}
+}
+
+func TestResolveReceiverOwnedOverloads(t *testing.T) {
+	_, reporter := resolve(t, `
+Buffer :: struct {
+    value int
+}
+
+BufferGet :: pure task(
+    self *Buffer,
+    index int,
+) int {
+    return 0
+}
+
+BufferSet :: task(
+    self *Buffer,
+    index int,
+    value int,
+) {
+}
+
+BufferLength :: pure task(
+    self *Buffer,
+) uint {
+    return 1
+}
+
+[] :: overload {
+    BufferGet
+}
+
+[]= :: overload {
+    BufferSet
+}
+
+len :: overload {
+    BufferLength
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
 		)
 	}
 }

@@ -12,6 +12,262 @@ import (
 	"seal/internal/source"
 )
 
+type checkerTestRun struct {
+	File     *ast.File
+	Checker  *Checker
+	Scope    *Scope
+	Reporter *diag.Reporter
+}
+
+func runCheckerTest(
+	t *testing.T,
+	input string,
+) checkerTestRun {
+	t.Helper()
+
+	parsed, reporter := parseCheckerFile(
+		t,
+		"test",
+		input,
+	)
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	c := New(reporter)
+	scope := c.CheckFile(parsed)
+
+	return checkerTestRun{
+		File:     parsed,
+		Checker:  c,
+		Scope:    scope,
+		Reporter: reporter,
+	}
+}
+
+func runCheckerTestWithPackages(
+	t *testing.T,
+	input string,
+	resolverPackages map[string]*resolver.PackageInfo,
+	checkerPackages map[string]*PackageInfo,
+) checkerTestRun {
+	t.Helper()
+
+	parsed, reporter := parseCheckerFile(
+		t,
+		"test",
+		input,
+	)
+
+	r := resolver.NewWithPackages(
+		reporter,
+		resolverPackages,
+	)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	c := NewWithPackages(
+		reporter,
+		checkerPackages,
+	)
+	scope := c.CheckFile(parsed)
+
+	return checkerTestRun{
+		File:     parsed,
+		Checker:  c,
+		Scope:    scope,
+		Reporter: reporter,
+	}
+}
+
+func checkerTaskDecl(
+	t *testing.T,
+	file *ast.File,
+	name string,
+) *ast.TaskDecl {
+	t.Helper()
+
+	for _, decl := range file.Decls {
+		task, ok := decl.(*ast.TaskDecl)
+		if !ok {
+			continue
+		}
+
+		if task.Name.Name == name {
+			return task
+		}
+	}
+
+	t.Fatalf("task %q was not found", name)
+	return nil
+}
+
+func checkerTaskStmt(
+	t *testing.T,
+	file *ast.File,
+	taskName string,
+	index int,
+) ast.Stmt {
+	t.Helper()
+
+	task := checkerTaskDecl(t, file, taskName)
+
+	if task.Body == nil {
+		t.Fatalf("task %q has no body", taskName)
+	}
+
+	if index < 0 || index >= len(task.Body.Stmts) {
+		t.Fatalf(
+			"statement index %d outside task %q body of length %d",
+			index,
+			taskName,
+			len(task.Body.Stmts),
+		)
+	}
+
+	return task.Body.Stmts[index]
+}
+
+func checkerIndexFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.IndexExpr {
+	t.Helper()
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	index, ok := decl.Value.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf(
+			"variable value type = %T, want *ast.IndexExpr",
+			decl.Value,
+		)
+	}
+
+	return index
+}
+
+func checkerIndexFromAssignStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.IndexExpr {
+	t.Helper()
+
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.AssignStmt",
+			stmt,
+		)
+	}
+
+	index, ok := assign.Left.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf(
+			"assignment left type = %T, want *ast.IndexExpr",
+			assign.Left,
+		)
+	}
+
+	return index
+}
+
+func checkerCallFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.CallExpr {
+	t.Helper()
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	call, ok := decl.Value.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"variable value type = %T, want *ast.CallExpr",
+			decl.Value,
+		)
+	}
+
+	return call
+}
+
+func assertIndexResolutionKind(
+	t *testing.T,
+	c *Checker,
+	expr *ast.IndexExpr,
+	want IndexResolutionKind,
+) IndexResolution {
+	t.Helper()
+
+	got, ok := c.IndexResolutionFor(expr)
+	if !ok {
+		t.Fatalf(
+			"index expression has no checker resolution",
+		)
+	}
+
+	if got.Kind != want {
+		t.Fatalf(
+			"index resolution kind = %v, want %v",
+			got.Kind,
+			want,
+		)
+	}
+
+	return got
+}
+
+func assertLenResolutionKind(
+	t *testing.T,
+	c *Checker,
+	expr *ast.CallExpr,
+	want LenResolutionKind,
+) LenResolution {
+	t.Helper()
+
+	got, ok := c.LenResolutionFor(expr)
+	if !ok {
+		t.Fatalf(
+			"len call has no checker resolution",
+		)
+	}
+
+	if got.Kind != want {
+		t.Fatalf(
+			"len resolution kind = %v, want %v",
+			got.Kind,
+			want,
+		)
+	}
+
+	return got
+}
+
 func checkerTestNamedType(parts ...string) ast.Type {
 	idents := make([]ast.Ident, len(parts))
 
@@ -406,34 +662,6 @@ Main :: task() {
 
 	if reporter.HasErrors() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestArrayLiteralElementTypes(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    arr: []int = [1, 2, 3]
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestRejectArrayLiteralElementTypes(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    arr: []int = [1, true, 3]
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "cannot assign bool to int") {
-		t.Fatalf("expected array element diagnostic, got:\n%s", reporter.String())
 	}
 }
 
@@ -1271,84 +1499,6 @@ Main :: task() {
 	}
 }
 
-func TestVariadicArrayOfAnyIsValid(t *testing.T) {
-	_, reporter := check(t, `
-TakeArrays :: task(args ...[10]any) uint {
-    return len(args)
-}
-
-Main :: task() {
-    a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
-
-    count := TakeArrays(a, b)
-    assert(count == 2)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestInferredArrayOfAnyIsValid(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    anyArr: []any = [2, 3, 4, 5, 6]
-    n: uint = len(anyArr)
-    assert(n == 5)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestInferredArrayOfMixedAnyIsValid(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    values: []any = [2, "hello", 3.14, true]
-    n: uint = len(values)
-    assert(n == 4)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestArrayOfInterfaceValuesIsValid(t *testing.T) {
-	_, reporter := check(t, `
-		Enemy :: interface {
-    Health :: task(e *self) int
-}
-
-Goblin :: struct {
-    hp int
-}
-
-GoblinHealth :: task(g *Goblin) int {
-    return g.hp
-}
-
-Enemy :: impl Goblin {
-    Health :: GoblinHealth
-}
-
-Main :: task() {
-    g := Goblin{hp = 10}
-    e := cast<Enemy>(&g)
-    enemies: [1]Enemy = [e]
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
 func TestAnyAsAnyIsIntrinsics(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
@@ -1547,30 +1697,6 @@ Main :: task() {
 	}
 }
 
-func TestStringCStringAndCharTypes(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    c: char = 'ñ'
-    s: string = "hola"
-    cs: cstring = c"hola"
-
-    n: uint = size(s)
-    h: char = s[0]
-    o: char = s[1]
-    a: char = s[-1]
-
-    assert(n == 4)
-    assert(h == 'h')
-    assert(o == 'o')
-    assert(a == 'a')
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
 func TestCStringRequiresCStringLiteral(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
@@ -1603,31 +1729,6 @@ Main :: task() {
 	}
 }
 
-func TestStringLenAndIndexing(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    c: char = 'ñ'
-    s: string = "hola"
-    cs: cstring = c"hola"
-
-    n: uint = size(s)
-    h: char = s[0]
-    o: char = s[1]
-    a: char = s[-1]
-
-    assert(c == 'ñ')
-    assert(n == 4)
-    assert(h == 'h')
-    assert(o == 'o')
-    assert(a == 'a')
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
 func TestStringFieldsAreInvalid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
@@ -1645,62 +1746,50 @@ Main :: task() {
 	}
 }
 
-func TestCStringIndexingIsInvalid(t *testing.T) {
+func TestCStringByteIndexingIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     cs := c"hola"
-    c := cs[0]
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "cstring does not support character indexing") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestStringIndexAssignmentIsInvalid(t *testing.T) {
-	_, reporter := check(t, `
-Main :: task() {
-    s := "hola"
-    s[0] = 'H'
-}
-`)
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "cannot assign to string index because strings are immutable") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestSpreadArrayIntoVariadicTask(t *testing.T) {
-	_, reporter := check(t, `
-Sum :: task(values ...int) int {
-    total := 0
-
-    for i := 0; i < len(values); i = i + 1 {
-        total = total + values[i]
-    }
-
-    return total
-}
-
-Main :: task() {
-    a: []int = [1, 2, 3]
-    result := Sum(a...)
-    assert(result == 6)
+    c: u8 = cs[0]
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
+}
+
+func TestCStringIndexAssignmentIsInvalid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    cs := c"hola"
+    cs[0] = 65
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"cannot assign to cstring index",
+	)
+}
+
+func TestStringIndexAssignmentRequiresOverload(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hola"
+    s[0] = 72
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"type string does not define bracket assignment operator []=",
+	)
 }
 
 func TestForwardVariadicIntoVariadicTask(t *testing.T) {
@@ -1722,30 +1811,6 @@ Forward :: task(values ...int) int {
 Main :: task() {
     result := Forward(1, 2, 3)
     assert(result == 6)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestSpreadArrayIntoVariadicWithFixedParameter(t *testing.T) {
-	_, reporter := check(t, `
-Example :: task(prefix int, values ...int) int {
-    total := prefix
-
-    for i := 0; i < len(values); i = i + 1 {
-        total = total + values[i]
-    }
-
-    return total
-}
-
-Main :: task() {
-    a: []int = [1, 2, 3]
-    result := Example(10, a...)
-    assert(result == 16)
 }
 `)
 
@@ -1783,9 +1848,8 @@ Sum :: task(values ...int) int {
     return 0
 }
 
-Main :: task() {
-    a: []int = [1, 2, 3]
-    Sum(a..., 4)
+Forward :: task(values ...int) int {
+    return Sum(values..., 4)
 }
 `)
 
@@ -1793,12 +1857,18 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), "spread argument must be the last argument") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	if !strings.Contains(
+		reporter.String(),
+		"spread argument must be the last argument",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
-func TestRejectSpreadNonArrayNonVariadic(t *testing.T) {
+func TestRejectSpreadNonVariadicValue(t *testing.T) {
 	_, reporter := check(t, `
 Sum :: task(values ...int) int {
     return 0
@@ -1814,8 +1884,14 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), "cannot spread int; expected array or variadic value") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	if !strings.Contains(
+		reporter.String(),
+		"cannot spread int; expected variadic value",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
@@ -1825,9 +1901,8 @@ Use :: task(a int, b int) int {
     return a + b
 }
 
-Main :: task() {
-    values: []int = [1, 2]
-    result := Use(values...)
+Forward :: task(values ...int) int {
+    return Use(values...)
 }
 `)
 
@@ -1835,9 +1910,17 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), "cannot spread variadic argument into non-variadic task") &&
-		!strings.Contains(reporter.String(), "task call argument count mismatch") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	if !strings.Contains(
+		reporter.String(),
+		"cannot spread variadic argument into non-variadic task",
+	) && !strings.Contains(
+		reporter.String(),
+		"task call argument count mismatch",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
@@ -1847,9 +1930,8 @@ Sum :: task(values ...int) int {
     return 0
 }
 
-Main :: task() {
-    values: []string = ["a", "b"]
-    result := Sum(values...)
+Forward :: task(values ...string) int {
+    return Sum(values...)
 }
 `)
 
@@ -1857,8 +1939,14 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), "cannot assign string to int") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	if !strings.Contains(
+		reporter.String(),
+		"cannot assign string to int",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
@@ -2082,7 +2170,7 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), "byte-index assignment requires an addressable value") {
+	if !strings.Contains(reporter.String(), "byte-index assignment requires a mutable addressable value") {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
@@ -2502,16 +2590,25 @@ Main :: task() {
 func TestGenericStructValueArgumentSpecialization(t *testing.T) {
 	_, reporter := check(t, `
 Buffer :: struct <T type, N int> {
-    data [N]T
+    value T
+    capacity int
 }
 
 Main :: task() {
-    b: Buffer<int, 32>
+    b: Buffer<int, 32> = Buffer<int, 32>{
+        value = 10,
+        capacity = 32,
+    }
+
+    value: int = b.value
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
@@ -3106,15 +3203,19 @@ Main :: task() {
 func TestCheckImportedGenericStructValueParamFieldSubstitution(t *testing.T) {
 	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
 Buffer :: struct <T type, N int> {
-    data [N]T
+    value T
+    capacity int
 }
 `)
 
 	reporter := checkWithPackages(t, `
 Main :: task() {
-    b: types.Buffer<int, 4>
-    x := b.data[0]
-    assert(x == 0)
+    b: types.Buffer<int, 4> = types.Buffer<int, 4>{
+        value = 10,
+        capacity = 4,
+    }
+
+    x: int = b.value
 }
 `, map[string]*resolver.PackageInfo{
 		"types": resolverPkg,
@@ -3123,8 +3224,36 @@ Main :: task() {
 	})
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
+}
+
+func TestCheckImportedGenericStructValueParamRejectsWrongFieldUse(t *testing.T) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
+Buffer :: struct <T type, N int> {
+    value T
+}
+`)
+
+	reporter := checkWithPackages(t, `
+Main :: task() {
+    b: types.Buffer<string, 4>
+    x: int = b.value
+}
+`, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*PackageInfo{
+		"types": checkerPkg,
+	})
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"cannot assign string to int",
+	)
 }
 
 func TestCheckImportedGenericStructValueParamRejectsWrongIndexUse(t *testing.T) {
@@ -3150,62 +3279,6 @@ Main :: task() {
 	}
 
 	if !strings.Contains(reporter.String(), "cannot assign string to int") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestCheckImportedGenericStructValueParamArrayLength(t *testing.T) {
-	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-`)
-
-	reporter := checkWithPackages(t, `
-TakeFour :: task(values [4]int) {
-}
-
-Main :: task() {
-    b: types.Buffer<int, 4>
-    TakeFour(b.data)
-}
-`, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-}
-
-func TestCheckImportedGenericStructValueParamRejectsArrayLengthMismatch(t *testing.T) {
-	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-`)
-
-	reporter := checkWithPackages(t, `
-TakeFive :: task(values [5]int) {
-}
-
-Main :: task() {
-    b: types.Buffer<int, 4>
-    TakeFive(b.data)
-}
-`, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
-	}
-
-	if !strings.Contains(reporter.String(), "cannot assign [4]int to [5]int") {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
@@ -5943,20 +6016,6 @@ Nothing :: nil
 	)
 }
 
-func TestCheckAllNilArrayNeedsElementType(t *testing.T) {
-	reporter := checkSource(t, `
-Main :: task() {
-	values := [nil, nil]
-}
-`)
-
-	assertCheckerDiagnosticContains(
-		t,
-		reporter,
-		`array literal containing only nil needs an explicit nullable element type`,
-	)
-}
-
 func TestCheckCannotTakeAddressOfNil(t *testing.T) {
 	reporter := checkSource(t, `
 Main :: task() {
@@ -6562,6 +6621,1229 @@ func TestAllowLocalInterfaceImplForImportedTarget(t *testing.T) {
 	if reporter.HasErrors() {
 		t.Fatalf(
 			"local interface should be implementable for an imported target:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckerRecordsBuiltinIndexAndLenResolutions(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+UseVariadic :: task(values ...int) {
+    first := values[0]
+    values[0] = 1
+    count := len(values)
+}
+
+UseRaw :: task(ptr rawptr, text cstring) {
+    first := ptr[0]
+    ptr[0] = 2
+    character := text[0]
+}
+
+UsePrimitive :: task() {
+    value := 300
+    first := value[0]
+    value[0] = first
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	variadicRead := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseVariadic", 0),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		variadicRead,
+		IndexResolutionVariadicRead,
+	)
+
+	variadicWrite := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseVariadic", 1),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		variadicWrite,
+		IndexResolutionVariadicWrite,
+	)
+
+	variadicLen := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseVariadic", 2),
+	)
+	assertLenResolutionKind(
+		t,
+		run.Checker,
+		variadicLen,
+		LenResolutionVariadic,
+	)
+
+	rawRead := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseRaw", 0),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		rawRead,
+		IndexResolutionRawptrRead,
+	)
+
+	rawWrite := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseRaw", 1),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		rawWrite,
+		IndexResolutionRawptrWrite,
+	)
+
+	cstringRead := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UseRaw", 2),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		cstringRead,
+		IndexResolutionCstringRead,
+	)
+
+	primitiveRead := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UsePrimitive", 1),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		primitiveRead,
+		IndexResolutionPrimitiveByteRead,
+	)
+
+	primitiveWrite := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(t, run.File, "UsePrimitive", 2),
+	)
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		primitiveWrite,
+		IndexResolutionPrimitiveByteWrite,
+	)
+}
+
+func TestCheckerRecordsGenericBracketAndLenSpecializations(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+Box :: struct <T type, N int> {
+    value T
+}
+
+BoxGet :: pure task <T type, N int>(
+    self *Box<T, N>,
+    index int,
+) T {
+    return self.value
+}
+
+BoxSet :: task <T type, N int>(
+    self *Box<T, N>,
+    index int,
+    value T,
+) {
+    self.value = value
+}
+
+BoxLen :: pure task <T type, N int>(
+    self *Box<T, N>,
+) uint {
+    return cast<uint>(N)
+}
+
+[] :: overload {
+    BoxGet
+}
+
+[]= :: overload {
+    BoxSet
+}
+
+len :: overload {
+    BoxLen
+}
+
+Main :: task() {
+    box := Box<int, 4>{value = 7}
+    value := box[0]
+    box[0] = 9
+    count := len(box)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	readExpr := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 1),
+	)
+
+	read := assertIndexResolutionKind(
+		t,
+		run.Checker,
+		readExpr,
+		IndexResolutionOverloadRead,
+	)
+
+	if read.Candidate == nil ||
+		read.Candidate.Name != "BoxGet" {
+		t.Fatalf(
+			"read candidate = %#v, want BoxGet",
+			read.Candidate,
+		)
+	}
+
+	if read.TaskType == nil {
+		t.Fatal("generic read has no specialized task type")
+	}
+
+	if read.TaskType.Name != "BoxGet<int, 4>" {
+		t.Fatalf(
+			"specialized read task name = %q",
+			read.TaskType.Name,
+		)
+	}
+
+	if len(read.TaskType.Params) != 2 ||
+		read.TaskType.Params[0].String() != "*Box<int, 4>" ||
+		!run.Checker.sameType(
+			read.TaskType.Params[1],
+			IntType,
+		) {
+		t.Fatalf(
+			"unexpected specialized read parameters: %#v",
+			read.TaskType.Params,
+		)
+	}
+
+	if len(read.TaskType.Results) != 1 ||
+		!run.Checker.sameType(
+			read.TaskType.Results[0],
+			IntType,
+		) {
+		t.Fatalf(
+			"unexpected specialized read results: %#v",
+			read.TaskType.Results,
+		)
+	}
+
+	if read.TaskType.Elem != nil {
+		t.Fatalf(
+			"specialized task Elem = %s, want nil",
+			read.TaskType.Elem.String(),
+		)
+	}
+
+	if read.TaskType.Underlying != nil {
+		t.Fatalf(
+			"specialized task Underlying = %s, want nil",
+			read.TaskType.Underlying.String(),
+		)
+	}
+
+	if len(read.GenericArguments) != 2 ||
+		read.GenericArguments[0].Key != "int" ||
+		read.GenericArguments[1].Key != "4" {
+		t.Fatalf(
+			"read generic arguments = %#v",
+			read.GenericArguments,
+		)
+	}
+
+	writeExpr := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 2),
+	)
+
+	write := assertIndexResolutionKind(
+		t,
+		run.Checker,
+		writeExpr,
+		IndexResolutionOverloadWrite,
+	)
+
+	if write.Candidate == nil ||
+		write.Candidate.Name != "BoxSet" {
+		t.Fatalf(
+			"write candidate = %#v, want BoxSet",
+			write.Candidate,
+		)
+	}
+
+	if write.TaskType == nil ||
+		write.TaskType.Name != "BoxSet<int, 4>" {
+		t.Fatalf(
+			"specialized write task = %#v",
+			write.TaskType,
+		)
+	}
+
+	if len(write.TaskType.Params) != 3 ||
+		!run.Checker.sameType(
+			write.TaskType.Params[2],
+			IntType,
+		) {
+		t.Fatalf(
+			"unexpected specialized write parameters: %#v",
+			write.TaskType.Params,
+		)
+	}
+
+	lenCall := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 3),
+	)
+
+	length := assertLenResolutionKind(
+		t,
+		run.Checker,
+		lenCall,
+		LenResolutionOverload,
+	)
+
+	if length.Candidate == nil ||
+		length.Candidate.Name != "BoxLen" {
+		t.Fatalf(
+			"len candidate = %#v, want BoxLen",
+			length.Candidate,
+		)
+	}
+
+	if length.TaskType == nil ||
+		length.TaskType.Name != "BoxLen<int, 4>" {
+		t.Fatalf(
+			"specialized len task = %#v",
+			length.TaskType,
+		)
+	}
+
+	if len(length.TaskType.Results) != 1 ||
+		!run.Checker.sameType(
+			length.TaskType.Results[0],
+			UintType,
+		) {
+		t.Fatalf(
+			"unexpected len results: %#v",
+			length.TaskType.Results,
+		)
+	}
+}
+
+func TestCheckerRecordsImportedBracketAndLenResolutions(
+	t *testing.T,
+) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(
+		t,
+		"boxes",
+		`
+Box :: struct <T type, N int> {
+    value T
+}
+
+BoxGet :: pure task <T type, N int>(
+    self *Box<T, N>,
+    index int,
+) T {
+    return self.value
+}
+
+BoxSet :: task <T type, N int>(
+    self *Box<T, N>,
+    index int,
+    value T,
+) {
+    self.value = value
+}
+
+BoxLen :: pure task <T type, N int>(
+    self *Box<T, N>,
+) uint {
+    return cast<uint>(N)
+}
+
+[] :: overload {
+    BoxGet
+}
+
+[]= :: overload {
+    BoxSet
+}
+
+len :: overload {
+    BoxLen
+}
+`,
+	)
+
+	exportedSetter := checkerPkg.Symbols["BoxSet"]
+	if exportedSetter == nil {
+		t.Fatal("BoxSet was not exported")
+	}
+
+	if exportedSetter.Node == nil {
+		t.Fatal(
+			"impure generic BoxSet body was discarded during export",
+		)
+	}
+
+	exportedSetterOverload := checkerPkg.Symbols["[]="]
+	if exportedSetterOverload == nil ||
+		exportedSetterOverload.Overload == nil ||
+		len(exportedSetterOverload.Overload.Candidates) != 1 {
+		t.Fatalf(
+			"invalid exported []= overload: %#v",
+			exportedSetterOverload,
+		)
+	}
+
+	if exportedSetterOverload.
+		Overload.
+		Candidates[0].
+		Node == nil {
+		t.Fatal(
+			"generic []= candidate body was discarded during export",
+		)
+	}
+
+	run := runCheckerTestWithPackages(
+		t,
+		`
+LocalBox :: struct {
+    value int
+}
+
+LocalGet :: pure task(
+    self *LocalBox,
+    index int,
+) int {
+    return self.value
+}
+
+[] :: overload {
+    LocalGet
+}
+
+Main :: task() {
+    box := boxes.Box<int, 4>{value = 1}
+    value := box[0]
+    box[0] = 2
+    count := len(box)
+}
+`,
+		map[string]*resolver.PackageInfo{
+			"boxes": resolverPkg,
+		},
+		map[string]*PackageInfo{
+			"boxes": checkerPkg,
+		},
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	readExpr := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 1),
+	)
+
+	read := assertIndexResolutionKind(
+		t,
+		run.Checker,
+		readExpr,
+		IndexResolutionOverloadRead,
+	)
+
+	if read.PackageName != "boxes" {
+		t.Fatalf(
+			"read package = %q, want boxes",
+			read.PackageName,
+		)
+	}
+
+	if read.Candidate == nil ||
+		read.Candidate.Name != "BoxGet" {
+		t.Fatalf(
+			"read candidate = %#v, want BoxGet",
+			read.Candidate,
+		)
+	}
+
+	if read.TaskType == nil ||
+		read.TaskType.Params[0].String() !=
+			"*boxes.Box<int, 4>" {
+		t.Fatalf(
+			"imported read task type = %#v",
+			read.TaskType,
+		)
+	}
+
+	writeExpr := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 2),
+	)
+
+	write := assertIndexResolutionKind(
+		t,
+		run.Checker,
+		writeExpr,
+		IndexResolutionOverloadWrite,
+	)
+
+	if write.PackageName != "boxes" {
+		t.Fatalf(
+			"write package = %q, want boxes",
+			write.PackageName,
+		)
+	}
+
+	if write.Candidate == nil ||
+		write.Candidate.Name != "BoxSet" {
+		t.Fatalf(
+			"write candidate = %#v, want BoxSet",
+			write.Candidate,
+		)
+	}
+
+	lenCall := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 3),
+	)
+
+	length := assertLenResolutionKind(
+		t,
+		run.Checker,
+		lenCall,
+		LenResolutionOverload,
+	)
+
+	if length.PackageName != "boxes" {
+		t.Fatalf(
+			"len package = %q, want boxes",
+			length.PackageName,
+		)
+	}
+
+	if length.Candidate == nil ||
+		length.Candidate.Name != "BoxLen" {
+		t.Fatalf(
+			"len candidate = %#v, want BoxLen",
+			length.Candidate,
+		)
+	}
+}
+
+func TestLenOverloadPreservesVariadicBuiltinDispatch(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+Box :: struct {
+    value int
+}
+
+BoxLen :: pure task(self *Box) uint {
+    return 1
+}
+
+len :: overload {
+    BoxLen
+}
+
+UseVariadic :: task(values ...int) uint {
+    return len(values)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	task := checkerTaskDecl(
+		t,
+		run.File,
+		"UseVariadic",
+	)
+
+	ret, ok := task.Body.Stmts[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Values) != 1 {
+		t.Fatalf(
+			"unexpected return statement: %#v",
+			task.Body.Stmts[0],
+		)
+	}
+
+	call, ok := ret.Values[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"return value type = %T, want *ast.CallExpr",
+			ret.Values[0],
+		)
+	}
+
+	assertLenResolutionKind(
+		t,
+		run.Checker,
+		call,
+		LenResolutionVariadic,
+	)
+}
+
+func TestOrdinaryTaskNamedLenShadowsBuiltinDispatch(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+len :: task(value int) int {
+    return value
+}
+
+Main :: task() {
+    value := len(10)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	call := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(t, run.File, "Main", 0),
+	)
+
+	if resolution, ok :=
+		run.Checker.LenResolutionFor(call); ok {
+		t.Fatalf(
+			"ordinary task call incorrectly received len dispatch: %#v",
+			resolution,
+		)
+	}
+}
+
+func TestBracketAndLenOverloadSignatureValidation(
+	t *testing.T,
+) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "impure bracket read",
+			input: `
+Box :: struct {}
+
+Get :: task(self *Box, index int) int {
+    return 0
+}
+
+[] :: overload {
+    Get
+}
+`,
+			want: `bracket operator [] candidate "Get" must be pure`,
+		},
+		{
+			name: "bracket receiver by value",
+			input: `
+Box :: struct {}
+
+Get :: pure task(self Box, index int) int {
+    return 0
+}
+
+[] :: overload {
+    Get
+}
+`,
+			want: `must be a pointer to a struct or string`,
+		},
+		{
+			name: "bracket index must be int",
+			input: `
+Box :: struct {}
+
+Get :: pure task(self *Box, index uint) int {
+    return 0
+}
+
+[] :: overload {
+    Get
+}
+`,
+			want: `second parameter of bracket operator [] candidate "Get" must have type int`,
+		},
+		{
+			name: "bracket read requires result",
+			input: `
+Box :: struct {}
+
+Get :: pure task(self *Box, index int) {
+}
+
+[] :: overload {
+    Get
+}
+`,
+			want: `bracket operator [] candidate "Get" must return exactly 1 value`,
+		},
+		{
+			name: "setter cannot return value",
+			input: `
+Box :: struct {}
+
+Set :: task(
+    self *Box,
+    index int,
+    value int,
+) int {
+    return value
+}
+
+[]= :: overload {
+    Set
+}
+`,
+			want: `bracket assignment operator []= candidate "Set" must not return a value`,
+		},
+		{
+			name: "setter needs three parameters",
+			input: `
+Box :: struct {}
+
+Set :: task(self *Box, index int) {
+}
+
+[]= :: overload {
+    Set
+}
+`,
+			want: `bracket operator []= candidate "Set" must have exactly 3 parameters`,
+		},
+		{
+			name: "impure len",
+			input: `
+Box :: struct {}
+
+BoxLen :: task(self *Box) uint {
+    return 0
+}
+
+len :: overload {
+    BoxLen
+}
+`,
+			want: `len overload candidate "BoxLen" must be pure`,
+		},
+		{
+			name: "len wrong result",
+			input: `
+Box :: struct {}
+
+BoxLen :: pure task(self *Box) int {
+    return 0
+}
+
+len :: overload {
+    BoxLen
+}
+`,
+			want: `len overload candidate "BoxLen" must return uint`,
+		},
+		{
+			name: "len wrong receiver",
+			input: `
+Box :: struct {}
+
+BoxLen :: pure task(self Box) uint {
+    return 0
+}
+
+len :: overload {
+    BoxLen
+}
+`,
+			want: `must be a pointer to a struct or string`,
+		},
+		{
+			name: "len default parameter",
+			input: `
+Box :: struct {}
+
+BoxLen :: pure task(
+    self *Box = nil,
+) uint {
+    return 0
+}
+
+len :: overload {
+    BoxLen
+}
+`,
+			want: `len overload candidate "BoxLen" cannot have default parameters`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := checkSource(
+				t,
+				test.input,
+			)
+
+			assertCheckerDiagnosticContains(
+				t,
+				reporter,
+				test.want,
+			)
+		})
+	}
+}
+
+func TestBracketDispatchMissingAndNonmatchingDiagnostics(
+	t *testing.T,
+) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "no read overload exists",
+			input: `
+Box :: struct {
+    value int
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    value := box[0]
+}
+`,
+			want: `type Box does not define bracket operator []`,
+		},
+		{
+			name: "read overload exists but does not match",
+			input: `
+Other :: struct {}
+
+OtherGet :: pure task(
+    self *Other,
+    index int,
+) int {
+    return 0
+}
+
+[] :: overload {
+    OtherGet
+}
+
+Box :: struct {
+    value int
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    value := box[0]
+}
+`,
+			want: `no bracket operator [] matches receiver Box and index int`,
+		},
+		{
+			name: "no setter overload exists",
+			input: `
+Box :: struct {
+    value int
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    box[0] = 2
+}
+`,
+			want: `type Box does not define bracket assignment operator []=`,
+		},
+		{
+			name: "setter value type does not match",
+			input: `
+Box :: struct {
+    value int
+}
+
+BoxSet :: task(
+    self *Box,
+    index int,
+    value int,
+) {
+    self.value = value
+}
+
+[]= :: overload {
+    BoxSet
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    box[0] = "wrong"
+}
+`,
+			want: `no bracket assignment operator []= matches receiver Box, index int, and value string`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := checkSource(
+				t,
+				test.input,
+			)
+
+			assertCheckerDiagnosticContains(
+				t,
+				reporter,
+				test.want,
+			)
+		})
+	}
+}
+
+func TestBracketAndLenOverloadsRequireAddressableReceivers(
+	t *testing.T,
+) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "bracket read",
+			input: `
+Box :: struct {
+    value int
+}
+
+BoxGet :: pure task(
+    self *Box,
+    index int,
+) int {
+    return self.value
+}
+
+[] :: overload {
+    BoxGet
+}
+
+MakeBox :: task() Box {
+    return Box{value = 1}
+}
+
+Main :: task() {
+    value := MakeBox()[0]
+}
+`,
+			want: `bracket operator [] requires an addressable receiver`,
+		},
+		{
+			name: "bracket write",
+			input: `
+Box :: struct {
+    value int
+}
+
+BoxSet :: task(
+    self *Box,
+    index int,
+    value int,
+) {
+    self.value = value
+}
+
+[]= :: overload {
+    BoxSet
+}
+
+Use :: task(box Box) {
+    box[0] = 2
+}
+`,
+			want: `bracket assignment operator []= requires a mutable addressable receiver`,
+		},
+		{
+			name: "len",
+			input: `
+Box :: struct {
+    value int
+}
+
+BoxLen :: pure task(self *Box) uint {
+    return 1
+}
+
+len :: overload {
+    BoxLen
+}
+
+MakeBox :: task() Box {
+    return Box{value = 1}
+}
+
+Main :: task() {
+    count := len(MakeBox())
+}
+`,
+			want: `len overload requires an addressable receiver`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := checkSource(
+				t,
+				test.input,
+			)
+
+			assertCheckerDiagnosticContains(
+				t,
+				reporter,
+				test.want,
+			)
+		})
+	}
+}
+
+func TestRejectIndexedCompoundAssignment(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Box :: struct {
+    value int
+}
+
+BoxGet :: pure task(
+    self *Box,
+    index int,
+) int {
+    return self.value
+}
+
+BoxSet :: task(
+    self *Box,
+    index int,
+    value int,
+) {
+    self.value = value
+}
+
+[] :: overload {
+    BoxGet
+}
+
+[]= :: overload {
+    BoxSet
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    box[0] += 1
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"indexed compound assignment is not supported",
+	)
+}
+
+func TestBracketIndexMustBeInt(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Box :: struct {
+    value int
+}
+
+BoxGet :: pure task(
+    self *Box,
+    index int,
+) int {
+    return self.value
+}
+
+[] :: overload {
+    BoxGet
+}
+
+Main :: task() {
+    box := Box{value = 1}
+    value := box[true]
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"bracket index must be int, got bool",
+	)
+}
+
+func TestRejectAmbiguousGenericBracketOverload(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Box :: struct <T type> {
+    value T
+}
+
+GenericGet :: pure task <T type>(
+    self *Box<T>,
+    index int,
+) T {
+    return self.value
+}
+
+IntGet :: pure task(
+    self *Box<int>,
+    index int,
+) int {
+    return self.value
+}
+
+[] :: overload {
+    GenericGet
+    IntGet
+}
+
+Main :: task() {
+    box := Box<int>{value = 1}
+    value := box[0]
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"ambiguous bracket operator [] for receiver Box<int> and index int",
+	)
+}
+
+func TestPureInterfaceRequirementRejectsImpureAlias(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Readable :: interface {
+    Read :: pure task(self *self) int
+}
+
+Box :: struct {
+    value int
+}
+
+ReadBox :: task(self *Box) int {
+    return self.value
+}
+
+Readable :: impl Box {
+    Read :: ReadBox
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`implementation of pure requirement "Read" must be pure`,
+	)
+}
+
+func TestPureInterfaceRequirementAcceptsPureAlias(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Readable :: interface {
+    Read :: pure task(self *self) int
+}
+
+Box :: struct {
+    value int
+}
+
+ReadBox :: pure task(self *Box) int {
+    return self.value
+}
+
+Readable :: impl Box {
+    Read :: ReadBox
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestPureInterfaceRequirementAcceptsTrustedPureAlias(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Readable :: interface {
+    Read :: pure task(self *self) int
+}
+
+Box :: struct {
+    value int
+}
+
+ReadBox :: @trusted_pure extern("read_box") task(
+    self *Box,
+) int
+
+Readable :: impl Box {
+    Read :: ReadBox
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
 			reporter.String(),
 		)
 	}

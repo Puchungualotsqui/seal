@@ -47,3 +47,19 @@ func TestGenericTypeImplementsType(t *testing.T) {
 func TestGenericExprImplementsExpr(t *testing.T) {
 	var _ Expr = (*GenericExpr)(nil)
 }
+
+func TestSpreadExprImplementsExpr(t *testing.T) {
+	var _ Expr = (*SpreadExpr)(nil)
+}
+
+func TestIndexExprImplementsExpr(t *testing.T) {
+	var _ Expr = (*IndexExpr)(nil)
+}
+
+func TestAssignStmtImplementsStmt(t *testing.T) {
+	var _ Stmt = (*AssignStmt)(nil)
+}
+
+func TestOverloadDeclImplementsDecl(t *testing.T) {
+	var _ Decl = (*OverloadDecl)(nil)
+}

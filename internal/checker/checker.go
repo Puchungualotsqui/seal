@@ -1649,8 +1649,10 @@ func (c *Checker) prepareInterfaceDecl(
 
 	for _, req := range d.Requirements {
 		info := InterfaceRequirementInfo{
-			Name: req.Name.Name,
-			Span: req.Loc,
+			Name:          req.Name.Name,
+			IsPure:        req.IsPure,
+			IsTrustedPure: req.IsTrustedPure,
+			Span:          req.Loc,
 		}
 
 		for _, param := range req.Params {
@@ -2119,7 +2121,7 @@ func (c *Checker) checkBracketOverloadCandidate(
 		c.diags.Add(
 			candidate.Span,
 			fmt.Sprintf(
-				"first parameter of bracket operator %s candidate %q must be a pointer to a struct",
+				"first parameter of bracket operator %s candidate %q must be a pointer to a struct or string",
 				overloadName,
 				candidate.Name,
 			),
@@ -2248,7 +2250,7 @@ func (c *Checker) checkLenOverloadCandidate(
 		c.diags.Add(
 			candidate.Span,
 			fmt.Sprintf(
-				`first parameter of len overload candidate %q must be a pointer to a struct`,
+				`first parameter of len overload candidate %q must be a pointer to a struct or string`,
 				candidate.Name,
 			),
 		)
@@ -2586,19 +2588,6 @@ func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 					)
 					valid = false
 				}
-
-				if req.IsPure &&
-					!taskDecl.IsPure &&
-					!taskDecl.IsTrustedPure {
-					c.diags.Add(
-						taskDecl.Name.Span(),
-						fmt.Sprintf(
-							"implementation of pure requirement %q must be pure",
-							req.Name,
-						),
-					)
-					valid = false
-				}
 			}
 
 		case entry.Alias != nil:
@@ -2614,6 +2603,19 @@ func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 			)
 			valid = false
 			continue
+		}
+
+		if (req.IsPure || req.IsTrustedPure) &&
+			(actual == nil ||
+				(!actual.IsPure && !actual.IsTrustedPure)) {
+			c.diags.Add(
+				entry.Span,
+				fmt.Sprintf(
+					"implementation of pure requirement %q must be pure",
+					req.Name,
+				),
+			)
+			valid = false
 		}
 
 		if !c.taskSignatureMatches(
@@ -3098,7 +3100,7 @@ func (c *Checker) substituteReceiverMatchType(
 	seen map[*Type]*Type,
 ) *Type {
 	if t == nil {
-		return InvalidType
+		return nil
 	}
 
 	if t.Kind == TypeTypeParam {
@@ -5046,6 +5048,11 @@ func (c *Checker) checkIndexAssignment(
 				value.Span(),
 			)
 		}
+
+		c.indexResolutions[index] = IndexResolution{
+			Kind: IndexResolutionVariadicWrite,
+		}
+
 		return
 
 	case TypeRawptr:
@@ -5054,6 +5061,11 @@ func (c *Checker) checkIndexAssignment(
 			valueType,
 			value.Span(),
 		)
+
+		c.indexResolutions[index] = IndexResolution{
+			Kind: IndexResolutionRawptrWrite,
+		}
+
 		return
 
 	case TypeCstring:
@@ -5080,6 +5092,11 @@ func (c *Checker) checkIndexAssignment(
 			valueType,
 			value.Span(),
 		)
+
+		c.indexResolutions[index] = IndexResolution{
+			Kind: IndexResolutionPrimitiveByteWrite,
+		}
+
 		return
 	}
 
@@ -5142,7 +5159,18 @@ func (c *Checker) checkIndexAssignment(
 					valueType.String(),
 				),
 			)
+			return
 		}
+
+		c.indexResolutions[index] = IndexResolution{
+			Kind:             IndexResolutionOverloadWrite,
+			Candidate:        resolution.Candidate,
+			TaskType:         resolution.TaskType,
+			PackageName:      resolution.PackageName,
+			GenericArguments: resolution.GenericArguments,
+		}
+
+		return
 
 	case TypeEnum:
 		c.diags.Add(
@@ -6708,7 +6736,13 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 	leftType := c.checkExpr(scope, e.Left)
 
 	if leftType.Kind == TypeString {
-		c.diags.Add(e.Name.Span(), fmt.Sprintf("string has no field %q; use size(s) or s[i]", e.Name.Name))
+		c.diags.Add(
+			e.Name.Span(),
+			fmt.Sprintf(
+				"string has no field %q; use size(s) for its byte size or define a [] overload for indexing",
+				e.Name.Name,
+			),
+		)
 		return InvalidType
 	}
 
