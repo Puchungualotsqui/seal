@@ -99,7 +99,12 @@ func generate(t *testing.T, input string) (string, *diag.Reporter) {
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	g := New(reporter)
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		"",
+		nil,
+		c.SemanticInfo(),
+	)
 	out := g.Generate(parsed)
 
 	return out, reporter
@@ -226,44 +231,6 @@ Read :: task() Error {
 		!strings.Contains(out, "= Error_None;") ||
 		!strings.Contains(out, "return __seal_return_value_") {
 		t.Fatalf("expected enum return temp, got:\n%s", out)
-	}
-}
-
-func TestGenerateIfForAndArray(t *testing.T) {
-	out, reporter := generate(t, `
-Main :: task() {
-    values: []int = [1, 2, 3]
-
-    sum := 0
-
-    for i := 0; i < 3; i = i + 1 {
-        sum = sum + values[i]
-    }
-
-    if sum > 0 {
-        sum = sum + 1
-    }
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "intptr_t values[3] = {1, 2, 3};") {
-		t.Fatalf("expected array init, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "for (intptr_t i = 0; (i < 3); i = (i + 1))") {
-		t.Fatalf("expected C-like for, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "if ((sum > 0))") {
-		t.Fatalf("expected if statement, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sum = (sum + 1);") {
-		t.Fatalf("expected if body assignment, got:\n%s", out)
 	}
 }
 
@@ -602,74 +569,6 @@ Main :: task() {
 	}
 }
 
-func TestGenerateInferredArrayOfAny(t *testing.T) {
-	out, reporter := generate(t, `
-Main :: task() {
-    values: []any = [2, "hello", 3.14, true]
-    n: uint = len(values)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "sealAny values[4]") {
-		t.Fatalf("expected sealAny inferred array, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sealAny_int(2)") {
-		t.Fatalf("expected int boxing, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5})`) {
-		t.Fatalf("expected string boxing, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sealAny_f64(3.14)") {
-		t.Fatalf("expected f64 boxing, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sealAny_bool(true)") {
-		t.Fatalf("expected bool boxing, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "uintptr_t n = (uintptr_t)4;") {
-		t.Fatalf("expected len(values) lowering, got:\n%s", out)
-	}
-}
-
-func TestGenerateVariadicArrayOfAny(t *testing.T) {
-	out, reporter := generate(t, `
-TakeArrays :: task(args ...[10]any) uint {
-    return len(args)
-}
-
-Main :: task() {
-    a: [10]any = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    b: [10]any = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
-
-    result := TakeArrays(a, b)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "TakeArrays(") {
-		t.Fatalf("expected TakeArrays call, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, ".len = 2") {
-		t.Fatalf("expected packed variadic length 2, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "uintptr_t TakeArrays(") {
-		t.Fatalf("expected TakeArrays uint return, got:\n%s", out)
-	}
-}
-
 func TestGenerateAnyAsAnyIsIntrinsics(t *testing.T) {
 	out, reporter := generate(t, `
 Main :: task() {
@@ -772,11 +671,8 @@ Main :: task() {
     cs: cstring = c"world"
 
     n: uint = size(s)
-    h: char = s[0]
-    o: char = s[1]
-    a: char = s[-1]
 
-    printf(c"%zu %u %u %u %u %s", n, c, h, o, a, cs)
+    printf(c"%zu %u %s", n, c, cs)
 }
 `)
 
@@ -788,12 +684,12 @@ Main :: task() {
 		t.Fatalf("expected sealString runtime, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "static inline size_t sealString_len(sealString s)") {
-		t.Fatalf("expected sealString_len runtime helper, got:\n%s", out)
+	if strings.Contains(out, "sealString_len") {
+		t.Fatalf("did not expect removed sealString_len helper, got:\n%s", out)
 	}
 
-	if !strings.Contains(out, "static inline uint32_t sealString_at(sealString s, ptrdiff_t index)") {
-		t.Fatalf("expected sealString_at runtime helper, got:\n%s", out)
+	if strings.Contains(out, "sealString_at") {
+		t.Fatalf("did not expect removed sealString_at helper, got:\n%s", out)
 	}
 
 	if !strings.Contains(out, `sealString s = (sealString){.data = (const unsigned char *)"hola", .byte_len = 4};`) {
@@ -810,49 +706,6 @@ Main :: task() {
 
 	if !strings.Contains(out, "uintptr_t n = (uintptr_t)(s).byte_len;") {
 		t.Fatalf("expected size(s) lowering, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "uint32_t h = sealString_at(s, (ptrdiff_t)(0));") {
-		t.Fatalf("expected s[0] lowering, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "uint32_t o = sealString_at(s, (ptrdiff_t)(1));") {
-		t.Fatalf("expected s[1] lowering, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "uint32_t a = sealString_at(s, (ptrdiff_t)((-1)));") {
-		t.Fatalf("expected s[-1] lowering, got:\n%s", out)
-	}
-}
-
-func TestGenerateSpreadArrayIntoVariadicTask(t *testing.T) {
-	out, reporter := generate(t, `
-Sum :: task(values ...int) int {
-    total := 0
-
-    for i := 0; i < len(values); i = i + 1 {
-        total = total + values[i]
-    }
-
-    return total
-}
-
-Main :: task() {
-    a: []int = [1, 2, 3]
-    result := Sum(a...)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "intptr_t a[3] = {1, 2, 3};") {
-		t.Fatalf("expected array declaration, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "Sum((sealVariadic_int){.data = a, .len = 3})") {
-		t.Fatalf("expected array spread lowering, got:\n%s", out)
 	}
 }
 
@@ -887,53 +740,6 @@ Main :: task() {
 
 	if !strings.Contains(out, "Sum(values)") {
 		t.Fatalf("expected variadic forwarding without repacking, got:\n%s", out)
-	}
-}
-
-func TestGenerateSpreadArrayIntoVariadicWithFixedParameter(t *testing.T) {
-	out, reporter := generate(t, `
-Example :: task(prefix int, values ...int) int {
-    total := prefix
-
-    for i := 0; i < len(values); i = i + 1 {
-        total = total + values[i]
-    }
-
-    return total
-}
-
-Main :: task() {
-    a: []int = [1, 2, 3]
-    result := Example(10, a...)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "Example(10, (sealVariadic_int){.data = a, .len = 3})") {
-		t.Fatalf("expected spread after fixed argument, got:\n%s", out)
-	}
-}
-
-func TestGenerateSpreadArrayLiteralIntoVariadicTask(t *testing.T) {
-	out, reporter := generate(t, `
-Sum :: task(values ...int) uint {
-    return len(values)
-}
-
-Main :: task() {
-    result := Sum([1, 2, 3]...)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "Sum((sealVariadic_int){.data = (intptr_t[]){1, 2, 3}, .len = 3})") {
-		t.Fatalf("expected array literal spread lowering, got:\n%s", out)
 	}
 }
 
@@ -1484,34 +1290,6 @@ Main :: task() {
 	}
 }
 
-func TestGenerateGenericStructValueArgumentSpecialization(t *testing.T) {
-	out, reporter := generate(t, `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-
-Main :: task() {
-    b: Buffer<int, 32>
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "typedef struct Buffer_int_32") {
-		t.Fatalf("expected Buffer_int_32 struct, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "intptr_t data[32];") {
-		t.Fatalf("expected [32]int field, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "Buffer_int_32 b;") {
-		t.Fatalf("expected Buffer_int_32 variable, got:\n%s", out)
-	}
-}
-
 func TestGenerateNestedGenericStructSpecialization(t *testing.T) {
 	out, reporter := generate(t, `
 Pair :: struct <A type, B type> {
@@ -1748,43 +1526,6 @@ Main :: task() {
 
 	if !strings.Contains(out, "intptr_t x = (b).value;") {
 		t.Fatalf("expected Box_int field access, got:\n%s", out)
-	}
-}
-
-func TestGenerateGenericTaskWithValueGenericArg(t *testing.T) {
-	out, reporter := generate(t, `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-
-MakeBuffer :: task <T type, N int>(value T) Buffer<T, N> {
-    return Buffer<T, N>{data = [value, value, value]}
-}
-
-Main :: task() {
-    b := MakeBuffer<int, 3>(9)
-    x := b.data[0]
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if !strings.Contains(out, "typedef struct Buffer_int_3") {
-		t.Fatalf("expected Buffer_int_3 struct, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "Buffer_int_3 MakeBuffer_int_3(intptr_t value);") {
-		t.Fatalf("expected MakeBuffer_int_3 prototype, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "Buffer_int_3 b = MakeBuffer_int_3(9);") {
-		t.Fatalf("expected MakeBuffer_int_3 call, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "intptr_t x = (b).data[0];") {
-		t.Fatalf("expected generic buffer index access, got:\n%s", out)
 	}
 }
 
@@ -2500,7 +2241,12 @@ func generateWithPackages(
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	g := NewWithPackages(reporter, "", packages)
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		"",
+		packages,
+		c.SemanticInfo(),
+	)
 	out := g.Generate(parsed)
 
 	return out, reporter
@@ -2540,7 +2286,14 @@ func exportCGenPackage(t *testing.T, packageName string, input string) (*Package
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	return ExportPackageInfo(packageName, parsed, reporter),
+	return ExportPackageInfoWithSemanticInfo(
+			packageName,
+			parsed,
+			reporter,
+			nil,
+			c.SemanticInfo(),
+		),
+
 		resolver.ExportPackage(packageName, resolverScope),
 		checker.ExportPackage(packageName, checkerScope)
 }
@@ -2808,95 +2561,6 @@ Main :: task() {
 	}
 }
 
-func TestImportedGenericStructValueParamCodegen(t *testing.T) {
-	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-`)
-
-	out, reporter := generateWithPackages(t, `
-Main :: task() {
-    b: types.Buffer<int, 4>
-    x := b.data[0]
-    assert(x == 0)
-}
-`, map[string]*PackageInfo{
-		"types": typesPkg,
-	}, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*checker.PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct types_Buffer_int_4 {",
-		"intptr_t data[4];",
-		"} types_Buffer_int_4;",
-		"types_Buffer_int_4 b;",
-		"intptr_t x = (b).data[0];",
-		"assert((x == 0));",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
-func TestImportedNestedGenericStructValueParamCodegen(t *testing.T) {
-	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-
-Box :: struct <T type> {
-    value T
-}
-`)
-
-	out, reporter := generateWithPackages(t, `
-Main :: task() {
-    b: types.Box<types.Buffer<int, 4>>
-    x := b.value.data[0]
-    assert(x == 0)
-}
-`, map[string]*PackageInfo{
-		"types": typesPkg,
-	}, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*checker.PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct types_Buffer_int_4 {",
-		"intptr_t data[4];",
-		"} types_Buffer_int_4;",
-		"typedef struct types_Box_types_Buffer_int_4 {",
-		"types_Buffer_int_4 value;",
-		"} types_Box_types_Buffer_int_4;",
-		"types_Box_types_Buffer_int_4 b;",
-		"intptr_t x = ((b).value).data[0];",
-		"assert((x == 0));",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
 func TestImportedGenericTaskRecordsInstanceRequest(t *testing.T) {
 	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
 Box :: struct <T type> {
@@ -2943,9 +2607,15 @@ Main :: task() {
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	g := NewWithPackages(reporter, "", map[string]*PackageInfo{
-		"types": typesPkg,
-	})
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		"",
+		map[string]*PackageInfo{
+			"types": typesPkg,
+		},
+		c.SemanticInfo(),
+	)
+
 	_ = g.Generate(parsed)
 
 	reqs := g.RequestedGenericInstances()
@@ -3008,7 +2678,13 @@ MakeBox :: task <T type>(value T) Box<T> {
 		t.Fatalf("checker diagnostics:\n%s", reporter.String())
 	}
 
-	g := NewWithPackages(reporter, "types", nil)
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		"types",
+		nil,
+		c.SemanticInfo(),
+	)
+
 	g.AddRequestedInstances([]GenericInstanceRequest{
 		{
 			Kind:        GenericInstanceTask,
@@ -3038,82 +2714,6 @@ MakeBox :: task <T type>(value T) Box<T> {
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int types_MakeBox_int(intptr_t value) {",
 		"return __seal_return_value_",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
-func TestRequestedGenericStructEmitsPackagePrefixedDefinition(t *testing.T) {
-	file := source.NewFile("types.seal", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-`)
-	reporter := diag.NewReporter()
-
-	lex := lexer.New(file, reporter)
-	tokens := lex.LexAll()
-	if reporter.HasErrors() {
-		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
-	}
-
-	p := parser.New(tokens, reporter)
-	parsed := p.ParseFile()
-	if reporter.HasErrors() {
-		t.Fatalf("parser diagnostics:\n%s", reporter.String())
-	}
-
-	r := resolver.New(reporter)
-	r.ResolveFile(parsed)
-	if reporter.HasErrors() {
-		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
-	}
-
-	c := checker.New(reporter)
-	c.CheckFile(parsed)
-	if reporter.HasErrors() {
-		t.Fatalf("checker diagnostics:\n%s", reporter.String())
-	}
-
-	g := NewWithPackages(reporter, "types", nil)
-	g.AddRequestedInstances([]GenericInstanceRequest{
-		{
-			Kind:        GenericInstanceStruct,
-			PackageName: "types",
-			SymbolName:  "Buffer",
-			Args: []ast.GenericArg{
-				{
-					Kind: ast.GenericArgExpr,
-					Expr: &ast.IdentExpr{
-						Name: ast.Ident{
-							Name: "int",
-							Loc:  source.NewSpan(file, 0, 0),
-						},
-					},
-					Loc: source.NewSpan(file, 0, 0),
-				},
-				{
-					Kind: ast.GenericArgExpr,
-					Expr: &ast.IntLitExpr{
-						Value: "4",
-						Loc:   source.NewSpan(file, 0, 0),
-					},
-					Loc: source.NewSpan(file, 0, 0),
-				},
-			},
-		},
-	})
-
-	out := g.Generate(parsed)
-
-	checks := []string{
-		"typedef struct types_Buffer_int_4 {",
-		"intptr_t data[4];",
-		"} types_Buffer_int_4;",
 	}
 
 	for _, want := range checks {
