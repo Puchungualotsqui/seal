@@ -136,13 +136,6 @@ func genericRequestTypeKey(typ ast.Type) string {
 	case *ast.PointerType:
 		return "*" + genericRequestTypeKey(t.Elem)
 
-	case *ast.ArrayType:
-		if t.Inferred {
-			return "[]" + genericRequestTypeKey(t.Elem)
-		}
-
-		return "[" + genericRequestExprKey(t.Len) + "]" + genericRequestTypeKey(t.Elem)
-
 	case *ast.GenericType:
 		var args []string
 		for _, arg := range t.Args {

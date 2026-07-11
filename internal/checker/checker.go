@@ -470,6 +470,34 @@ const (
 	IndexResolutionOverloadWrite
 )
 
+type SemanticInfo struct {
+	IndexResolutions map[*ast.IndexExpr]IndexResolution
+	LenResolutions   map[*ast.CallExpr]LenResolution
+}
+
+func (c *Checker) SemanticInfo() SemanticInfo {
+	info := SemanticInfo{
+		IndexResolutions: make(
+			map[*ast.IndexExpr]IndexResolution,
+			len(c.indexResolutions),
+		),
+		LenResolutions: make(
+			map[*ast.CallExpr]LenResolution,
+			len(c.lenResolutions),
+		),
+	}
+
+	for expr, resolution := range c.indexResolutions {
+		info.IndexResolutions[expr] = resolution
+	}
+
+	for call, resolution := range c.lenResolutions {
+		info.LenResolutions[call] = resolution
+	}
+
+	return info
+}
+
 type IndexResolution struct {
 	Kind IndexResolutionKind
 

@@ -8,6 +8,7 @@ import (
 
 	"seal/internal/ast"
 	"seal/internal/builtin"
+	"seal/internal/checker"
 	"seal/internal/diag"
 	"seal/internal/source"
 	"seal/internal/token"
@@ -17,11 +18,9 @@ type CType struct {
 	Name     string
 	SealName string
 
-	IsArray        bool
 	IsVariadic     bool
 	IsInterface    bool
 	IsDynInterface bool
-	ArrayLen       string
 	Elem           *CType
 }
 
@@ -30,18 +29,10 @@ func (t CType) String() string {
 		return "..." + t.Elem.String()
 	}
 
-	if t.IsArray && t.Elem != nil {
-		return fmt.Sprintf("[%s]%s", t.ArrayLen, t.Elem.String())
-	}
-
 	return t.Name
 }
 
 func (t CType) Decl(name string) string {
-	if t.IsArray && t.Elem != nil {
-		return fmt.Sprintf("%s %s[%s]", t.Elem.Name, name, t.ArrayLen)
-	}
-
 	return fmt.Sprintf("%s %s", t.Name, name)
 }
 
@@ -254,6 +245,9 @@ type Generator struct {
 	packageName string
 	packages    map[string]*PackageInfo
 
+	indexResolutions map[*ast.IndexExpr]checker.IndexResolution
+	lenResolutions   map[*ast.CallExpr]checker.LenResolution
+
 	genericInstanceRequests        *GenericInstanceRequestSet
 	pendingGenericInstanceRequests []GenericInstanceRequest
 
@@ -304,14 +298,51 @@ type Generator struct {
 }
 
 func New(diags *diag.Reporter) *Generator {
-	return NewWithPackages(diags, "", nil)
+	return NewWithPackagesAndSemanticInfo(
+		diags,
+		"",
+		nil,
+		checker.SemanticInfo{},
+	)
 }
 
-func NewWithPackages(diags *diag.Reporter, packageName string, packages map[string]*PackageInfo) *Generator {
+func NewWithSemanticInfo(
+	diags *diag.Reporter,
+	semantic checker.SemanticInfo,
+) *Generator {
+	return NewWithPackagesAndSemanticInfo(
+		diags,
+		"",
+		nil,
+		semantic,
+	)
+}
+
+func NewWithPackages(
+	diags *diag.Reporter,
+	packageName string,
+	packages map[string]*PackageInfo,
+) *Generator {
+	return NewWithPackagesAndSemanticInfo(
+		diags,
+		packageName,
+		packages,
+		checker.SemanticInfo{},
+	)
+}
+
+func NewWithPackagesAndSemanticInfo(
+	diags *diag.Reporter,
+	packageName string,
+	packages map[string]*PackageInfo,
+	semantic checker.SemanticInfo,
+) *Generator {
 	return &Generator{
 		diags:                         diags,
 		packageName:                   packageName,
 		packages:                      packages,
+		indexResolutions:              cloneIndexResolutions(semantic.IndexResolutions),
+		lenResolutions:                cloneLenResolutions(semantic.LenResolutions),
 		genericInstanceRequests:       NewGenericInstanceRequestSet(),
 		structs:                       map[string]*ast.StructDecl{},
 		enums:                         map[string]*ast.EnumDecl{},
@@ -335,6 +366,44 @@ func NewWithPackages(diags *diag.Reporter, packageName string, packages map[stri
 		resolvingImpls:                map[string]bool{},
 		implDecls:                     nil,
 	}
+}
+
+func cloneIndexResolutions(
+	input map[*ast.IndexExpr]checker.IndexResolution,
+) map[*ast.IndexExpr]checker.IndexResolution {
+	if len(input) == 0 {
+		return map[*ast.IndexExpr]checker.IndexResolution{}
+	}
+
+	out := make(
+		map[*ast.IndexExpr]checker.IndexResolution,
+		len(input),
+	)
+
+	for expr, resolution := range input {
+		out[expr] = resolution
+	}
+
+	return out
+}
+
+func cloneLenResolutions(
+	input map[*ast.CallExpr]checker.LenResolution,
+) map[*ast.CallExpr]checker.LenResolution {
+	if len(input) == 0 {
+		return map[*ast.CallExpr]checker.LenResolution{}
+	}
+
+	out := make(
+		map[*ast.CallExpr]checker.LenResolution,
+		len(input),
+	)
+
+	for call, resolution := range input {
+		out[call] = resolution
+	}
+
+	return out
 }
 
 func ExportPackageInfo(packageName string, file *ast.File, reporter *diag.Reporter) *PackageInfo {
@@ -1248,13 +1317,6 @@ func (g *Generator) collectGenericStructInstancesFromType(typ ast.Type) {
 	case *ast.PointerType:
 		g.collectGenericStructInstancesFromType(t.Elem)
 
-	case *ast.ArrayType:
-		if t.Len != nil {
-			g.collectGenericStructInstancesFromExpr(t.Len)
-		}
-
-		g.collectGenericStructInstancesFromType(t.Elem)
-
 	case *ast.GenericType:
 		if pkgName, typeName, ok := packageTypeNameFromAst(t.Base); ok {
 			if pkg := g.packages[pkgName]; pkg != nil {
@@ -1423,11 +1485,6 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 		g.collectGenericStructInstancesFromExpr(e.Left)
 		g.collectGenericStructInstancesFromExpr(e.Index)
 
-	case *ast.ArrayLiteralExpr:
-		for _, value := range e.Values {
-			g.collectGenericStructInstancesFromExpr(value)
-		}
-
 	case *ast.CompoundLiteralExpr:
 		g.collectGenericStructInstancesFromType(e.Type)
 
@@ -1563,9 +1620,6 @@ func (g *Generator) emitGenericStructDepsForType(typ ast.Type, subst map[string]
 	case *ast.PointerType:
 		g.emitGenericStructDepsForType(t.Elem, subst, visiting)
 
-	case *ast.ArrayType:
-		g.emitGenericStructDepsForType(t.Elem, subst, visiting)
-
 	case *ast.GenericType:
 		args := make([]ast.GenericArg, 0, len(t.Args))
 		for _, arg := range t.Args {
@@ -1675,14 +1729,6 @@ func (g *Generator) substituteTypeAstForCGen(typ ast.Type, subst map[string]ast.
 			Loc:  t.Loc,
 		}
 
-	case *ast.ArrayType:
-		return &ast.ArrayType{
-			Len:      g.substituteExprForCGen(t.Len, subst),
-			Inferred: t.Inferred,
-			Elem:     g.substituteTypeAstForCGen(t.Elem, subst),
-			Loc:      t.Loc,
-		}
-
 	case *ast.GenericType:
 		args := make([]ast.GenericArg, 0, len(t.Args))
 		for _, arg := range t.Args {
@@ -1787,17 +1833,6 @@ func (g *Generator) substituteExprForCGen(expr ast.Expr, subst map[string]ast.Ge
 			Loc:   e.Loc,
 		}
 
-	case *ast.ArrayLiteralExpr:
-		values := make([]ast.Expr, 0, len(e.Values))
-		for _, value := range e.Values {
-			values = append(values, g.substituteExprForCGen(value, subst))
-		}
-
-		return &ast.ArrayLiteralExpr{
-			Values: values,
-			Loc:    e.Loc,
-		}
-
 	case *ast.CompoundLiteralExpr:
 		fields := make([]ast.LiteralField, 0, len(e.Fields))
 		for _, field := range e.Fields {
@@ -1841,29 +1876,6 @@ func (g *Generator) cTypeFromAstWithGenericArgs(typ ast.Type, subst map[string]a
 			Name:     elem.Name + " *",
 			SealName: "*" + elem.SealName,
 			Elem:     &elem,
-		}
-
-	case *ast.ArrayType:
-		elem := g.cTypeFromAstWithGenericArgs(t.Elem, subst)
-		length := ""
-
-		if t.Inferred {
-			length = ""
-		} else if t.Len != nil {
-			length = g.constExprWithGenericArgs(t.Len, subst)
-		}
-
-		sealName := "[]" + elem.SealName
-		if !t.Inferred {
-			sealName = "[" + length + "]" + elem.SealName
-		}
-
-		return CType{
-			IsArray:  true,
-			ArrayLen: length,
-			Elem:     &elem,
-			Name:     elem.Name,
-			SealName: sealName,
 		}
 
 	case *ast.GenericType:
@@ -2439,9 +2451,6 @@ func (g *Generator) emitImportedGenericStructDepsForType(typ ast.Type, subst map
 		}
 
 	case *ast.PointerType:
-		g.emitImportedGenericStructDepsForType(t.Elem, subst, visiting)
-
-	case *ast.ArrayType:
 		g.emitImportedGenericStructDepsForType(t.Elem, subst, visiting)
 
 	case *ast.GenericType:
@@ -3734,13 +3743,6 @@ func (g *Generator) collectInterfaceInstancesFromType(typ ast.Type) {
 	case *ast.PointerType:
 		g.collectInterfaceInstancesFromType(t.Elem)
 
-	case *ast.ArrayType:
-		g.collectInterfaceInstancesFromType(t.Elem)
-
-		if t.Len != nil {
-			g.collectInterfaceInstancesFromExpr(t.Len)
-		}
-
 	case *ast.GenericType:
 		_ = g.cTypeFromGenericType(t)
 
@@ -3806,11 +3808,6 @@ func (g *Generator) collectInterfaceInstancesFromExpr(expr ast.Expr) {
 	case *ast.IndexExpr:
 		g.collectInterfaceInstancesFromExpr(e.Left)
 		g.collectInterfaceInstancesFromExpr(e.Index)
-
-	case *ast.ArrayLiteralExpr:
-		for _, value := range e.Values {
-			g.collectInterfaceInstancesFromExpr(value)
-		}
 
 	case *ast.CompoundLiteralExpr:
 		g.collectInterfaceInstancesFromType(e.Type)
@@ -3989,17 +3986,6 @@ func substituteImplTypeAstForTag(
 			Loc: t.Loc,
 		}
 
-	case *ast.ArrayType:
-		return &ast.ArrayType{
-			Len:      t.Len,
-			Inferred: t.Inferred,
-			Elem: substituteImplTypeAstForTag(
-				t.Elem,
-				subst,
-			),
-			Loc: t.Loc,
-		}
-
 	case *ast.GenericType:
 		args := make(
 			[]ast.GenericArg,
@@ -4071,23 +4057,6 @@ func canonicalImplTypeTagKey(
 
 	case *ast.PointerType:
 		return "*" +
-			canonicalImplTypeTagKey(
-				packageName,
-				t.Elem,
-			)
-
-	case *ast.ArrayType:
-		if t.Inferred {
-			return "[]" +
-				canonicalImplTypeTagKey(
-					packageName,
-					t.Elem,
-				)
-		}
-
-		return "[" +
-			exprCName(t.Len) +
-			"]" +
 			canonicalImplTypeTagKey(
 				packageName,
 				t.Elem,
@@ -4725,12 +4694,6 @@ func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
 
 	if s.HasType {
 		typ = g.cTypeFromAstInContext(s.Type)
-
-		if typ.IsArray && typ.ArrayLen == "" && s.HasValue {
-			if arr, ok := s.Value.(*ast.ArrayLiteralExpr); ok {
-				typ.ArrayLen = fmt.Sprintf("%d", len(arr.Values))
-			}
-		}
 	} else if s.HasValue {
 		typ = g.inferExprType(s.Value, nil)
 	} else {
@@ -4748,13 +4711,6 @@ func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
 
 	if s.HasValue {
 		value := g.emitExpr(s.Value, &typ)
-
-		if typ.IsArray {
-			g.linef("%s = %s;", typ.Decl(s.Name.Name), value)
-		} else {
-			g.linef("%s = %s;", typ.Decl(s.Name.Name), value)
-		}
-
 		return
 	}
 
@@ -5828,15 +5784,6 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		left := g.emitExpr(e.Left, nil)
 		index := g.emitExpr(e.Index, &CInt)
 
-		if leftType.SealName == "string" {
-			return fmt.Sprintf("sealString_at(%s, (ptrdiff_t)(%s))", left, index)
-		}
-
-		if leftType.SealName == "cstring" {
-			g.error(e.Left.Span(), "cstring does not support character indexing")
-			return "0"
-		}
-
 		if leftType.SealName == "rawptr" {
 			return fmt.Sprintf("((unsigned char *)(%s))[%s]", left, index)
 		}
@@ -5845,30 +5792,12 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 			return fmt.Sprintf("(%s).data[%s]", left, index)
 		}
 
-		if leftType.IsArray {
-			return fmt.Sprintf("%s[%s]", left, index)
-		}
-
 		if g.isByteIndexableCType(leftType) {
 			return g.emitByteIndexExpr(e, leftType, left, index)
 		}
 
 		g.error(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
 		return "0"
-
-	case *ast.ArrayLiteralExpr:
-		var values []string
-
-		elemExpected := (*CType)(nil)
-		if expected != nil && expected.IsArray && expected.Elem != nil {
-			elemExpected = expected.Elem
-		}
-
-		for _, value := range e.Values {
-			values = append(values, g.emitExpr(value, elemExpected))
-		}
-
-		return "{" + strings.Join(values, ", ") + "}"
 
 	case *ast.CompoundLiteralExpr:
 		typ := g.cTypeFromAstInContext(e.Type)
@@ -6547,10 +6476,6 @@ func (g *Generator) emitLenCall(e *ast.CallExpr) string {
 		return fmt.Sprintf("((uintptr_t)(%s).len)", arg)
 	}
 
-	if argType.IsArray {
-		return fmt.Sprintf("(uintptr_t)%s", argType.ArrayLen)
-	}
-
 	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
 	return "0"
 }
@@ -6713,45 +6638,8 @@ func (g *Generator) emitSpreadAsVariadic(elem CType, spread *ast.SpreadExpr) str
 		return g.emitExpr(spread.Expr, nil)
 	}
 
-	if srcType.IsArray {
-		if srcType.Elem == nil {
-			g.error(spread.Span(), "cannot spread invalid array")
-			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
-		}
-
-		if srcType.ArrayLen == "" {
-			g.error(spread.Span(), "cannot spread array with unknown length")
-			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
-		}
-
-		if srcType.Elem.SealName == elem.SealName {
-			return fmt.Sprintf(
-				"(%s){.data = %s, .len = %s}",
-				variadicType.Name,
-				g.emitArrayDataPointer(spread.Expr, elem),
-				srcType.ArrayLen,
-			)
-		}
-
-		return g.emitRepackedArraySpread(elem, spread.Expr, srcType, variadicType)
-	}
-
 	g.error(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", srcType.String()))
 	return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
-}
-
-func (g *Generator) emitArrayDataPointer(expr ast.Expr, elem CType) string {
-	if arr, ok := expr.(*ast.ArrayLiteralExpr); ok {
-		var values []string
-
-		for _, value := range arr.Values {
-			values = append(values, g.emitExpr(value, &elem))
-		}
-
-		return fmt.Sprintf("(%s[]){%s}", elem.Name, strings.Join(values, ", "))
-	}
-
-	return g.emitExpr(expr, nil)
 }
 
 func (g *Generator) emitAnyRuntimeSupport() {
@@ -6820,85 +6708,6 @@ func (g *Generator) emitAnyRuntimeSupport() {
 	g.line("")
 }
 
-func (g *Generator) emitRepackedArraySpread(elem CType, expr ast.Expr, srcType CType, variadicType CType) string {
-	length, err := strconv.Atoi(srcType.ArrayLen)
-	if err != nil {
-		g.error(expr.Span(), "cannot repack spread array with non-literal length")
-		return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
-	}
-
-	var values []string
-
-	if arr, ok := expr.(*ast.ArrayLiteralExpr); ok {
-		for _, value := range arr.Values {
-			values = append(values, g.emitExpr(value, &elem))
-		}
-	} else {
-		for i := 0; i < length; i++ {
-			indexExpr := &ast.IndexExpr{
-				Left: expr,
-				Index: &ast.IntLitExpr{
-					Value: fmt.Sprintf("%d", i),
-					Loc:   expr.Span(),
-				},
-				Loc: expr.Span(),
-			}
-
-			values = append(values, g.emitExpr(indexExpr, &elem))
-		}
-	}
-
-	return fmt.Sprintf(
-		"(%s){.data = (%s[]){%s}, .len = %d}",
-		variadicType.Name,
-		elem.Name,
-		strings.Join(values, ", "),
-		length,
-	)
-}
-
-func (g *Generator) emitArrayElementLiteral(elem CType, arg ast.Expr) string {
-	if !elem.IsArray || elem.Elem == nil {
-		return g.emitExpr(arg, &elem)
-	}
-
-	argType := g.inferExprType(arg, nil)
-
-	if lit, ok := arg.(*ast.ArrayLiteralExpr); ok {
-		var values []string
-		for _, value := range lit.Values {
-			values = append(values, g.emitExpr(value, elem.Elem))
-		}
-
-		return "{" + strings.Join(values, ", ") + "}"
-	}
-
-	if !argType.IsArray || argType.ArrayLen == "" {
-		return "{" + g.emitExpr(arg, &elem) + "}"
-	}
-
-	length, err := strconv.Atoi(argType.ArrayLen)
-	if err != nil {
-		return "{" + g.emitExpr(arg, &elem) + "}"
-	}
-
-	var values []string
-	for i := 0; i < length; i++ {
-		indexExpr := &ast.IndexExpr{
-			Left: arg,
-			Index: &ast.IntLitExpr{
-				Value: fmt.Sprintf("%d", i),
-				Loc:   arg.Span(),
-			},
-			Loc: arg.Span(),
-		}
-
-		values = append(values, g.emitExpr(indexExpr, elem.Elem))
-	}
-
-	return "{" + strings.Join(values, ", ") + "}"
-}
-
 func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArgs []string, preparedOffset int) string {
 	variadicType := g.variadicCType(elem)
 
@@ -6915,24 +6724,7 @@ func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArg
 			values = append(values, preparedArgs[globalIndex])
 			continue
 		}
-
-		if elem.IsArray && elem.Elem != nil {
-			values = append(values, g.emitArrayElementLiteral(elem, arg))
-			continue
-		}
-
 		values = append(values, g.emitExpr(arg, &elem))
-	}
-
-	if elem.IsArray && elem.Elem != nil {
-		return fmt.Sprintf(
-			"(%s){.data = (%s[][%s]){%s}, .len = %d}",
-			variadicType.Name,
-			elem.Elem.Name,
-			elem.ArrayLen,
-			strings.Join(values, ", "),
-			len(values),
-		)
 	}
 
 	return fmt.Sprintf(
@@ -7120,7 +6912,6 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("} sealString;")
 	g.line("")
 
-	g.line("static inline uint32_t sealUtf8DecodeAdvance(const unsigned char *data, size_t byte_len, size_t *offset) {")
 	g.indent++
 	g.line("if (*offset >= byte_len) return 0;")
 	g.line("unsigned char b0 = data[*offset];")
@@ -7152,7 +6943,6 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("}")
 	g.line("")
 
-	g.line("static inline size_t sealString_len(sealString s) {")
 	g.indent++
 	g.line("size_t offset = 0;")
 	g.line("size_t count = 0;")
@@ -7167,7 +6957,6 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("}")
 	g.line("")
 
-	g.line("static inline uint32_t sealString_at(sealString s, ptrdiff_t index) {")
 	g.indent++
 	g.line("size_t char_len = sealString_len(s);")
 	g.line("ptrdiff_t resolved = index;")
@@ -7259,12 +7048,6 @@ func (g *Generator) emitVariadicRuntimeType(elem CType) {
 	g.linef("typedef struct %s {", name)
 	g.indent++
 
-	if elem.IsArray && elem.Elem != nil {
-		g.linef("%s (*data)[%s];", elem.Elem.Name, elem.ArrayLen)
-	} else {
-		g.linef("%s *data;", elem.Name)
-	}
-
 	g.line("size_t len;")
 	g.indent--
 	g.linef("} %s;", name)
@@ -7272,15 +7055,6 @@ func (g *Generator) emitVariadicRuntimeType(elem CType) {
 
 func (g *Generator) variadicCType(elem CType) CType {
 	elemName := elem.SealName
-
-	if elem.IsArray && elem.Elem != nil {
-		length := elem.ArrayLen
-		if length == "" {
-			length = "inferred"
-		}
-
-		elemName = "array_" + sanitizeCName(length) + "_" + sanitizeCName(elem.Elem.SealName)
-	}
 
 	name := "sealVariadic_" + sanitizeCName(elemName)
 
@@ -7985,20 +7759,11 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		leftType :=
 			g.inferExprType(e.Left, nil)
 
-		if leftType.SealName == "string" {
-			return CChar
-		}
-
-		if leftType.SealName == "cstring" {
-			return CInvalid
-		}
-
 		if leftType.SealName == "rawptr" {
 			return CU8
 		}
 
-		if (leftType.IsArray ||
-			leftType.IsVariadic) &&
+		if (leftType.IsVariadic) &&
 			leftType.Elem != nil {
 			return *leftType.Elem
 		}
@@ -8008,24 +7773,6 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		}
 
 		return CInvalid
-
-	case *ast.ArrayLiteralExpr:
-		elem := CInvalid
-
-		if len(e.Values) > 0 {
-			elem = g.inferExprType(
-				e.Values[0],
-				nil,
-			)
-		}
-
-		return CType{
-			IsArray:  true,
-			ArrayLen: fmt.Sprintf("%d", len(e.Values)),
-			Elem:     &elem,
-			Name:     elem.Name,
-			SealName: "array",
-		}
 
 	case *ast.CompoundLiteralExpr:
 		return g.cTypeFromAstInContext(e.Type)
@@ -8174,7 +7921,7 @@ func (g *Generator) conversionScore(dst CType, src CType) (int, bool) {
 }
 
 func (g *Generator) isByteIndexableCType(t CType) bool {
-	if t.IsArray || t.IsVariadic {
+	if t.IsVariadic {
 		return false
 	}
 
@@ -8227,7 +7974,7 @@ func (g *Generator) isAddressableByteSource(expr ast.Expr) bool {
 	case *ast.IndexExpr:
 		leftType := g.inferExprType(e.Left, nil)
 
-		if leftType.IsArray || leftType.IsVariadic || leftType.SealName == "rawptr" {
+		if leftType.IsVariadic || leftType.SealName == "rawptr" {
 			return true
 		}
 
@@ -8908,19 +8655,6 @@ func (g *Generator) matchImplType(
 			paramKinds,
 		)
 
-	case *ast.ArrayType:
-		a, ok := actual.(*ast.ArrayType)
-		if !ok || p.Inferred != a.Inferred {
-			return false
-		}
-
-		return g.matchImplType(
-			p.Elem,
-			a.Elem,
-			subst,
-			paramKinds,
-		)
-
 	case *ast.GenericType:
 		a, ok := actual.(*ast.GenericType)
 		if !ok {
@@ -8963,7 +8697,6 @@ func (g *Generator) implTargetCandidates() []CType {
 	add := func(typ CType) {
 		if isInvalidCType(typ) ||
 			typ.IsInterface ||
-			typ.IsArray ||
 			typ.IsVariadic {
 			return
 		}
@@ -9179,33 +8912,6 @@ func (g *Generator) matchImplTargetCType(
 			paramKinds,
 		)
 
-	case *ast.ArrayType:
-		if !actual.IsArray ||
-			actual.Elem == nil {
-			return false
-		}
-
-		if !p.Inferred &&
-			actual.ArrayLen != "" &&
-			p.Len != nil {
-			expectedLen := g.constExprWithGenericArgs(
-				p.Len,
-				subst,
-			)
-
-			if expectedLen != actual.ArrayLen {
-				return false
-			}
-		}
-
-		return g.matchImplTargetCType(
-			p.Elem,
-			*actual.Elem,
-			patternPackageName,
-			subst,
-			paramKinds,
-		)
-
 	case *ast.GenericType:
 		actualPackage,
 			actualBase,
@@ -9275,22 +8981,6 @@ func (g *Generator) genericImplTargetIdentity(
 func (g *Generator) astTypeForCType(
 	typ CType,
 ) ast.Type {
-	if typ.IsArray && typ.Elem != nil {
-		var length ast.Expr
-
-		if typ.ArrayLen != "" {
-			length = &ast.IntLitExpr{
-				Value: typ.ArrayLen,
-			}
-		}
-
-		return &ast.ArrayType{
-			Len:      length,
-			Inferred: typ.ArrayLen == "",
-			Elem:     g.astTypeForCType(*typ.Elem),
-		}
-	}
-
 	if strings.HasPrefix(typ.SealName, "*") {
 		elem, ok := dereferenceImplTargetType(typ)
 		if ok {
@@ -10560,33 +10250,6 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			Name:     elem.Name + " *",
 			SealName: "*" + elem.SealName,
 			Elem:     &elem,
-		}
-
-	case *ast.ArrayType:
-		elem := g.cTypeFromAst(typ.Elem)
-		length := ""
-
-		if typ.Inferred {
-			length = ""
-		} else if typ.Len != nil {
-			if lit, ok := typ.Len.(*ast.IntLitExpr); ok {
-				length = lit.Value
-			} else {
-				length = g.emitExpr(typ.Len, &CInt)
-			}
-		}
-
-		sealName := "[]" + elem.SealName
-		if !typ.Inferred {
-			sealName = "[" + length + "]" + elem.SealName
-		}
-
-		return CType{
-			IsArray:  true,
-			ArrayLen: length,
-			Elem:     &elem,
-			Name:     elem.Name,
-			SealName: sealName,
 		}
 
 	case *ast.GenericType:
