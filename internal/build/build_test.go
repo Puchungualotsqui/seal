@@ -39,7 +39,6 @@ linkage = "static"
 auto_initialize_variables = true
 allow_uninitialized_variables = false
 allow_partial_initialized_structs = false
-allow_partial_initialized_arrays = true
 allow_partial_switches = false
 
 integer_overflow = "trap"
