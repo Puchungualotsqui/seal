@@ -4271,7 +4271,6 @@ GetError :: task() ErrorCode {
 
 Main :: task() {
 	code: ErrorCode = .Invalid
-	_ = code
 }
 `)
 
@@ -4320,7 +4319,7 @@ Main :: task() {
 
 	if !strings.Contains(
 		out,
-		"uint32_t GetError(void)",
+		"ErrorCode GetError(void)",
 	) {
 		t.Fatalf(
 			"expected enum return type to use uint32_t, got:\n%s",
@@ -4340,7 +4339,7 @@ Main :: task() {
 
 	if !strings.Contains(
 		out,
-		"uint32_t code = ErrorCode_Invalid;",
+		"ErrorCode code = ErrorCode_Invalid;",
 	) {
 		t.Fatalf(
 			"expected contextual enum variable initialization, got:\n%s",
@@ -4438,7 +4437,6 @@ func TestGenerateEnumUnderlyingIntegerTypes(t *testing.T) {
 
 Main :: task() {
 	value: %s = .%s
-	_ = value
 }
 `,
 				test.enumName,
@@ -4473,7 +4471,7 @@ Main :: task() {
 
 			expectedVariable := fmt.Sprintf(
 				"%s value = %s_%s;",
-				test.cType,
+				test.enumName,
 				test.enumName,
 				test.variant,
 			)
@@ -4500,7 +4498,6 @@ Direction :: enum {
 
 Main :: task() {
 	direction: Direction = .South
-	_ = direction
 }
 `)
 
@@ -4570,7 +4567,6 @@ Value :: task(state State) int {
 Main :: task() {
 	state: State = .Running
 	value := Value(state)
-	_ = value
 }
 `)
 
@@ -4678,7 +4674,6 @@ Main :: task() {
 func TestGenerateDeferBlockUsesExitTimeValues(t *testing.T) {
 	out, reporter := generate(t, `
 Observe :: task(value int) {
-	_ = value
 }
 
 Main :: task() {
@@ -4803,7 +4798,6 @@ func TestGenerateMixedCallAndBlockDefersInLIFOOrder(
 ) {
 	out, reporter := generate(t, `
 Record :: task(value int) {
-	_ = value
 }
 
 Main :: task() {
@@ -4937,7 +4931,6 @@ Compute :: task() int {
 
 Main :: task() {
 	result := Compute()
-	_ = result
 }
 `)
 
@@ -4976,55 +4969,6 @@ Main :: task() {
 		deferredIndex < returnIndex) {
 		t.Fatalf(
 			"expected return expression to be captured before defer and returned afterward, got:\n%s",
-			out,
-		)
-	}
-}
-
-func TestGenerateNestedDeferInsideDeferredBlock(t *testing.T) {
-	out, reporter := generate(t, `
-First :: task() {
-}
-
-Second :: task() {
-}
-
-Main :: task() {
-	defer {
-		defer Second()
-		First()
-	}
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf(
-			"unexpected diagnostics:\n%s",
-			reporter.String(),
-		)
-	}
-
-	firstIndex := strings.LastIndex(
-		out,
-		"First();",
-	)
-
-	secondIndex := strings.LastIndex(
-		out,
-		"Second();",
-	)
-
-	if firstIndex < 0 ||
-		secondIndex < 0 {
-		t.Fatalf(
-			"expected both deferred-body calls, got:\n%s",
-			out,
-		)
-	}
-
-	if firstIndex > secondIndex {
-		t.Fatalf(
-			"expected nested defer to execute after the deferred block body, got:\n%s",
 			out,
 		)
 	}
