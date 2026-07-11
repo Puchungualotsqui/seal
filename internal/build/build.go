@@ -44,7 +44,6 @@ type Config struct {
 	AutoInitializeVariables        bool
 	AllowUninitializedVariables    bool
 	AllowPartialInitializedStructs bool
-	AllowPartialInitializedArrays  bool
 	AllowPartialSwitches           bool
 
 	IntegerOverflow string

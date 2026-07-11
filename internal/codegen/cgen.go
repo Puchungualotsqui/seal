@@ -406,8 +406,972 @@ func cloneLenResolutions(
 	return out
 }
 
-func ExportPackageInfo(packageName string, file *ast.File, reporter *diag.Reporter) *PackageInfo {
-	g := NewWithPackages(reporter, packageName, nil)
+func semanticCandidateIdentity(
+	candidate *checker.Symbol,
+	packageName string,
+) (string, string) {
+	if candidate == nil {
+		return "", ""
+	}
+
+	taskName := candidate.Name
+
+	if dot := strings.LastIndex(taskName, "."); dot >= 0 {
+		if packageName == "" {
+			packageName = taskName[:dot]
+		}
+
+		taskName = taskName[dot+1:]
+	}
+
+	return packageName, taskName
+}
+
+func namedTypeFromCheckerName(name string) ast.Type {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+
+	rawParts := strings.Split(name, ".")
+	parts := make([]ast.Ident, 0, len(rawParts))
+
+	for _, part := range rawParts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		parts = append(parts, ast.Ident{Name: part})
+	}
+
+	if len(parts) == 0 {
+		return nil
+	}
+
+	return &ast.NamedType{
+		Parts: parts,
+	}
+}
+
+func checkerTypeToAstType(typ *checker.Type) ast.Type {
+	if typ == nil {
+		return nil
+	}
+
+	switch typ.Kind {
+	case checker.TypePointer:
+		elem := checkerTypeToAstType(typ.Elem)
+		if elem == nil {
+			return nil
+		}
+
+		return &ast.PointerType{
+			Elem: elem,
+		}
+
+	case checker.TypeStruct,
+		checker.TypeInterface:
+		if typ.GenericBaseName != "" {
+			base := namedTypeFromCheckerName(typ.GenericBaseName)
+			if base == nil {
+				return nil
+			}
+
+			args := checkerGenericArgumentsToAst(
+				typ.GenericArguments,
+			)
+
+			return &ast.GenericType{
+				Base: base,
+				Args: args,
+			}
+		}
+
+		return namedTypeFromCheckerName(typ.Name)
+
+	case checker.TypeDistinct,
+		checker.TypeEnum,
+		checker.TypeUnion,
+		checker.TypeTypeParam,
+		checker.TypeValueParam:
+		return namedTypeFromCheckerName(typ.Name)
+
+	case checker.TypeVoid:
+		return namedTypeFromCheckerName("void")
+
+	case checker.TypeBool:
+		return namedTypeFromCheckerName("bool")
+
+	case checker.TypeInt,
+		checker.TypeUntypedInt:
+		return namedTypeFromCheckerName("int")
+
+	case checker.TypeUint:
+		return namedTypeFromCheckerName("uint")
+
+	case checker.TypeI8:
+		return namedTypeFromCheckerName("i8")
+
+	case checker.TypeI16:
+		return namedTypeFromCheckerName("i16")
+
+	case checker.TypeI32:
+		return namedTypeFromCheckerName("i32")
+
+	case checker.TypeI64:
+		return namedTypeFromCheckerName("i64")
+
+	case checker.TypeU8:
+		return namedTypeFromCheckerName("u8")
+
+	case checker.TypeU16:
+		return namedTypeFromCheckerName("u16")
+
+	case checker.TypeU32:
+		return namedTypeFromCheckerName("u32")
+
+	case checker.TypeU64:
+		return namedTypeFromCheckerName("u64")
+
+	case checker.TypeF32:
+		return namedTypeFromCheckerName("f32")
+
+	case checker.TypeF64,
+		checker.TypeUntypedFloat:
+		return namedTypeFromCheckerName("f64")
+
+	case checker.TypeChar:
+		return namedTypeFromCheckerName("char")
+
+	case checker.TypeString:
+		return namedTypeFromCheckerName("string")
+
+	case checker.TypeCstring:
+		return namedTypeFromCheckerName("cstring")
+
+	case checker.TypeRawptr:
+		return namedTypeFromCheckerName("rawptr")
+
+	case checker.TypeAny:
+		return namedTypeFromCheckerName("any")
+
+	case checker.TypeInterfaceSelf:
+		return &ast.InterfaceSelfType{}
+	}
+
+	if typ.Name != "" {
+		return namedTypeFromCheckerName(typ.Name)
+	}
+
+	return nil
+}
+
+func checkerGenericArgumentsToAst(
+	input []checker.GenericArgumentInfo,
+) []ast.GenericArg {
+	if len(input) == 0 {
+		return nil
+	}
+
+	out := make([]ast.GenericArg, 0, len(input))
+
+	for _, arg := range input {
+		out = append(
+			out,
+			checkerGenericArgumentToAst(arg),
+		)
+	}
+
+	return out
+}
+
+func checkerGenericArgumentToAst(
+	arg checker.GenericArgumentInfo,
+) ast.GenericArg {
+	switch arg.Category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		return ast.GenericArg{
+			Kind: ast.GenericArgType,
+			Type: checkerTypeToAstType(arg.Type),
+		}
+
+	case ast.GenericParamTask:
+		if arg.Expr != nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: arg.Expr,
+			}
+		}
+
+		name := arg.Key
+		if name == "" && arg.Type != nil {
+			name = arg.Type.Name
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.IdentExpr{
+				Name: ast.Ident{Name: name},
+			},
+		}
+
+	case ast.GenericParamInt:
+		if arg.Expr != nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: arg.Expr,
+			}
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.IntLitExpr{
+				Value: arg.Key,
+			},
+		}
+
+	case ast.GenericParamBool:
+		if arg.Expr != nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: arg.Expr,
+			}
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.BoolLitExpr{
+				Value: arg.Key == "true",
+			},
+		}
+
+	case ast.GenericParamString:
+		if arg.Expr != nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: arg.Expr,
+			}
+		}
+
+		value := arg.Key
+		if _, err := strconv.Unquote(value); err != nil {
+			value = strconv.Quote(value)
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.StringLitExpr{
+				Value: value,
+			},
+		}
+
+	case ast.GenericParamValue:
+		if arg.Expr != nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: arg.Expr,
+			}
+		}
+
+		if arg.Key == "true" || arg.Key == "false" {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: &ast.BoolLitExpr{
+					Value: arg.Key == "true",
+				},
+			}
+		}
+
+		if _, err := strconv.ParseInt(arg.Key, 0, 64); err == nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: &ast.IntLitExpr{
+					Value: arg.Key,
+				},
+			}
+		}
+
+		if _, err := strconv.Unquote(arg.Key); err == nil {
+			return ast.GenericArg{
+				Kind: ast.GenericArgExpr,
+				Expr: &ast.StringLitExpr{
+					Value: arg.Key,
+				},
+			}
+		}
+
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: &ast.IdentExpr{
+				Name: ast.Ident{Name: arg.Key},
+			},
+		}
+	}
+
+	if typ := checkerTypeToAstType(arg.Type); typ != nil {
+		return ast.GenericArg{
+			Kind: ast.GenericArgType,
+			Type: typ,
+		}
+	}
+
+	if arg.Expr != nil {
+		return ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: arg.Expr,
+		}
+	}
+
+	return ast.GenericArg{
+		Kind: ast.GenericArgExpr,
+		Expr: &ast.IdentExpr{
+			Name: ast.Ident{Name: arg.Key},
+		},
+	}
+}
+
+func (g *Generator) semanticTaskSelection(
+	candidate *checker.Symbol,
+	packageName string,
+	genericArguments []checker.GenericArgumentInfo,
+	span source.Span,
+) (string, TaskInfo, bool) {
+	packageName, taskName := semanticCandidateIdentity(
+		candidate,
+		packageName,
+	)
+
+	if taskName == "" {
+		g.error(
+			span,
+			"checker semantic resolution has no task candidate",
+		)
+		return "", TaskInfo{}, false
+	}
+
+	args := checkerGenericArgumentsToAst(genericArguments)
+	args = g.genericArgsInContext(args)
+
+	isImported :=
+		packageName != "" &&
+			packageName != g.packageName
+
+	if isImported {
+		pkg := g.packages[packageName]
+		if pkg == nil {
+			g.error(
+				span,
+				fmt.Sprintf(
+					"checker selected task %s.%s, but package metadata is unavailable",
+					packageName,
+					taskName,
+				),
+			)
+			return "", TaskInfo{}, false
+		}
+
+		info, ok := pkg.Tasks[taskName]
+		if !ok {
+			g.error(
+				span,
+				fmt.Sprintf(
+					"checker selected unknown imported task %s.%s",
+					packageName,
+					taskName,
+				),
+			)
+			return "", TaskInfo{}, false
+		}
+
+		if len(info.GenericParams) > 0 {
+			g.collectGenericStructInstancesFromGenericArgsForParams(
+				info.GenericParams,
+				args,
+			)
+
+			name := g.registerImportedGenericTaskInstance(
+				packageName,
+				taskName,
+				info,
+				args,
+			)
+
+			instance := g.importedGenericTasks[name]
+			if instance == nil {
+				g.error(
+					span,
+					fmt.Sprintf(
+						"could not register imported specialization %s.%s",
+						packageName,
+						taskName,
+					),
+				)
+				return "", TaskInfo{}, false
+			}
+
+			return name,
+				g.taskInfoFromImportedGenericTaskInstance(instance),
+				true
+		}
+
+		return cImportedTaskName(
+			packageName,
+			taskName,
+			info,
+		), info, true
+	}
+
+	info, ok := g.tasks[taskName]
+	if !ok {
+		g.error(
+			span,
+			fmt.Sprintf(
+				"checker selected unknown local task %q",
+				taskName,
+			),
+		)
+		return "", TaskInfo{}, false
+	}
+
+	if len(info.GenericParams) > 0 {
+		if info.Decl == nil {
+			g.error(
+				span,
+				fmt.Sprintf(
+					"generic task %q has no declaration for specialization",
+					taskName,
+				),
+			)
+			return "", TaskInfo{}, false
+		}
+
+		g.collectGenericStructInstancesFromGenericArgsForParams(
+			info.GenericParams,
+			args,
+		)
+
+		name := g.registerGenericTaskInstance(
+			info.Decl,
+			args,
+		)
+
+		instance := g.genericTasks[name]
+		if instance == nil {
+			g.error(
+				span,
+				fmt.Sprintf(
+					"could not register specialization of %q",
+					taskName,
+				),
+			)
+			return "", TaskInfo{}, false
+		}
+
+		return name,
+			g.taskInfoFromGenericTaskInstance(instance),
+			true
+	}
+
+	name := g.cTaskName(taskName)
+
+	if info.IsExtern && info.ExternName != "" {
+		name = info.ExternName
+	}
+
+	return name, info, true
+}
+
+func (g *Generator) isAddressableExprForReference(
+	expr ast.Expr,
+) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if g.scope == nil {
+			return false
+		}
+
+		_, ok := g.scope.lookup(e.Name.Name)
+		return ok
+
+	case *ast.SelectorExpr:
+		leftType := g.inferExprType(e.Left, nil)
+
+		if strings.HasPrefix(leftType.SealName, "*") {
+			return true
+		}
+
+		return g.isAddressableExprForReference(e.Left)
+
+	case *ast.UnaryExpr:
+		return e.Op == token.Star
+
+	case *ast.IndexExpr:
+		resolution, ok := g.indexResolutions[e]
+		if !ok || resolution.Candidate != nil {
+			return false
+		}
+
+		leftType := g.inferExprType(e.Left, nil)
+
+		if leftType.SealName == "rawptr" {
+			return true
+		}
+
+		if leftType.IsVariadic {
+			return g.isAddressableExprForReference(e.Left)
+		}
+
+		if g.isByteIndexableCType(leftType) {
+			return g.isAddressableByteSource(e.Left)
+		}
+	}
+
+	return false
+}
+
+func (g *Generator) emitSemanticReceiverArgument(
+	expr ast.Expr,
+	prepared string,
+	expected CType,
+) string {
+	if !strings.HasPrefix(expected.SealName, "*") {
+		if prepared != "" {
+			return prepared
+		}
+
+		return g.emitExpr(expr, &expected)
+	}
+
+	actual := g.inferExprType(expr, nil)
+
+	if actual.SealName == expected.SealName {
+		if prepared != "" {
+			return prepared
+		}
+
+		return g.emitExpr(expr, &expected)
+	}
+
+	expectedElemName := strings.TrimPrefix(
+		expected.SealName,
+		"*",
+	)
+
+	if expected.Elem != nil {
+		expectedElemName = expected.Elem.SealName
+	}
+
+	if actual.SealName != expectedElemName {
+		if prepared != "" {
+			return prepared
+		}
+
+		return g.emitExpr(expr, &expected)
+	}
+
+	value := prepared
+	if value == "" {
+		value = g.emitExpr(expr, &actual)
+	}
+
+	if prepared != "" ||
+		g.isAddressableExprForReference(expr) {
+		return fmt.Sprintf("&(%s)", value)
+	}
+
+	if actual.SealName == "string" {
+		return fmt.Sprintf(
+			"((%s[]){%s})",
+			actual.Name,
+			value,
+		)
+	}
+
+	g.error(
+		expr.Span(),
+		fmt.Sprintf(
+			"checker-selected task requires *%s, but the receiver is not addressable",
+			actual.SealName,
+		),
+	)
+
+	return "NULL"
+}
+
+func (g *Generator) emitSemanticTaskCall(
+	name string,
+	info TaskInfo,
+	args []ast.Expr,
+	preparedArgs []string,
+) string {
+	outArgs := make([]string, 0, len(args))
+
+	for i, arg := range args {
+		prepared := ""
+		if preparedArgs != nil && i < len(preparedArgs) {
+			prepared = preparedArgs[i]
+		}
+
+		expected := (*CType)(nil)
+		if i < len(info.ParamTypes) {
+			expected = &info.ParamTypes[i]
+		}
+
+		if i == 0 && expected != nil {
+			outArgs = append(
+				outArgs,
+				g.emitSemanticReceiverArgument(
+					arg,
+					prepared,
+					*expected,
+				),
+			)
+			continue
+		}
+
+		if prepared != "" {
+			outArgs = append(outArgs, prepared)
+			continue
+		}
+
+		outArgs = append(
+			outArgs,
+			g.emitExpr(arg, expected),
+		)
+	}
+
+	return fmt.Sprintf(
+		"%s(%s)",
+		name,
+		strings.Join(outArgs, ", "),
+	)
+}
+
+func (g *Generator) emitBuiltinIndexRead(
+	e *ast.IndexExpr,
+	leftType CType,
+) string {
+	left := g.emitExpr(e.Left, nil)
+	index := g.emitExpr(e.Index, &CInt)
+
+	switch {
+	case leftType.SealName == "rawptr":
+		return fmt.Sprintf(
+			"((unsigned char *)(%s))[%s]",
+			left,
+			index,
+		)
+
+	case leftType.SealName == "cstring":
+		return fmt.Sprintf(
+			"((const unsigned char *)(%s))[%s]",
+			left,
+			index,
+		)
+
+	case leftType.IsVariadic:
+		if leftType.Elem == nil {
+			g.error(
+				e.Left.Span(),
+				"cannot index invalid variadic value",
+			)
+			return "0"
+		}
+
+		return fmt.Sprintf(
+			"(%s).data[%s]",
+			left,
+			index,
+		)
+
+	case g.isByteIndexableCType(leftType):
+		return g.emitByteIndexExpr(
+			e,
+			leftType,
+			left,
+			index,
+		)
+	}
+
+	g.error(
+		e.Left.Span(),
+		fmt.Sprintf(
+			"checker selected builtin indexing for unsupported type %s",
+			leftType.String(),
+		),
+	)
+
+	return "0"
+}
+
+func (g *Generator) emitBuiltinIndexLValue(
+	e *ast.IndexExpr,
+	leftType CType,
+) (string, CType, bool) {
+	left := g.emitExpr(e.Left, nil)
+	index := g.emitExpr(e.Index, &CInt)
+
+	switch {
+	case leftType.SealName == "rawptr":
+		return fmt.Sprintf(
+			"((unsigned char *)(%s))[%s]",
+			left,
+			index,
+		), CU8, true
+
+	case leftType.SealName == "cstring":
+		g.error(
+			e.Left.Span(),
+			"cstring indexing is read-only",
+		)
+		return "0", CInvalid, false
+
+	case leftType.IsVariadic:
+		if leftType.Elem == nil {
+			g.error(
+				e.Left.Span(),
+				"cannot assign through invalid variadic value",
+			)
+			return "0", CInvalid, false
+		}
+
+		return fmt.Sprintf(
+			"(%s).data[%s]",
+			left,
+			index,
+		), *leftType.Elem, true
+
+	case g.isByteIndexableCType(leftType):
+		if !g.isAddressableByteSource(e.Left) {
+			g.error(
+				e.Left.Span(),
+				"byte-index assignment requires an addressable value",
+			)
+			return "0", CInvalid, false
+		}
+
+		return g.emitByteIndexExpr(
+			e,
+			leftType,
+			left,
+			index,
+		), CU8, true
+	}
+
+	g.error(
+		e.Left.Span(),
+		fmt.Sprintf(
+			"checker selected builtin index assignment for unsupported type %s",
+			leftType.String(),
+		),
+	)
+
+	return "0", CInvalid, false
+}
+
+func (g *Generator) emitIndexExpr(
+	e *ast.IndexExpr,
+) string {
+	resolution, ok := g.indexResolutions[e]
+	if !ok {
+		g.error(
+			e.Span(),
+			"missing checker resolution for index expression",
+		)
+		return "0"
+	}
+
+	if resolution.Candidate != nil {
+		name, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			e.Span(),
+		)
+		if !ok {
+			return "0"
+		}
+
+		return g.emitSemanticTaskCall(
+			name,
+			info,
+			[]ast.Expr{
+				e.Left,
+				e.Index,
+			},
+			nil,
+		)
+	}
+
+	leftType := g.inferExprType(e.Left, nil)
+
+	return g.emitBuiltinIndexRead(
+		e,
+		leftType,
+	)
+}
+
+func (g *Generator) emitIndexAssignment(
+	e *ast.IndexExpr,
+	op token.Kind,
+	right ast.Expr,
+) string {
+	resolution, ok := g.indexResolutions[e]
+	if !ok {
+		g.error(
+			e.Span(),
+			"missing checker resolution for index assignment",
+		)
+		return "0"
+	}
+
+	if resolution.Candidate != nil {
+		if op != token.Assign {
+			g.error(
+				e.Span(),
+				"compound assignment through an overloaded index setter is not supported by C codegen",
+			)
+			return "0"
+		}
+
+		name, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			e.Span(),
+		)
+		if !ok {
+			return "0"
+		}
+
+		return g.emitSemanticTaskCall(
+			name,
+			info,
+			[]ast.Expr{
+				e.Left,
+				e.Index,
+				right,
+			},
+			nil,
+		)
+	}
+
+	leftType := g.inferExprType(e.Left, nil)
+
+	lvalue, valueType, ok := g.emitBuiltinIndexLValue(
+		e,
+		leftType,
+	)
+	if !ok {
+		return "0"
+	}
+
+	value := g.emitExpr(right, &valueType)
+
+	return fmt.Sprintf(
+		"%s %s %s",
+		lvalue,
+		g.cAssignOp(op),
+		value,
+	)
+}
+
+func (g *Generator) emitAssignmentExpr(
+	s *ast.AssignStmt,
+) string {
+	if index, ok := s.Left.(*ast.IndexExpr); ok {
+		return g.emitIndexAssignment(
+			index,
+			s.Op,
+			s.Right,
+		)
+	}
+
+	leftType := g.inferExprType(s.Left, nil)
+	left := g.emitExpr(s.Left, nil)
+	right := g.emitExpr(s.Right, &leftType)
+
+	return fmt.Sprintf(
+		"%s %s %s",
+		left,
+		g.cAssignOp(s.Op),
+		right,
+	)
+}
+
+func (g *Generator) indexExprType(
+	e *ast.IndexExpr,
+) CType {
+	resolution, ok := g.indexResolutions[e]
+	if !ok {
+		return CInvalid
+	}
+
+	if resolution.Candidate != nil {
+		_, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			e.Span(),
+		)
+		if !ok {
+			return CInvalid
+		}
+
+		return info.ReturnType
+	}
+
+	leftType := g.inferExprType(e.Left, nil)
+
+	switch {
+	case leftType.SealName == "rawptr":
+		return CU8
+
+	case leftType.SealName == "cstring":
+		return CU8
+
+	case leftType.IsVariadic &&
+		leftType.Elem != nil:
+		return *leftType.Elem
+
+	case g.isByteIndexableCType(leftType):
+		return CU8
+	}
+
+	return CInvalid
+}
+
+func ExportPackageInfo(
+	packageName string,
+	file *ast.File,
+	reporter *diag.Reporter,
+) *PackageInfo {
+	return ExportPackageInfoWithSemanticInfo(
+		packageName,
+		file,
+		reporter,
+		nil,
+		checker.SemanticInfo{},
+	)
+}
+
+func ExportPackageInfoWithSemanticInfo(
+	packageName string,
+	file *ast.File,
+	reporter *diag.Reporter,
+	packages map[string]*PackageInfo,
+	semantic checker.SemanticInfo,
+) *PackageInfo {
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		packageName,
+		packages,
+		semantic,
+	)
+
 	g.collect(file)
 
 	return &PackageInfo{
@@ -419,7 +1383,10 @@ func ExportPackageInfo(packageName string, file *ast.File, reporter *diag.Report
 		Enums:      g.enums,
 		Unions:     g.unions,
 		Interfaces: g.interfaces,
-		Impls:      append([]*ast.ImplDecl(nil), g.implDecls...),
+		Impls: append(
+			[]*ast.ImplDecl(nil),
+			g.implDecls...,
+		),
 	}
 }
 
@@ -911,68 +1878,135 @@ func (g *Generator) collectGenericMonomorphizations(file *ast.File) {
 	}
 }
 
-func (g *Generator) collectImportedGenericTaskInstanceMonomorphizations(name string) {
+func (g *Generator) collectImportedGenericTaskInstanceMonomorphizations(
+	name string,
+) {
 	info := g.importedGenericTasks[name]
 	if info == nil {
 		return
 	}
 
-	subst := genericArgSubstForCGen(info.Info.GenericParams, info.Args)
+	subst := genericArgSubstForCGen(
+		info.Info.GenericParams,
+		info.Args,
+	)
 
-	g.collectGenericStructInstancesFromGenericArgsForParams(info.Info.GenericParams, info.Args)
+	oldSubst := g.genericSubst
+	g.genericSubst = subst
+
+	defer func() {
+		g.genericSubst = oldSubst
+	}()
+
+	g.collectGenericStructInstancesFromGenericArgsForParams(
+		info.Info.GenericParams,
+		info.Args,
+	)
 
 	g.withTypeContext(info.PackageName, func() {
 		for _, paramType := range info.Info.ParamTypeAsts {
-			g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(paramType, subst))
+			g.collectGenericStructInstancesFromType(
+				g.substituteTypeAstForCGen(
+					paramType,
+					subst,
+				),
+			)
 		}
 
 		for _, resultType := range info.Info.ResultTypeAsts {
-			g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(resultType, subst))
+			g.collectGenericStructInstancesFromType(
+				g.substituteTypeAstForCGen(
+					resultType,
+					subst,
+				),
+			)
 		}
 
 		for i, hasDefault := range info.Info.ParamHasDefault {
-			if !hasDefault || i >= len(info.Info.ParamDefaults) {
+			if !hasDefault ||
+				i >= len(info.Info.ParamDefaults) {
 				continue
 			}
 
-			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(info.Info.ParamDefaults[i], subst))
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					info.Info.ParamDefaults[i],
+					subst,
+				),
+			)
 		}
 	})
 }
 
-func (g *Generator) collectGenericTaskInstanceMonomorphizations(name string) {
+func (g *Generator) collectGenericTaskInstanceMonomorphizations(
+	name string,
+) {
 	info := g.genericTasks[name]
 	if info == nil || info.Decl == nil {
 		return
 	}
 
-	subst := genericTaskSubstForCGen(info.Decl.GenericParams, info.Args)
+	subst := genericTaskSubstForCGen(
+		info.Decl.GenericParams,
+		info.Args,
+	)
+
+	oldSubst := g.genericSubst
+	g.genericSubst = subst
+
+	defer func() {
+		g.genericSubst = oldSubst
+	}()
 
 	for i, arg := range info.Args {
 		if i >= len(info.Decl.GenericParams) {
 			break
 		}
 
-		if info.Decl.GenericParams[i].Category != ast.GenericParamTask {
+		if info.Decl.GenericParams[i].Category !=
+			ast.GenericParamTask {
 			continue
 		}
 
-		g.collectGenericTaskArgInstance(g.substituteGenericArgForCGen(arg, subst))
+		g.collectGenericTaskArgInstance(
+			g.substituteGenericArgForCGen(
+				arg,
+				subst,
+			),
+		)
 	}
 
 	for _, param := range info.Decl.Params {
-		g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(param.Type, subst))
+		g.collectGenericStructInstancesFromType(
+			g.substituteTypeAstForCGen(
+				param.Type,
+				subst,
+			),
+		)
 
 		if param.HasDefault {
-			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(param.Default, subst))
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					param.Default,
+					subst,
+				),
+			)
 		}
 	}
 
 	for _, result := range info.Decl.Results {
-		g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(result, subst))
+		g.collectGenericStructInstancesFromType(
+			g.substituteTypeAstForCGen(
+				result,
+				subst,
+			),
+		)
 	}
 
-	g.collectGenericStructInstancesFromBlockWithGenericArgs(info.Decl.Body, subst)
+	g.collectGenericStructInstancesFromBlockWithGenericArgs(
+		info.Decl.Body,
+		subst,
+	)
 }
 
 func (g *Generator) collectGenericTaskArgsFromParams(params []ast.GenericParam, args []ast.GenericArg) {
@@ -1405,7 +2439,9 @@ func (g *Generator) collectGenericStructInstancesFromGenericArg(arg ast.GenericA
 	}
 }
 
-func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
+func (g *Generator) collectGenericStructInstancesFromExpr(
+	expr ast.Expr,
+) {
 	if expr == nil {
 		return
 	}
@@ -1423,6 +2459,16 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 
 		for _, arg := range e.Args {
 			g.collectGenericStructInstancesFromExpr(arg)
+		}
+
+		if resolution, ok := g.lenResolutions[e]; ok &&
+			resolution.Candidate != nil {
+			_, _, _ = g.semanticTaskSelection(
+				resolution.Candidate,
+				resolution.PackageName,
+				resolution.GenericArguments,
+				e.Span(),
+			)
 		}
 
 	case *ast.GenericExpr:
@@ -1453,16 +2499,42 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 				break
 			}
 
-			if info, ok := g.tasks[base.Name.Name]; ok && info.Decl != nil && len(info.GenericParams) > 0 {
-				g.registerGenericTaskInstance(info.Decl, e.Args)
-				g.collectGenericStructInstancesFromGenericArgsForParams(info.GenericParams, e.Args)
+			if info, ok := g.tasks[base.Name.Name]; ok &&
+				info.Decl != nil &&
+				len(info.GenericParams) > 0 {
+				g.registerGenericTaskInstance(
+					info.Decl,
+					e.Args,
+				)
+
+				g.collectGenericStructInstancesFromGenericArgsForParams(
+					info.GenericParams,
+					e.Args,
+				)
+
 				handledAsTask = true
 			}
 
 		case *ast.SelectorExpr:
-			if pkgName, taskName, info, ok := g.importedGenericTaskInfoFromSelector(base); ok {
-				g.registerImportedGenericTaskInstance(pkgName, taskName, info, e.Args)
-				g.collectGenericStructInstancesFromGenericArgsForParams(info.GenericParams, e.Args)
+			if pkgName,
+				taskName,
+				info,
+				ok :=
+				g.importedGenericTaskInfoFromSelector(
+					base,
+				); ok {
+				g.registerImportedGenericTaskInstance(
+					pkgName,
+					taskName,
+					info,
+					e.Args,
+				)
+
+				g.collectGenericStructInstancesFromGenericArgsForParams(
+					info.GenericParams,
+					e.Args,
+				)
+
 				handledAsTask = true
 			}
 		}
@@ -1471,7 +2543,9 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 
 		if !handledAsTask {
 			for _, arg := range e.Args {
-				g.collectGenericStructInstancesFromGenericArg(arg)
+				g.collectGenericStructInstancesFromGenericArg(
+					arg,
+				)
 			}
 		}
 
@@ -1485,11 +2559,23 @@ func (g *Generator) collectGenericStructInstancesFromExpr(expr ast.Expr) {
 		g.collectGenericStructInstancesFromExpr(e.Left)
 		g.collectGenericStructInstancesFromExpr(e.Index)
 
+		if resolution, ok := g.indexResolutions[e]; ok &&
+			resolution.Candidate != nil {
+			_, _, _ = g.semanticTaskSelection(
+				resolution.Candidate,
+				resolution.PackageName,
+				resolution.GenericArguments,
+				e.Span(),
+			)
+		}
+
 	case *ast.CompoundLiteralExpr:
 		g.collectGenericStructInstancesFromType(e.Type)
 
 		for _, field := range e.Fields {
-			g.collectGenericStructInstancesFromExpr(field.Value)
+			g.collectGenericStructInstancesFromExpr(
+				field.Value,
+			)
 		}
 
 		for _, value := range e.Values {
@@ -1757,98 +2843,195 @@ func typeAstFromGenericArgForCGen(arg ast.GenericArg) ast.Type {
 	return nil
 }
 
-func (g *Generator) substituteExprForCGen(expr ast.Expr, subst map[string]ast.GenericArg) ast.Expr {
+func (g *Generator) substituteExprForCGen(
+	expr ast.Expr,
+	subst map[string]ast.GenericArg,
+) ast.Expr {
 	if expr == nil {
 		return nil
 	}
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		if arg, ok := subst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
-			if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+		if arg, ok := subst[e.Name.Name]; ok &&
+			arg.Kind == ast.GenericArgExpr &&
+			arg.Expr != nil {
+			if genericArgIsSingleNameForCGen(
+				arg,
+				e.Name.Name,
+			) {
 				return e
 			}
 
-			return g.substituteExprForCGen(arg.Expr, subst)
+			return g.substituteExprForCGen(
+				arg.Expr,
+				subst,
+			)
 		}
 
 		return e
 
 	case *ast.UnaryExpr:
 		return &ast.UnaryExpr{
-			Op:   e.Op,
-			Expr: g.substituteExprForCGen(e.Expr, subst),
-			Loc:  e.Loc,
+			Op: e.Op,
+			Expr: g.substituteExprForCGen(
+				e.Expr,
+				subst,
+			),
+			Loc: e.Loc,
 		}
 
 	case *ast.BinaryExpr:
 		return &ast.BinaryExpr{
-			Left:  g.substituteExprForCGen(e.Left, subst),
-			Op:    e.Op,
-			Right: g.substituteExprForCGen(e.Right, subst),
-			Loc:   e.Loc,
+			Left: g.substituteExprForCGen(
+				e.Left,
+				subst,
+			),
+			Op: e.Op,
+			Right: g.substituteExprForCGen(
+				e.Right,
+				subst,
+			),
+			Loc: e.Loc,
 		}
 
 	case *ast.CallExpr:
-		args := make([]ast.Expr, 0, len(e.Args))
+		args := make(
+			[]ast.Expr,
+			0,
+			len(e.Args),
+		)
+
 		for _, arg := range e.Args {
-			args = append(args, g.substituteExprForCGen(arg, subst))
+			args = append(
+				args,
+				g.substituteExprForCGen(
+					arg,
+					subst,
+				),
+			)
 		}
 
-		return &ast.CallExpr{
-			Callee: g.substituteExprForCGen(e.Callee, subst),
-			Args:   args,
-			Loc:    e.Loc,
+		out := &ast.CallExpr{
+			Callee: g.substituteExprForCGen(
+				e.Callee,
+				subst,
+			),
+			Args: args,
+			Loc:  e.Loc,
 		}
+
+		if resolution, ok := g.lenResolutions[e]; ok {
+			g.lenResolutions[out] = resolution
+		}
+
+		return out
 
 	case *ast.GenericExpr:
-		args := make([]ast.GenericArg, 0, len(e.Args))
+		args := make(
+			[]ast.GenericArg,
+			0,
+			len(e.Args),
+		)
+
 		for _, arg := range e.Args {
-			args = append(args, g.substituteGenericArgForCGen(arg, subst))
+			args = append(
+				args,
+				g.substituteGenericArgForCGen(
+					arg,
+					subst,
+				),
+			)
 		}
 
 		return &ast.GenericExpr{
-			Base: g.substituteExprForCGen(e.Base, subst),
+			Base: g.substituteExprForCGen(
+				e.Base,
+				subst,
+			),
 			Args: args,
 			Loc:  e.Loc,
 		}
 
 	case *ast.SpreadExpr:
 		return &ast.SpreadExpr{
-			Expr: g.substituteExprForCGen(e.Expr, subst),
-			Loc:  e.Loc,
+			Expr: g.substituteExprForCGen(
+				e.Expr,
+				subst,
+			),
+			Loc: e.Loc,
 		}
 
 	case *ast.SelectorExpr:
 		return &ast.SelectorExpr{
-			Left: g.substituteExprForCGen(e.Left, subst),
+			Left: g.substituteExprForCGen(
+				e.Left,
+				subst,
+			),
 			Name: e.Name,
 			Loc:  e.Loc,
 		}
 
 	case *ast.IndexExpr:
-		return &ast.IndexExpr{
-			Left:  g.substituteExprForCGen(e.Left, subst),
-			Index: g.substituteExprForCGen(e.Index, subst),
-			Loc:   e.Loc,
+		out := &ast.IndexExpr{
+			Left: g.substituteExprForCGen(
+				e.Left,
+				subst,
+			),
+			Index: g.substituteExprForCGen(
+				e.Index,
+				subst,
+			),
+			Loc: e.Loc,
 		}
+
+		if resolution, ok := g.indexResolutions[e]; ok {
+			g.indexResolutions[out] = resolution
+		}
+
+		return out
 
 	case *ast.CompoundLiteralExpr:
-		fields := make([]ast.LiteralField, 0, len(e.Fields))
+		fields := make(
+			[]ast.LiteralField,
+			0,
+			len(e.Fields),
+		)
+
 		for _, field := range e.Fields {
-			fields = append(fields, ast.LiteralField{
-				Name:  field.Name,
-				Value: g.substituteExprForCGen(field.Value, subst),
-			})
+			fields = append(
+				fields,
+				ast.LiteralField{
+					Name: field.Name,
+					Value: g.substituteExprForCGen(
+						field.Value,
+						subst,
+					),
+				},
+			)
 		}
 
-		values := make([]ast.Expr, 0, len(e.Values))
+		values := make(
+			[]ast.Expr,
+			0,
+			len(e.Values),
+		)
+
 		for _, value := range e.Values {
-			values = append(values, g.substituteExprForCGen(value, subst))
+			values = append(
+				values,
+				g.substituteExprForCGen(
+					value,
+					subst,
+				),
+			)
 		}
 
 		return &ast.CompoundLiteralExpr{
-			Type:   g.substituteTypeAstForCGen(e.Type, subst),
+			Type: g.substituteTypeAstForCGen(
+				e.Type,
+				subst,
+			),
 			Fields: fields,
 			Values: values,
 			Loc:    e.Loc,
@@ -4509,7 +5692,10 @@ func (g *Generator) emitBlockStatements(block *ast.BlockStmt) {
 func (g *Generator) emitStmt(stmt ast.Stmt) {
 	switch s := stmt.(type) {
 	case *ast.DeclStmt:
-		g.error(s.Span(), "local declarations are not supported by C codegen yet")
+		g.error(
+			s.Span(),
+			"local declarations are not supported by C codegen yet",
+		)
 
 	case *ast.BlockStmt:
 		g.line("{")
@@ -4533,16 +5719,20 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 		g.emitDeferStmt(s)
 
 	case *ast.SealStmt:
-		// `seal` is a checker/language rule. It has no first-backend C output.
+		// `seal` is a checker/language rule.
+		// It has no first-backend C output.
 
 	case *ast.ExprStmt:
-		g.linef("%s;", g.emitExpr(s.Expr, nil))
+		g.linef(
+			"%s;",
+			g.emitExpr(s.Expr, nil),
+		)
 
 	case *ast.AssignStmt:
-		leftType := g.inferExprType(s.Left, nil)
-		left := g.emitExpr(s.Left, nil)
-		right := g.emitExpr(s.Right, &leftType)
-		g.linef("%s %s %s;", left, g.cAssignOp(s.Op), right)
+		g.linef(
+			"%s;",
+			g.emitAssignmentExpr(s),
+		)
 
 	case *ast.VarDeclStmt:
 		g.emitVarDeclStmt(s)
@@ -4552,15 +5742,17 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 
 	case *ast.IfStmt:
 		cond := g.emitExpr(s.Cond, &CBool)
+
 		g.linef("if (%s) {", cond)
 		g.indent++
 
 		oldScope := g.scope
 		g.scope = newScope(oldScope)
+
 		g.emitBlockStatements(s.Then)
 		g.emitDefersInScope(g.scope)
-		g.scope = oldScope
 
+		g.scope = oldScope
 		g.indent--
 
 		if s.Else != nil {
@@ -4569,10 +5761,11 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 
 			oldScope := g.scope
 			g.scope = newScope(oldScope)
+
 			g.emitStmt(s.Else)
 			g.emitDefersInScope(g.scope)
-			g.scope = oldScope
 
+			g.scope = oldScope
 			g.indent--
 			g.line("}")
 		} else {
@@ -4689,21 +5882,30 @@ func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 	g.linef("return %s;", resultTemp)
 }
 
-func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
+func (g *Generator) emitVarDeclStmt(
+	s *ast.VarDeclStmt,
+) {
 	var typ CType
 
-	if s.HasType {
+	switch {
+	case s.HasType:
 		typ = g.cTypeFromAstInContext(s.Type)
-	} else if s.HasValue {
+
+	case s.HasValue:
 		typ = g.inferExprType(s.Value, nil)
-	} else {
+
+	default:
 		typ = CInvalid
 	}
 
 	if s.Name.Name == "_" {
 		if s.HasValue {
-			g.linef("(void)(%s);", g.emitExpr(s.Value, &typ))
+			g.linef(
+				"(void)(%s);",
+				g.emitExpr(s.Value, &typ),
+			)
 		}
+
 		return
 	}
 
@@ -4711,6 +5913,12 @@ func (g *Generator) emitVarDeclStmt(s *ast.VarDeclStmt) {
 
 	if s.HasValue {
 		value := g.emitExpr(s.Value, &typ)
+
+		g.linef(
+			"%s = %s;",
+			typ.Decl(s.Name.Name),
+			value,
+		)
 		return
 	}
 
@@ -4769,16 +5977,21 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 	g.scope = oldScope
 }
 
-func (g *Generator) emitForPart(stmt ast.Stmt) string {
+func (g *Generator) emitForPart(
+	stmt ast.Stmt,
+) string {
 	switch s := stmt.(type) {
 	case *ast.VarDeclStmt:
 		var typ CType
 
-		if s.HasType {
+		switch {
+		case s.HasType:
 			typ = g.cTypeFromAstInContext(s.Type)
-		} else if s.HasValue {
+
+		case s.HasValue:
 			typ = g.inferExprType(s.Value, nil)
-		} else {
+
+		default:
 			typ = CInvalid
 		}
 
@@ -4786,19 +5999,27 @@ func (g *Generator) emitForPart(stmt ast.Stmt) string {
 
 		if s.HasValue {
 			value := g.emitExpr(s.Value, &typ)
-			return fmt.Sprintf("%s = %s", typ.Decl(s.Name.Name), value)
+
+			return fmt.Sprintf(
+				"%s = %s",
+				typ.Decl(s.Name.Name),
+				value,
+			)
 		}
 
 		return typ.Decl(s.Name.Name)
 
 	case *ast.AssignStmt:
-		return fmt.Sprintf("%s %s %s", g.emitExpr(s.Left, nil), g.cAssignOp(s.Op), g.emitExpr(s.Right, nil))
+		return g.emitAssignmentExpr(s)
 
 	case *ast.ExprStmt:
 		return g.emitExpr(s.Expr, nil)
 
 	default:
-		g.error(stmt.Span(), "unsupported for-loop component in C codegen")
+		g.error(
+			stmt.Span(),
+			"unsupported for-loop component in C codegen",
+		)
 		return ""
 	}
 }
@@ -5636,13 +6857,21 @@ func (g *Generator) taskCallNameFromGenericArg(
 	return "0", true
 }
 
-func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
-	if expected != nil && expected.SealName == "any" {
+func (g *Generator) emitExpr(
+	expr ast.Expr,
+	expected *CType,
+) string {
+	if expected != nil &&
+		expected.SealName == "any" {
 		return g.emitAnyExpr(expr)
 	}
 
 	if expected != nil {
-		if value, ok := g.tryEmitInterfaceConversion(*expected, expr); ok {
+		if value, ok :=
+			g.tryEmitInterfaceConversion(
+				*expected,
+				expr,
+			); ok {
 			return value
 		}
 	}
@@ -5650,31 +6879,53 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if g.scope != nil {
-			if _, ok := g.scope.lookup(e.Name.Name); ok {
+			if _, ok :=
+				g.scope.lookup(e.Name.Name); ok {
 				return e.Name.Name
 			}
 		}
 
 		if g.genericSubst != nil {
-			if arg, ok := g.genericSubst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
-				if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+			if arg, ok :=
+				g.genericSubst[e.Name.Name]; ok &&
+				arg.Kind == ast.GenericArgExpr &&
+				arg.Expr != nil {
+				if genericArgIsSingleNameForCGen(
+					arg,
+					e.Name.Name,
+				) {
 					return e.Name.Name
 				}
 
-				return g.emitExpr(arg.Expr, expected)
+				return g.emitExpr(
+					arg.Expr,
+					expected,
+				)
 			}
 		}
 
 		return e.Name.Name
 
 	case *ast.DotIdentExpr:
-		if expected != nil && expected.SealName != "" {
-			if _, ok := g.enums[expected.SealName]; ok {
-				return fmt.Sprintf("%s_%s", expected.SealName, e.Name.Name)
+		if expected != nil &&
+			expected.SealName != "" {
+			if _, ok :=
+				g.enums[expected.SealName]; ok {
+				return fmt.Sprintf(
+					"%s_%s",
+					expected.SealName,
+					e.Name.Name,
+				)
 			}
 		}
 
-		g.error(e.Span(), fmt.Sprintf("enum literal .%s needs C codegen context", e.Name.Name))
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"enum literal .%s needs C codegen context",
+				e.Name.Name,
+			),
+		)
 		return "0"
 
 	case *ast.IntLitExpr:
@@ -5693,7 +6944,10 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return g.emitCharLiteral(e)
 
 	case *ast.GenericExpr:
-		g.error(e.Span(), "generic expression cannot be emitted as a value")
+		g.error(
+			e.Span(),
+			"generic expression cannot be emitted as a value",
+		)
 		return "0"
 
 	case *ast.BoolLitExpr:
@@ -5704,112 +6958,195 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return "false"
 
 	case *ast.NilLitExpr:
-		if expected != nil && g.isUnion(*expected) {
-			return fmt.Sprintf("(%s){.tag = %s_Tag_nil}", expected.Name, expected.SealName)
+		if expected != nil &&
+			g.isUnion(*expected) {
+			return fmt.Sprintf(
+				"(%s){.tag = %s_Tag_nil}",
+				expected.Name,
+				expected.SealName,
+			)
 		}
 
-		if expected != nil && g.isInterfaceCType(*expected) {
+		if expected != nil &&
+			g.isInterfaceCType(*expected) {
 			return g.nilInterfaceValue(*expected)
 		}
 
 		return "NULL"
 
 	case *ast.UnaryExpr:
-		return fmt.Sprintf("(%s%s)", g.cUnaryOp(e.Op), g.emitExpr(e.Expr, nil))
+		return fmt.Sprintf(
+			"(%s%s)",
+			g.cUnaryOp(e.Op),
+			g.emitExpr(e.Expr, nil),
+		)
 
 	case *ast.BinaryExpr:
 		leftType := g.inferExprType(e.Left, nil)
 		rightType := g.inferExprType(e.Right, nil)
 
 		if g.hasOperatorOverload(e.Op.String()) {
-			if candidate, ok := g.resolveOverload(e.Op.String(), []CType{leftType, rightType}); ok {
-				left := g.emitExpr(e.Left, &leftType)
-				right := g.emitExpr(e.Right, &rightType)
-				return fmt.Sprintf("%s(%s, %s)", g.cTaskName(candidate), left, right)
+			if candidate, ok :=
+				g.resolveOverload(
+					e.Op.String(),
+					[]CType{
+						leftType,
+						rightType,
+					},
+				); ok {
+				left := g.emitExpr(
+					e.Left,
+					&leftType,
+				)
+
+				right := g.emitExpr(
+					e.Right,
+					&rightType,
+				)
+
+				return fmt.Sprintf(
+					"%s(%s, %s)",
+					g.cTaskName(candidate),
+					left,
+					right,
+				)
 			}
 		}
 
-		if e.Op == token.NotEq && g.hasOperatorOverload("==") {
-			if candidate, ok := g.resolveOverload("==", []CType{leftType, rightType}); ok {
-				left := g.emitExpr(e.Left, &leftType)
-				right := g.emitExpr(e.Right, &rightType)
-				return fmt.Sprintf("(!%s(%s, %s))", g.cTaskName(candidate), left, right)
+		if e.Op == token.NotEq &&
+			g.hasOperatorOverload("==") {
+			if candidate, ok :=
+				g.resolveOverload(
+					"==",
+					[]CType{
+						leftType,
+						rightType,
+					},
+				); ok {
+				left := g.emitExpr(
+					e.Left,
+					&leftType,
+				)
+
+				right := g.emitExpr(
+					e.Right,
+					&rightType,
+				)
+
+				return fmt.Sprintf(
+					"(!%s(%s, %s))",
+					g.cTaskName(candidate),
+					left,
+					right,
+				)
 			}
 		}
 
 		left := g.emitExpr(e.Left, nil)
 		right := g.emitExpr(e.Right, nil)
-		return fmt.Sprintf("(%s %s %s)", left, g.cBinaryOp(e.Op), right)
+
+		return fmt.Sprintf(
+			"(%s %s %s)",
+			left,
+			g.cBinaryOp(e.Op),
+			right,
+		)
 
 	case *ast.CallExpr:
 		return g.emitCallExpr(e)
 
 	case *ast.SpreadExpr:
-		g.error(e.Span(), "spread can only be emitted as a call argument")
+		g.error(
+			e.Span(),
+			"spread can only be emitted as a call argument",
+		)
 		return "0"
 
 	case *ast.SelectorExpr:
-		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			if _, ok := g.packages[id.Name.Name]; ok {
-				// Package selector as value is only valid through calls for now.
-				return cPackageTaskName(id.Name.Name, e.Name.Name)
+		if id, ok :=
+			e.Left.(*ast.IdentExpr); ok {
+			if _, ok :=
+				g.packages[id.Name.Name]; ok {
+				return cPackageTaskName(
+					id.Name.Name,
+					e.Name.Name,
+				)
 			}
 		}
 
 		left := g.emitExpr(e.Left, nil)
-		leftType := g.inferExprType(e.Left, nil)
+		leftType :=
+			g.inferExprType(e.Left, nil)
 
 		if leftType.SealName == "string" {
-			g.error(e.Name.Span(), fmt.Sprintf("string has no field %q; use size(s) or s[i]", e.Name.Name))
+			g.error(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"string has no field %q",
+					e.Name.Name,
+				),
+			)
 			return "0"
 		}
 
 		if leftType.SealName == "cstring" {
-			g.error(e.Name.Span(), fmt.Sprintf("cstring has no field %q", e.Name.Name))
+			g.error(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"cstring has no field %q",
+					e.Name.Name,
+				),
+			)
 			return "0"
 		}
 
-		if strings.HasSuffix(leftType.SealName, "*") {
-			return fmt.Sprintf("(%s)->%s", left, e.Name.Name)
+		if strings.HasPrefix(
+			leftType.SealName,
+			"*",
+		) {
+			return fmt.Sprintf(
+				"(%s)->%s",
+				left,
+				e.Name.Name,
+			)
 		}
 
-		if strings.HasPrefix(leftType.SealName, "*") {
-			return fmt.Sprintf("(%s)->%s", left, e.Name.Name)
-		}
-
-		return fmt.Sprintf("(%s).%s", left, e.Name.Name)
+		return fmt.Sprintf(
+			"(%s).%s",
+			left,
+			e.Name.Name,
+		)
 
 	case *ast.IndexExpr:
-		leftType := g.inferExprType(e.Left, nil)
-		left := g.emitExpr(e.Left, nil)
-		index := g.emitExpr(e.Index, &CInt)
-
-		if leftType.SealName == "rawptr" {
-			return fmt.Sprintf("((unsigned char *)(%s))[%s]", left, index)
-		}
-
-		if leftType.IsVariadic {
-			return fmt.Sprintf("(%s).data[%s]", left, index)
-		}
-
-		if g.isByteIndexableCType(leftType) {
-			return g.emitByteIndexExpr(e, leftType, left, index)
-		}
-
-		g.error(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
-		return "0"
+		return g.emitIndexExpr(e)
 
 	case *ast.CompoundLiteralExpr:
 		typ := g.cTypeFromAstInContext(e.Type)
 
-		if _, ok := g.distincts[typ.SealName]; ok {
-			g.error(e.Span(), fmt.Sprintf("distinct type %s cannot be constructed with a literal; use cast<%s>(value)", typ.SealName, typ.SealName))
+		if _, ok :=
+			g.distincts[typ.SealName]; ok {
+			g.error(
+				e.Span(),
+				fmt.Sprintf(
+					"distinct type %s cannot be constructed with a literal; use cast<%s>(value)",
+					typ.SealName,
+					typ.SealName,
+				),
+			)
 			return "0"
 		}
 
-		if expected != nil && g.isUnion(*expected) && g.unionHasMember(expected.SealName, typ.SealName) {
-			payload := g.emitCompoundLiteral(e, typ)
-			return fmt.Sprintf("(%s){.tag = %s_Tag_%s, .as.%s = %s}",
+		if expected != nil &&
+			g.isUnion(*expected) &&
+			g.unionHasMember(
+				expected.SealName,
+				typ.SealName,
+			) {
+			payload :=
+				g.emitCompoundLiteral(e, typ)
+
+			return fmt.Sprintf(
+				"(%s){.tag = %s_Tag_%s, .as.%s = %s}",
 				expected.Name,
 				expected.SealName,
 				typ.SealName,
@@ -5821,7 +7158,11 @@ func (g *Generator) emitExpr(expr ast.Expr, expected *CType) string {
 		return g.emitCompoundLiteral(e, typ)
 	}
 
-	g.error(expr.Span(), "unsupported expression in C codegen")
+	g.error(
+		expr.Span(),
+		"unsupported expression in C codegen",
+	)
+
 	return "0"
 }
 
@@ -6037,48 +7378,61 @@ func (g *Generator) emitGenericCallToName(name string, paramTypes []ast.Type, pa
 	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
 }
 
-func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string) string {
-	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return g.emitGenericCall(gen, e.Args, preparedArgs)
+func (g *Generator) emitCallExprWithArgs(
+	e *ast.CallExpr,
+	preparedArgs []string,
+) string {
+	if gen, ok :=
+		e.Callee.(*ast.GenericExpr); ok {
+		return g.emitGenericCall(
+			gen,
+			e.Args,
+			preparedArgs,
+		)
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+	if id, ok :=
+		e.Callee.(*ast.IdentExpr); ok {
 		isLocal := false
+
 		if g.scope != nil {
-			_, isLocal = g.scope.lookup(id.Name.Name)
+			_, isLocal =
+				g.scope.lookup(id.Name.Name)
 		}
 
 		if !isLocal {
-			if name, ok := g.genericTaskParamCallName(id.Name.Name); ok {
-				info, hasInfo := g.genericTaskParamInfo(id.Name.Name)
+			if name, ok :=
+				g.genericTaskParamCallName(
+					id.Name.Name,
+				); ok {
+				info, hasInfo :=
+					g.genericTaskParamInfo(
+						id.Name.Name,
+					)
+
 				if hasInfo {
-					return g.emitDirectCNamedCall(name, e.Args, preparedArgs, info.ParamTypes)
+					return g.emitDirectCNamedCall(
+						name,
+						e.Args,
+						preparedArgs,
+						info.ParamTypes,
+					)
 				}
 
-				return g.emitDirectCNamedCall(name, e.Args, preparedArgs, nil)
+				return g.emitDirectCNamedCall(
+					name,
+					e.Args,
+					preparedArgs,
+					nil,
+				)
 			}
 		}
 
-		if kind, ok := g.primitiveTaskKind(id.Name.Name); ok {
-			switch kind {
-			case builtin.TaskLen:
-				return g.emitLenCall(e)
-
-			case builtin.TaskSize:
-				return g.emitSizeCall(e)
-
-			case builtin.TaskAssert:
-				return g.emitAssertCall(e)
-
-			case builtin.TaskPanic:
-				return g.emitPanicCall(e)
-
-			case builtin.TaskTrap:
-				return g.emitNoArgRuntimeCall("trap", "seal_trap", e)
-
-			case builtin.TaskUnreachable:
-				return g.emitNoArgRuntimeCall("unreachable", "seal_unreachable", e)
-			}
+		if _, ok := g.lenResolutions[e]; ok {
+			return g.emitLenCall(
+				e,
+				preparedArgs,
+			)
 		}
 
 		if packageName, _, ok :=
@@ -6094,10 +7448,18 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		}
 
 		if len(e.Args) > 0 {
-			firstType := g.inferExprType(e.Args[0], nil)
+			firstType :=
+				g.inferExprType(
+					e.Args[0],
+					nil,
+				)
 
 			if g.isInterfaceCType(firstType) {
-				if _, _, ok := g.lookupInterfaceRequirement(firstType, id.Name.Name); ok {
+				if _, _, ok :=
+					g.lookupInterfaceRequirement(
+						firstType,
+						id.Name.Name,
+					); ok {
 					return g.emitInterfaceDispatchCall(
 						firstType,
 						id.Name.Name,
@@ -6109,25 +7471,94 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		}
 
 		if _, ok := g.tasks[id.Name.Name]; ok {
-			return g.emitTaskCall(id.Name.Name, e.Args, preparedArgs)
+			return g.emitTaskCall(
+				id.Name.Name,
+				e.Args,
+				preparedArgs,
+			)
 		}
 
-		if _, ok := g.overloads[id.Name.Name]; ok {
-			argTypes := make([]CType, 0, len(e.Args))
+		if _, ok :=
+			g.overloads[id.Name.Name]; ok {
+			argTypes := make(
+				[]CType,
+				0,
+				len(e.Args),
+			)
+
 			for _, arg := range e.Args {
-				argTypes = append(argTypes, g.inferExprType(arg, nil))
+				argTypes = append(
+					argTypes,
+					g.inferExprType(
+						arg,
+						nil,
+					),
+				)
 			}
 
-			if candidate, ok := g.resolveOverload(id.Name.Name, argTypes); ok {
-				return g.emitTaskCall(candidate, e.Args, preparedArgs)
+			if candidate, ok :=
+				g.resolveOverload(
+					id.Name.Name,
+					argTypes,
+				); ok {
+				return g.emitTaskCall(
+					candidate,
+					e.Args,
+					preparedArgs,
+				)
+			}
+		}
+
+		if kind, ok :=
+			g.primitiveTaskKind(
+				id.Name.Name,
+			); ok {
+			switch kind {
+			case builtin.TaskLen:
+				g.error(
+					e.Span(),
+					"missing checker resolution for primitive len call",
+				)
+				return "0"
+
+			case builtin.TaskSize:
+				return g.emitSizeCall(e)
+
+			case builtin.TaskAssert:
+				return g.emitAssertCall(e)
+
+			case builtin.TaskPanic:
+				return g.emitPanicCall(e)
+
+			case builtin.TaskTrap:
+				return g.emitNoArgRuntimeCall(
+					"trap",
+					"seal_trap",
+					e,
+				)
+
+			case builtin.TaskUnreachable:
+				return g.emitNoArgRuntimeCall(
+					"unreachable",
+					"seal_unreachable",
+					e,
+				)
 			}
 		}
 	}
 
-	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
-		if id, ok := selector.Left.(*ast.IdentExpr); ok {
-			if pkg := g.packages[id.Name.Name]; pkg != nil {
-				return g.emitPackageTaskCall(id.Name.Name, selector.Name.Name, e.Args, preparedArgs)
+	if selector, ok :=
+		e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok :=
+			selector.Left.(*ast.IdentExpr); ok {
+			if pkg :=
+				g.packages[id.Name.Name]; pkg != nil {
+				return g.emitPackageTaskCall(
+					id.Name.Name,
+					selector.Name.Name,
+					e.Args,
+					preparedArgs,
+				)
 			}
 		}
 	}
@@ -6138,11 +7569,18 @@ func (g *Generator) emitCallExprWithArgs(e *ast.CallExpr, preparedArgs []string)
 		args = append(args, preparedArgs...)
 	} else {
 		for _, arg := range e.Args {
-			args = append(args, g.emitExpr(arg, nil))
+			args = append(
+				args,
+				g.emitExpr(arg, nil),
+			)
 		}
 	}
 
-	return fmt.Sprintf("%s(%s)", g.emitExpr(e.Callee, nil), strings.Join(args, ", "))
+	return fmt.Sprintf(
+		"%s(%s)",
+		g.emitExpr(e.Callee, nil),
+		strings.Join(args, ", "),
+	)
 }
 
 func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Expr) string {
@@ -6463,20 +7901,70 @@ func (g *Generator) sealAnyFieldFor(t CType) (string, bool) {
 	return spec.AnyField, true
 }
 
-func (g *Generator) emitLenCall(e *ast.CallExpr) string {
-	if len(e.Args) != 1 {
-		g.error(e.Span(), "len expects 1 argument")
+func (g *Generator) emitLenCall(
+	e *ast.CallExpr,
+	preparedArgs []string,
+) string {
+	resolution, ok := g.lenResolutions[e]
+	if !ok {
+		g.error(
+			e.Span(),
+			"missing checker resolution for len call",
+		)
 		return "0"
 	}
 
-	argType := g.inferExprType(e.Args[0], nil)
-	arg := g.emitExpr(e.Args[0], nil)
-
-	if argType.IsVariadic {
-		return fmt.Sprintf("((uintptr_t)(%s).len)", arg)
+	if len(e.Args) != 1 {
+		g.error(
+			e.Span(),
+			"len expects 1 argument",
+		)
+		return "0"
 	}
 
-	g.error(e.Args[0].Span(), fmt.Sprintf("len does not support %s", argType.String()))
+	if resolution.Candidate != nil {
+		name, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			e.Span(),
+		)
+		if !ok {
+			return "0"
+		}
+
+		return g.emitSemanticTaskCall(
+			name,
+			info,
+			e.Args,
+			preparedArgs,
+		)
+	}
+
+	argType := g.inferExprType(e.Args[0], nil)
+
+	arg := ""
+	if len(preparedArgs) > 0 {
+		arg = preparedArgs[0]
+	} else {
+		arg = g.emitExpr(e.Args[0], nil)
+	}
+
+	if argType.IsVariadic {
+		return fmt.Sprintf(
+			"((uintptr_t)(%s).len)",
+			arg,
+		)
+	}
+
+	g.error(
+		e.Args[0].Span(),
+		fmt.Sprintf(
+			"checker selected builtin len for unsupported type %s",
+			argType.String(),
+		),
+	)
+
 	return "0"
 }
 
@@ -6620,26 +8108,60 @@ func (g *Generator) emitMultiVarDeclStmt(s *ast.MultiVarDeclStmt) {
 	}
 }
 
-func (g *Generator) emitSpreadAsVariadic(elem CType, spread *ast.SpreadExpr) string {
+func (g *Generator) emitSpreadAsVariadic(
+	elem CType,
+	spread *ast.SpreadExpr,
+) string {
 	variadicType := g.variadicCType(elem)
-	srcType := g.inferExprType(spread.Expr, nil)
+	srcType := g.inferExprType(
+		spread.Expr,
+		nil,
+	)
 
 	if srcType.IsVariadic {
 		if srcType.Elem == nil {
-			g.error(spread.Span(), "cannot spread invalid variadic value")
-			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+			g.error(
+				spread.Span(),
+				"cannot spread invalid variadic value",
+			)
+
+			return fmt.Sprintf(
+				"(%s){.data = NULL, .len = 0}",
+				variadicType.Name,
+			)
 		}
 
 		if srcType.Elem.SealName != elem.SealName {
-			g.error(spread.Span(), fmt.Sprintf("cannot spread %s into ...%s", srcType.String(), elem.SealName))
-			return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+			g.error(
+				spread.Span(),
+				fmt.Sprintf(
+					"cannot spread %s into ...%s",
+					srcType.String(),
+					elem.SealName,
+				),
+			)
+
+			return fmt.Sprintf(
+				"(%s){.data = NULL, .len = 0}",
+				variadicType.Name,
+			)
 		}
 
 		return g.emitExpr(spread.Expr, nil)
 	}
 
-	g.error(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", srcType.String()))
-	return fmt.Sprintf("(%s){.data = NULL, .len = 0}", variadicType.Name)
+	g.error(
+		spread.Span(),
+		fmt.Sprintf(
+			"cannot spread %s; expected variadic value",
+			srcType.String(),
+		),
+	)
+
+	return fmt.Sprintf(
+		"(%s){.data = NULL, .len = 0}",
+		variadicType.Name,
+	)
 }
 
 func (g *Generator) emitAnyRuntimeSupport() {
@@ -6912,70 +8434,6 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("} sealString;")
 	g.line("")
 
-	g.indent++
-	g.line("if (*offset >= byte_len) return 0;")
-	g.line("unsigned char b0 = data[*offset];")
-	g.line("if (b0 < 0x80) { *offset += 1; return (uint32_t)b0; }")
-	g.line("if ((b0 & 0xE0) == 0xC0 && *offset + 1 < byte_len) {")
-	g.indent++
-	g.line("uint32_t cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(data[*offset + 1] & 0x3F);")
-	g.line("*offset += 2;")
-	g.line("return cp;")
-	g.indent--
-	g.line("}")
-	g.line("if ((b0 & 0xF0) == 0xE0 && *offset + 2 < byte_len) {")
-	g.indent++
-	g.line("uint32_t cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(data[*offset + 1] & 0x3F) << 6) | (uint32_t)(data[*offset + 2] & 0x3F);")
-	g.line("*offset += 3;")
-	g.line("return cp;")
-	g.indent--
-	g.line("}")
-	g.line("if ((b0 & 0xF8) == 0xF0 && *offset + 3 < byte_len) {")
-	g.indent++
-	g.line("uint32_t cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(data[*offset + 1] & 0x3F) << 12) | ((uint32_t)(data[*offset + 2] & 0x3F) << 6) | (uint32_t)(data[*offset + 3] & 0x3F);")
-	g.line("*offset += 4;")
-	g.line("return cp;")
-	g.indent--
-	g.line("}")
-	g.line("*offset += 1;")
-	g.line("return 0xFFFD;")
-	g.indent--
-	g.line("}")
-	g.line("")
-
-	g.indent++
-	g.line("size_t offset = 0;")
-	g.line("size_t count = 0;")
-	g.line("while (offset < s.byte_len) {")
-	g.indent++
-	g.line("(void)sealUtf8DecodeAdvance(s.data, s.byte_len, &offset);")
-	g.line("count += 1;")
-	g.indent--
-	g.line("}")
-	g.line("return count;")
-	g.indent--
-	g.line("}")
-	g.line("")
-
-	g.indent++
-	g.line("size_t char_len = sealString_len(s);")
-	g.line("ptrdiff_t resolved = index;")
-	g.line("if (resolved < 0) resolved = (ptrdiff_t)char_len + resolved;")
-	g.line("if (resolved < 0 || (size_t)resolved >= char_len) return 0;")
-	g.line("size_t offset = 0;")
-	g.line("size_t current = 0;")
-	g.line("while (offset < s.byte_len) {")
-	g.indent++
-	g.line("uint32_t cp = sealUtf8DecodeAdvance(s.data, s.byte_len, &offset);")
-	g.line("if (current == (size_t)resolved) return cp;")
-	g.line("current += 1;")
-	g.indent--
-	g.line("}")
-	g.line("return 0;")
-	g.indent--
-	g.line("}")
-	g.line("")
-
 	g.emitAnyRuntimeSupport()
 
 	g.line("static inline void seal_trap(void) {")
@@ -7002,7 +8460,7 @@ func (g *Generator) emitRuntimeSupport() {
 
 	g.line("static inline void seal_panic_empty(void) {")
 	g.indent++
-	g.line("fprintf(stderr, \"panic\\n\");")
+	g.line(`fprintf(stderr, "panic\n");`)
 	g.line("abort();")
 	g.indent--
 	g.line("}")
@@ -7010,7 +8468,7 @@ func (g *Generator) emitRuntimeSupport() {
 
 	g.line("static inline void seal_panic_cstring(const char *message) {")
 	g.indent++
-	g.line("fprintf(stderr, \"panic: %s\\n\", message ? message : \"<null>\");")
+	g.line(`fprintf(stderr, "panic: %s\n", message ? message : "<null>");`)
 	g.line("abort();")
 	g.indent--
 	g.line("}")
@@ -7018,7 +8476,7 @@ func (g *Generator) emitRuntimeSupport() {
 
 	g.line("static inline void seal_panic_string(sealString message) {")
 	g.indent++
-	g.line("fprintf(stderr, \"panic: %.*s\\n\", (int)message.byte_len, (const char *)message.data);")
+	g.line(`fprintf(stderr, "panic: %.*s\n", (int)message.byte_len, (const char *)message.data);`)
 	g.line("abort();")
 	g.indent--
 	g.line("}")
@@ -7036,18 +8494,21 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("")
 }
 
-func (g *Generator) emitVariadicRuntimeType(elem CType) {
+func (g *Generator) emitVariadicRuntimeType(
+	elem CType,
+) {
 	variadicType := g.variadicCType(elem)
 	name := variadicType.Name
 
 	if g.emittedVariadics[name] {
 		return
 	}
+
 	g.emittedVariadics[name] = true
 
 	g.linef("typedef struct %s {", name)
 	g.indent++
-
+	g.linef("%s *data;", elem.Name)
 	g.line("size_t len;")
 	g.indent--
 	g.linef("} %s;", name)
@@ -7113,112 +8574,188 @@ func argsSpan(args []ast.Expr) source.Span {
 	return args[0].Span()
 }
 
-func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
+func (g *Generator) callReturnTypes(
+	expr ast.Expr,
+) []CType {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return []CType{g.inferExprType(expr, nil)}
-	}
-
-	if id, ok := call.Callee.(*ast.IdentExpr); ok {
-		if results, ok := g.genericTaskParamReturnTypes(id.Name.Name); ok {
-			return results
+		return []CType{
+			g.inferExprType(expr, nil),
 		}
 	}
 
-	if gen, ok := call.Callee.(*ast.GenericExpr); ok {
-		if id, ok := gen.Base.(*ast.IdentExpr); ok {
-			if packageName, taskName, info, found :=
+	if resolution, ok :=
+		g.lenResolutions[call]; ok {
+		if resolution.Candidate == nil {
+			return []CType{CUint}
+		}
+
+		_, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			call.Span(),
+		)
+		if !ok {
+			return []CType{CInvalid}
+		}
+
+		return info.ReturnTypes
+	}
+
+	if id, ok :=
+		call.Callee.(*ast.IdentExpr); ok {
+		if g.scope == nil {
+			if results, ok :=
+				g.genericTaskParamReturnTypes(
+					id.Name.Name,
+				); ok {
+				return results
+			}
+		} else if _, isLocal :=
+			g.scope.lookup(id.Name.Name); !isLocal {
+			if results, ok :=
+				g.genericTaskParamReturnTypes(
+					id.Name.Name,
+				); ok {
+				return results
+			}
+		}
+	}
+
+	if gen, ok :=
+		call.Callee.(*ast.GenericExpr); ok {
+		if id, ok :=
+			gen.Base.(*ast.IdentExpr); ok {
+			if task, ok :=
+				builtin.LookupTask(
+					id.Name.Name,
+				); ok && task.Generic {
+				switch task.Kind {
+				case builtin.TaskAnyIs:
+					return []CType{CBool}
+
+				case builtin.TaskAnyAs,
+					builtin.TaskCast:
+					if len(gen.Args) == 1 {
+						arg :=
+							gen.Args[0]
+
+						if g.genericSubst != nil {
+							arg =
+								g.substituteGenericArgForCGen(
+									arg,
+									g.genericSubst,
+								)
+						}
+
+						return []CType{
+							g.cTypeFromGenericArg(arg),
+						}
+					}
+				}
+
+				return []CType{CInvalid}
+			}
+
+			if packageName,
+				taskName,
+				info,
+				found :=
 				g.importedGenericTaskInfoFromTypeContext(
 					id.Name.Name,
 				); found {
-				callArgs := g.genericArgsInContext(gen.Args)
+				callArgs :=
+					g.genericArgsInContext(
+						gen.Args,
+					)
 
-				name := g.registerImportedGenericTaskInstance(
-					packageName,
-					taskName,
-					info,
-					callArgs,
-				)
+				name :=
+					g.registerImportedGenericTaskInstance(
+						packageName,
+						taskName,
+						info,
+						callArgs,
+					)
 
-				instance := g.importedGenericTasks[name]
+				instance :=
+					g.importedGenericTasks[name]
+
 				if instance == nil {
 					return []CType{CInvalid}
 				}
 
-				return g.importedGenericTaskReturnTypes(instance)
+				return g.importedGenericTaskReturnTypes(
+					instance,
+				)
 			}
 
 			info, ok := g.tasks[id.Name.Name]
-			if ok && len(info.GenericParams) > 0 {
-				if info.Decl == nil {
-					return []CType{CInvalid}
-				}
+			if ok &&
+				len(info.GenericParams) > 0 &&
+				info.Decl != nil {
+				callArgs :=
+					g.genericArgsInContext(
+						gen.Args,
+					)
 
-				callArgs := g.genericArgsInContext(gen.Args)
-				name := g.registerGenericTaskInstance(
-					info.Decl,
-					callArgs,
-				)
+				name :=
+					g.registerGenericTaskInstance(
+						info.Decl,
+						callArgs,
+					)
 
 				instance := g.genericTasks[name]
 				if instance == nil {
 					return []CType{CInvalid}
 				}
 
-				return g.genericTaskReturnTypes(instance)
+				return g.genericTaskReturnTypes(
+					instance,
+				)
 			}
 		}
 
-		if selector, ok := gen.Base.(*ast.SelectorExpr); ok {
-			pkgName, taskName, info, ok :=
-				g.importedGenericTaskInfoFromSelector(selector)
-
-			if ok {
-				callArgs := g.genericArgsInContext(gen.Args)
-
-				name := g.registerImportedGenericTaskInstance(
-					pkgName,
-					taskName,
-					info,
-					callArgs,
+		if selector, ok :=
+			gen.Base.(*ast.SelectorExpr); ok {
+			pkgName,
+				taskName,
+				info,
+				ok :=
+				g.importedGenericTaskInfoFromSelector(
+					selector,
 				)
 
-				instance := g.importedGenericTasks[name]
+			if ok {
+				callArgs :=
+					g.genericArgsInContext(
+						gen.Args,
+					)
+
+				name :=
+					g.registerImportedGenericTaskInstance(
+						pkgName,
+						taskName,
+						info,
+						callArgs,
+					)
+
+				instance :=
+					g.importedGenericTasks[name]
+
 				if instance == nil {
 					return []CType{CInvalid}
 				}
 
-				return g.importedGenericTaskReturnTypes(instance)
+				return g.importedGenericTaskReturnTypes(
+					instance,
+				)
 			}
 		}
 	}
 
-	if id, ok := call.Callee.(*ast.IdentExpr); ok {
-		if g.scope == nil {
-			if results, ok :=
-				g.genericTaskParamReturnTypes(id.Name.Name); ok {
-				return results
-			}
-		} else if _, isLocal :=
-			g.scope.lookup(id.Name.Name); !isLocal {
-			if results, ok :=
-				g.genericTaskParamReturnTypes(id.Name.Name); ok {
-				return results
-			}
-		}
-
-		if id.Name.Name == "len" {
-			return []CType{CUint}
-		}
-
-		if id.Name.Name == "size" {
-			return []CType{CUint}
-		}
-
-		if id.Name.Name == "assert" {
-			return []CType{CVoid}
-		}
-
+	if id, ok :=
+		call.Callee.(*ast.IdentExpr); ok {
 		if _, info, found :=
 			g.importedTaskInfoFromTypeContext(
 				id.Name.Name,
@@ -7227,13 +8764,16 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 		}
 
 		if len(call.Args) > 0 {
-			firstType := g.inferExprType(
-				call.Args[0],
-				nil,
-			)
+			firstType :=
+				g.inferExprType(
+					call.Args[0],
+					nil,
+				)
 
 			if g.isInterfaceCType(firstType) {
-				if instance, req, ok :=
+				if instance,
+					req,
+					ok :=
 					g.lookupInterfaceRequirement(
 						firstType,
 						id.Name.Name,
@@ -7246,11 +8786,13 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 			}
 		}
 
-		if info, ok := g.tasks[id.Name.Name]; ok {
+		if info, ok :=
+			g.tasks[id.Name.Name]; ok {
 			return info.ReturnTypes
 		}
 
-		if _, ok := g.overloads[id.Name.Name]; ok {
+		if _, ok :=
+			g.overloads[id.Name.Name]; ok {
 			argTypes := make(
 				[]CType,
 				0,
@@ -7260,25 +8802,52 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 			for _, arg := range call.Args {
 				argTypes = append(
 					argTypes,
-					g.inferExprType(arg, nil),
+					g.inferExprType(
+						arg,
+						nil,
+					),
 				)
 			}
 
-			candidate, ok := g.resolveOverload(
-				id.Name.Name,
-				argTypes,
-			)
+			candidate, ok :=
+				g.resolveOverload(
+					id.Name.Name,
+					argTypes,
+				)
+
 			if !ok {
 				return []CType{CInvalid}
 			}
 
 			return g.tasks[candidate].ReturnTypes
 		}
+
+		if kind, ok :=
+			g.primitiveTaskKind(
+				id.Name.Name,
+			); ok {
+			switch kind {
+			case builtin.TaskSize:
+				return []CType{CUint}
+
+			case builtin.TaskAssert,
+				builtin.TaskPanic,
+				builtin.TaskTrap,
+				builtin.TaskUnreachable:
+				return []CType{CVoid}
+
+			case builtin.TaskLen:
+				return []CType{CInvalid}
+			}
+		}
 	}
 
-	if selector, ok := call.Callee.(*ast.SelectorExpr); ok {
-		if id, ok := selector.Left.(*ast.IdentExpr); ok {
-			if pkg := g.packages[id.Name.Name]; pkg != nil {
+	if selector, ok :=
+		call.Callee.(*ast.SelectorExpr); ok {
+		if id, ok :=
+			selector.Left.(*ast.IdentExpr); ok {
+			if pkg :=
+				g.packages[id.Name.Name]; pkg != nil {
 				if info, ok :=
 					pkg.Tasks[selector.Name.Name]; ok {
 					return info.ReturnTypes
@@ -7287,20 +8856,307 @@ func (g *Generator) callReturnTypes(expr ast.Expr) []CType {
 		}
 	}
 
-	return []CType{g.inferExprType(expr, nil)}
+	return []CType{
+		g.inferExprType(expr, nil),
+	}
 }
 
-func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
+func (g *Generator) inferCallExprType(
+	e *ast.CallExpr,
+) CType {
+	if resolution, ok :=
+		g.lenResolutions[e]; ok {
+		if resolution.Candidate == nil {
+			return CUint
+		}
+
+		_, info, ok := g.semanticTaskSelection(
+			resolution.Candidate,
+			resolution.PackageName,
+			resolution.GenericArguments,
+			e.Span(),
+		)
+		if !ok {
+			return CInvalid
+		}
+
+		return info.ReturnType
+	}
+
+	if id, ok :=
+		e.Callee.(*ast.IdentExpr); ok {
+		if g.scope == nil {
+			if ret, ok :=
+				g.genericTaskParamReturnType(
+					id.Name.Name,
+				); ok {
+				return ret
+			}
+		} else if _, isLocal :=
+			g.scope.lookup(id.Name.Name); !isLocal {
+			if ret, ok :=
+				g.genericTaskParamReturnType(
+					id.Name.Name,
+				); ok {
+				return ret
+			}
+		}
+	}
+
+	if gen, ok :=
+		e.Callee.(*ast.GenericExpr); ok {
+		if id, ok :=
+			gen.Base.(*ast.IdentExpr); ok {
+			if task, ok :=
+				builtin.LookupTask(
+					id.Name.Name,
+				); ok && task.Generic {
+				switch task.Kind {
+				case builtin.TaskAnyIs:
+					return CBool
+
+				case builtin.TaskAnyAs,
+					builtin.TaskCast:
+					if len(gen.Args) == 1 {
+						targetArg := gen.Args[0]
+
+						if g.genericSubst != nil {
+							targetArg =
+								g.substituteGenericArgForCGen(
+									targetArg,
+									g.genericSubst,
+								)
+						}
+
+						return g.cTypeFromGenericArg(
+							targetArg,
+						)
+					}
+				}
+
+				return CInvalid
+			}
+
+			if packageName,
+				taskName,
+				info,
+				found :=
+				g.importedGenericTaskInfoFromTypeContext(
+					id.Name.Name,
+				); found {
+				callArgs :=
+					g.genericArgsInContext(
+						gen.Args,
+					)
+
+				name :=
+					g.registerImportedGenericTaskInstance(
+						packageName,
+						taskName,
+						info,
+						callArgs,
+					)
+
+				instance :=
+					g.importedGenericTasks[name]
+
+				if instance == nil {
+					return CInvalid
+				}
+
+				return g.importedGenericTaskReturnType(
+					instance,
+				)
+			}
+
+			info, ok := g.tasks[id.Name.Name]
+			if !ok ||
+				len(info.GenericParams) == 0 ||
+				info.Decl == nil {
+				return CInvalid
+			}
+
+			callArgs :=
+				g.genericArgsInContext(
+					gen.Args,
+				)
+
+			name :=
+				g.registerGenericTaskInstance(
+					info.Decl,
+					callArgs,
+				)
+
+			instance := g.genericTasks[name]
+			if instance == nil {
+				return CInvalid
+			}
+
+			return g.genericTaskReturnType(instance)
+		}
+
+		if selector, ok :=
+			gen.Base.(*ast.SelectorExpr); ok {
+			pkgName,
+				taskName,
+				info,
+				ok :=
+				g.importedGenericTaskInfoFromSelector(
+					selector,
+				)
+
+			if !ok {
+				return CInvalid
+			}
+
+			callArgs :=
+				g.genericArgsInContext(
+					gen.Args,
+				)
+
+			name :=
+				g.registerImportedGenericTaskInstance(
+					pkgName,
+					taskName,
+					info,
+					callArgs,
+				)
+
+			instance :=
+				g.importedGenericTasks[name]
+
+			if instance == nil {
+				return CInvalid
+			}
+
+			return g.importedGenericTaskReturnType(
+				instance,
+			)
+		}
+
+		return CInvalid
+	}
+
+	if id, ok :=
+		e.Callee.(*ast.IdentExpr); ok {
+		if _, info, found :=
+			g.importedTaskInfoFromTypeContext(
+				id.Name.Name,
+			); found {
+			return info.ReturnType
+		}
+
+		if len(e.Args) > 0 {
+			firstType :=
+				g.inferExprType(
+					e.Args[0],
+					nil,
+				)
+
+			if g.isInterfaceCType(firstType) {
+				if instance,
+					req,
+					ok :=
+					g.lookupInterfaceRequirement(
+						firstType,
+						id.Name.Name,
+					); ok {
+					return g.interfaceRequirementReturnType(
+						instance,
+						req,
+					)
+				}
+			}
+		}
+
+		if info, ok :=
+			g.tasks[id.Name.Name]; ok {
+			return info.ReturnType
+		}
+
+		if _, ok :=
+			g.overloads[id.Name.Name]; ok {
+			argTypes := make(
+				[]CType,
+				0,
+				len(e.Args),
+			)
+
+			for _, arg := range e.Args {
+				argTypes = append(
+					argTypes,
+					g.inferExprType(
+						arg,
+						nil,
+					),
+				)
+			}
+
+			candidate, ok :=
+				g.resolveOverload(
+					id.Name.Name,
+					argTypes,
+				)
+			if !ok {
+				return CInvalid
+			}
+
+			return g.tasks[candidate].ReturnType
+		}
+
+		if kind, ok :=
+			g.primitiveTaskKind(
+				id.Name.Name,
+			); ok {
+			switch kind {
+			case builtin.TaskSize:
+				return CUint
+
+			case builtin.TaskAssert,
+				builtin.TaskPanic,
+				builtin.TaskTrap,
+				builtin.TaskUnreachable:
+				return CVoid
+
+			case builtin.TaskLen:
+				return CInvalid
+			}
+		}
+	}
+
+	if selector, ok :=
+		e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok :=
+			selector.Left.(*ast.IdentExpr); ok {
+			if pkg :=
+				g.packages[id.Name.Name]; pkg != nil {
+				if info, ok :=
+					pkg.Tasks[selector.Name.Name]; ok {
+					return info.ReturnType
+				}
+			}
+		}
+	}
+
+	return CInvalid
+}
+
+func (g *Generator) inferExprType(
+	expr ast.Expr,
+	expected *CType,
+) CType {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if g.scope != nil {
-			if v, ok := g.scope.lookup(e.Name.Name); ok {
-				return v.Type
+			if value, ok :=
+				g.scope.lookup(e.Name.Name); ok {
+				return value.Type
 			}
 		}
 
 		if g.genericSubst != nil {
-			if arg, ok := g.genericSubst[e.Name.Name]; ok &&
+			if arg, ok :=
+				g.genericSubst[e.Name.Name]; ok &&
 				arg.Kind == ast.GenericArgExpr &&
 				arg.Expr != nil {
 				if genericArgIsSingleNameForCGen(
@@ -7317,7 +9173,8 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			}
 		}
 
-		if typ, ok := g.consts[e.Name.Name]; ok {
+		if typ, ok :=
+			g.consts[e.Name.Name]; ok {
 			return typ
 		}
 
@@ -7328,7 +9185,8 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			return info.ReturnType
 		}
 
-		if info, ok := g.tasks[e.Name.Name]; ok {
+		if info, ok :=
+			g.tasks[e.Name.Name]; ok {
 			return info.ReturnType
 		}
 
@@ -7342,7 +9200,10 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return CInvalid
 
 	case *ast.SpreadExpr:
-		return g.inferExprType(e.Expr, expected)
+		return g.inferExprType(
+			e.Expr,
+			expected,
+		)
 
 	case *ast.IntLitExpr:
 		return CInt
@@ -7378,7 +9239,8 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return CNil
 
 	case *ast.UnaryExpr:
-		inner := g.inferExprType(e.Expr, nil)
+		inner :=
+			g.inferExprType(e.Expr, nil)
 
 		switch e.Op {
 		case token.Amp:
@@ -7393,10 +9255,18 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 				inner.SealName,
 				"*",
 			) {
+				if inner.Elem != nil {
+					return *inner.Elem
+				}
+
 				return CType{
-					Name: strings.TrimSuffix(
-						strings.TrimSpace(inner.Name),
-						"*",
+					Name: strings.TrimSpace(
+						strings.TrimSuffix(
+							strings.TrimSpace(
+								inner.Name,
+							),
+							"*",
+						),
 					),
 					SealName: strings.TrimPrefix(
 						inner.SealName,
@@ -7409,25 +9279,30 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return inner
 
 	case *ast.BinaryExpr:
-		left := g.inferExprType(e.Left, nil)
-		right := g.inferExprType(e.Right, nil)
+		left :=
+			g.inferExprType(e.Left, nil)
+		right :=
+			g.inferExprType(e.Right, nil)
 
-		if g.hasOperatorOverload(e.Op.String()) {
-			if candidate, ok := g.resolveOverload(
-				e.Op.String(),
-				[]CType{left, right},
-			); ok {
-				info := g.tasks[candidate]
-				return info.ReturnType
+		if g.hasOperatorOverload(
+			e.Op.String(),
+		) {
+			if candidate, ok :=
+				g.resolveOverload(
+					e.Op.String(),
+					[]CType{left, right},
+				); ok {
+				return g.tasks[candidate].ReturnType
 			}
 		}
 
 		if e.Op == token.NotEq &&
 			g.hasOperatorOverload("==") {
-			if _, ok := g.resolveOverload(
-				"==",
-				[]CType{left, right},
-			); ok {
+			if _, ok :=
+				g.resolveOverload(
+					"==",
+					[]CType{left, right},
+				); ok {
 				return CBool
 			}
 		}
@@ -7457,279 +9332,13 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		return left
 
 	case *ast.CallExpr:
-		if id, ok := e.Callee.(*ast.IdentExpr); ok {
-			if g.scope == nil {
-				if ret, ok :=
-					g.genericTaskParamReturnType(
-						id.Name.Name,
-					); ok {
-					return ret
-				}
-			} else if _, isLocal :=
-				g.scope.lookup(id.Name.Name); !isLocal {
-				if ret, ok :=
-					g.genericTaskParamReturnType(
-						id.Name.Name,
-					); ok {
-					return ret
-				}
-			}
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok &&
-			id.Name.Name == "len" &&
-			!g.isLocalValueName("len") {
-			return CUint
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok &&
-			id.Name.Name == "size" &&
-			!g.isLocalValueName("size") {
-			return CUint
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok &&
-			id.Name.Name == "assert" &&
-			!g.isLocalValueName("assert") {
-			return CVoid
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok {
-			if ret, ok :=
-				g.genericTaskParamReturnType(
-					id.Name.Name,
-				); ok {
-				return ret
-			}
-		}
-
-		if gen, ok :=
-			e.Callee.(*ast.GenericExpr); ok {
-			if id, ok :=
-				gen.Base.(*ast.IdentExpr); ok {
-				if task, ok :=
-					builtin.LookupTask(
-						id.Name.Name,
-					); ok && task.Generic {
-					switch task.Kind {
-					case builtin.TaskAnyIs:
-						return CBool
-
-					case builtin.TaskAnyAs,
-						builtin.TaskCast:
-						if len(gen.Args) == 1 {
-							targetArg := gen.Args[0]
-
-							if g.genericSubst != nil {
-								targetArg =
-									g.substituteGenericArgForCGen(
-										targetArg,
-										g.genericSubst,
-									)
-							}
-
-							return g.cTypeFromGenericArg(
-								targetArg,
-							)
-						}
-					}
-
-					return CInvalid
-				}
-
-				if packageName,
-					taskName,
-					info,
-					found :=
-					g.importedGenericTaskInfoFromTypeContext(
-						id.Name.Name,
-					); found {
-					callArgs :=
-						g.genericArgsInContext(
-							gen.Args,
-						)
-
-					name :=
-						g.registerImportedGenericTaskInstance(
-							packageName,
-							taskName,
-							info,
-							callArgs,
-						)
-
-					instance :=
-						g.importedGenericTasks[name]
-
-					if instance == nil {
-						return CInvalid
-					}
-
-					return g.importedGenericTaskReturnType(
-						instance,
-					)
-				}
-
-				info, ok := g.tasks[id.Name.Name]
-				if !ok ||
-					len(info.GenericParams) == 0 {
-					return CInvalid
-				}
-
-				if info.Decl == nil {
-					return CInvalid
-				}
-
-				callArgs :=
-					g.genericArgsInContext(
-						gen.Args,
-					)
-
-				name :=
-					g.registerGenericTaskInstance(
-						info.Decl,
-						callArgs,
-					)
-
-				instance := g.genericTasks[name]
-				if instance == nil {
-					return CInvalid
-				}
-
-				return g.genericTaskReturnType(
-					instance,
-				)
-			}
-
-			if selector, ok :=
-				gen.Base.(*ast.SelectorExpr); ok {
-				pkgName,
-					taskName,
-					info,
-					ok :=
-					g.importedGenericTaskInfoFromSelector(
-						selector,
-					)
-
-				if !ok {
-					return CInvalid
-				}
-
-				callArgs :=
-					g.genericArgsInContext(
-						gen.Args,
-					)
-
-				name :=
-					g.registerImportedGenericTaskInstance(
-						pkgName,
-						taskName,
-						info,
-						callArgs,
-					)
-
-				instance :=
-					g.importedGenericTasks[name]
-
-				if instance == nil {
-					return CInvalid
-				}
-
-				return g.importedGenericTaskReturnType(
-					instance,
-				)
-			}
-
-			return CInvalid
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok {
-			if _, info, found :=
-				g.importedTaskInfoFromTypeContext(
-					id.Name.Name,
-				); found {
-				return info.ReturnType
-			}
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok &&
-			len(e.Args) > 0 {
-			firstType :=
-				g.inferExprType(
-					e.Args[0],
-					nil,
-				)
-
-			if g.isInterfaceCType(firstType) {
-				if instance, req, ok :=
-					g.lookupInterfaceRequirement(
-						firstType,
-						id.Name.Name,
-					); ok {
-					return g.interfaceRequirementReturnType(
-						instance,
-						req,
-					)
-				}
-			}
-		}
-
-		if id, ok := e.Callee.(*ast.IdentExpr); ok {
-			if info, ok :=
-				g.tasks[id.Name.Name]; ok {
-				return info.ReturnType
-			}
-
-			if _, ok :=
-				g.overloads[id.Name.Name]; ok {
-				argTypes := make(
-					[]CType,
-					0,
-					len(e.Args),
-				)
-
-				for _, arg := range e.Args {
-					argTypes = append(
-						argTypes,
-						g.inferExprType(
-							arg,
-							nil,
-						),
-					)
-				}
-
-				candidate, ok :=
-					g.resolveOverload(
-						id.Name.Name,
-						argTypes,
-					)
-
-				if !ok {
-					return CInvalid
-				}
-
-				return g.tasks[candidate].ReturnType
-			}
-		}
-
-		if selector, ok :=
-			e.Callee.(*ast.SelectorExpr); ok {
-			if id, ok :=
-				selector.Left.(*ast.IdentExpr); ok {
-				if pkg :=
-					g.packages[id.Name.Name]; pkg != nil {
-					if info, ok :=
-						pkg.Tasks[selector.Name.Name]; ok {
-						return info.ReturnType
-					}
-				}
-			}
-		}
-
-		return CInvalid
+		return g.inferCallExprType(e)
 
 	case *ast.SelectorExpr:
-		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			if pkg := g.packages[id.Name.Name]; pkg != nil {
+		if id, ok :=
+			e.Left.(*ast.IdentExpr); ok {
+			if pkg :=
+				g.packages[id.Name.Name]; pkg != nil {
 				if info, ok :=
 					pkg.Tasks[e.Name.Name]; ok {
 					return info.ReturnType
@@ -7756,23 +9365,7 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 		)
 
 	case *ast.IndexExpr:
-		leftType :=
-			g.inferExprType(e.Left, nil)
-
-		if leftType.SealName == "rawptr" {
-			return CU8
-		}
-
-		if (leftType.IsVariadic) &&
-			leftType.Elem != nil {
-			return *leftType.Elem
-		}
-
-		if g.isByteIndexableCType(leftType) {
-			return CU8
-		}
-
-		return CInvalid
+		return g.indexExprType(e)
 
 	case *ast.CompoundLiteralExpr:
 		return g.cTypeFromAstInContext(e.Type)
@@ -7920,69 +9513,93 @@ func (g *Generator) conversionScore(dst CType, src CType) (int, bool) {
 	return 0, false
 }
 
-func (g *Generator) isByteIndexableCType(t CType) bool {
+func (g *Generator) isByteIndexableCType(
+	t CType,
+) bool {
+	return g.isScalarByteIndexableCType(t)
+}
+
+func (g *Generator) isScalarByteIndexableCType(
+	t CType,
+) bool {
 	if t.IsVariadic {
 		return false
 	}
 
 	switch t.SealName {
-	case "",
-		"<invalid>",
-		"void",
-		"nil",
-		"string",
-		"cstring":
-		return false
-
-	default:
-		return true
-	}
-}
-
-func (g *Generator) isScalarByteIndexableCType(t CType) bool {
-	if t.IsArray || t.IsVariadic {
-		return false
-	}
-
-	switch t.SealName {
 	case "bool",
-		"int", "uint",
-		"i8", "i16", "i32", "i64",
-		"u8", "u16", "u32", "u64",
+		"int",
+		"uint",
+		"i8",
+		"i16",
+		"i32",
+		"i64",
+		"u8",
+		"u16",
+		"u32",
+		"u64",
 		"char",
-		"f32", "f64",
-		"rawptr":
+		"f32",
+		"f64":
 		return true
-
-	default:
-		return strings.HasPrefix(t.SealName, "*")
 	}
+
+	return strings.HasPrefix(
+		t.SealName,
+		"*",
+	)
 }
 
-func (g *Generator) isAddressableByteSource(expr ast.Expr) bool {
+func (g *Generator) isAddressableByteSource(
+	expr ast.Expr,
+) bool {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
+		if g.scope == nil {
+			return false
+		}
+
 		_, ok := g.scope.lookup(e.Name.Name)
 		return ok
 
 	case *ast.SelectorExpr:
+		leftType :=
+			g.inferExprType(e.Left, nil)
+
+		if strings.HasPrefix(
+			leftType.SealName,
+			"*",
+		) {
+			return true
+		}
+
 		return g.isAddressableByteSource(e.Left)
 
 	case *ast.UnaryExpr:
 		return e.Op == token.Star
 
 	case *ast.IndexExpr:
-		leftType := g.inferExprType(e.Left, nil)
+		resolution, ok :=
+			g.indexResolutions[e]
 
-		if leftType.IsVariadic || leftType.SealName == "rawptr" {
+		if !ok ||
+			resolution.Candidate != nil {
+			return false
+		}
+
+		leftType :=
+			g.inferExprType(e.Left, nil)
+
+		if leftType.IsVariadic ||
+			leftType.SealName == "rawptr" {
 			return true
 		}
 
 		if g.isByteIndexableCType(leftType) {
-			return g.isAddressableByteSource(e.Left)
+			return g.isAddressableByteSource(
+				e.Left,
+			)
 		}
-
-		return false
 	}
 
 	return false
@@ -9116,20 +10733,29 @@ func (g *Generator) collectResolvedImplMonomorphizations(
 		return
 	}
 
+	oldSubst := g.genericSubst
+	g.genericSubst = info.Subst
+
+	defer func() {
+		g.genericSubst = oldSubst
+	}()
+
 	g.withTypeContext(
 		info.Template.PackageName,
 		func() {
 			for _, entry := range info.Template.Entries {
 				if entry.Task != nil {
 					for _, param := range entry.Task.Params {
-						typ := g.substituteTypeAstForCGen(
-							param.Type,
-							info.Subst,
-						)
+						typ :=
+							g.substituteTypeAstForCGen(
+								param.Type,
+								info.Subst,
+							)
 
 						g.collectGenericStructInstancesFromType(
 							typ,
 						)
+
 						g.collectInterfaceInstancesFromType(
 							typ,
 						)
@@ -9144,6 +10770,7 @@ func (g *Generator) collectResolvedImplMonomorphizations(
 							g.collectGenericStructInstancesFromExpr(
 								value,
 							)
+
 							g.collectInterfaceInstancesFromExpr(
 								value,
 							)
@@ -9151,14 +10778,16 @@ func (g *Generator) collectResolvedImplMonomorphizations(
 					}
 
 					for _, result := range entry.Task.Results {
-						typ := g.substituteTypeAstForCGen(
-							result,
-							info.Subst,
-						)
+						typ :=
+							g.substituteTypeAstForCGen(
+								result,
+								info.Subst,
+							)
 
 						g.collectGenericStructInstancesFromType(
 							typ,
 						)
+
 						g.collectInterfaceInstancesFromType(
 							typ,
 						)
@@ -9171,14 +10800,16 @@ func (g *Generator) collectResolvedImplMonomorphizations(
 				}
 
 				if entry.Alias != nil {
-					value := g.substituteExprForCGen(
-						entry.Alias,
-						info.Subst,
-					)
+					value :=
+						g.substituteExprForCGen(
+							entry.Alias,
+							info.Subst,
+						)
 
 					g.collectGenericStructInstancesFromExpr(
 						value,
 					)
+
 					g.collectInterfaceInstancesFromExpr(
 						value,
 					)

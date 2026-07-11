@@ -29,102 +29,202 @@ type BuildResult struct {
 	Output   string
 }
 
-func BuildWorkspace(startPath string, options BuildOptions) (*BuildResult, error) {
-	graph, err := DiscoverAndBuildGraph(startPath)
+func BuildWorkspace(
+	startPath string,
+	options BuildOptions,
+) (*BuildResult, error) {
+	graph, err :=
+		DiscoverAndBuildGraph(startPath)
 	if err != nil {
 		return nil, err
 	}
 
 	outDir := options.OutDir
+
 	if outDir == "" {
-		outDir = filepath.Join(graph.Root.Config.RootDir, ".seal", "build")
+		outDir = filepath.Join(
+			graph.Root.Config.RootDir,
+			".seal",
+			"build",
+		)
 	}
 
-	if err := os.MkdirAll(outDir, 0755); err != nil {
+	if err := os.MkdirAll(
+		outDir,
+		0755,
+	); err != nil {
 		return nil, err
 	}
 
 	var loaded []*LoadedPackage
 
-	resolverPackages := map[string]*resolver.PackageInfo{}
-	checkerPackages := map[string]*checker.PackageInfo{}
-	codegenPackages := map[string]*cgen.PackageInfo{}
+	resolverPackages :=
+		map[string]*resolver.PackageInfo{}
+
+	checkerPackages :=
+		map[string]*checker.PackageInfo{}
+
+	codegenPackages :=
+		map[string]*cgen.PackageInfo{}
 
 	// Phase 1: load, resolve, check, and export package signatures.
 	//
-	// Do not generate C here. Imported generic specializations can request
-	// definitions from dependency packages, so C generation must happen after
-	// all package signatures are known.
+	// Semantic side tables are retained with the exact checked AST. CGen
+	// consumes those tables later and must not repeat index or len overload
+	// resolution.
 	for _, pkg := range graph.Order {
 		reporter := diag.NewReporter()
 
-		file, resolverScope, checkerScope, err := LoadAndCheckPackage(
-			pkg,
-			reporter,
-			resolverPackages,
-			checkerPackages,
-		)
+		file,
+			resolverScope,
+			checkerScope,
+			semantic,
+			err :=
+			LoadAndCheckPackageWithSemanticInfo(
+				pkg,
+				reporter,
+				resolverPackages,
+				checkerPackages,
+			)
+
 		if err != nil {
-			return nil, withDiagnostics(err, reporter)
-		}
-
-		resolverInfo := resolver.ExportPackage(pkg.Config.Name, resolverScope)
-		checkerInfo := checker.ExportPackage(pkg.Config.Name, checkerScope)
-
-		codegenInfo := emptyCodegenPackageInfo(pkg.Config.Name)
-		if file != nil && len(file.Decls) > 0 {
-			codegenInfo = cgen.ExportPackageInfo(pkg.Config.Name, file, reporter)
-			if reporter.HasErrors() {
-				return nil, withDiagnostics(
-					fmt.Errorf("C package export failed for package %q", pkg.Config.Name),
+			return nil,
+				withDiagnostics(
+					err,
 					reporter,
 				)
-			}
 		}
 
-		nativeCFiles, err := CFiles(pkg.Config.RootDir)
+		resolverInfo :=
+			resolver.ExportPackage(
+				pkg.Config.Name,
+				resolverScope,
+			)
+
+		checkerInfo :=
+			checker.ExportPackage(
+				pkg.Config.Name,
+				checkerScope,
+			)
+
+		dependencyCodegenPackages,
+			err :=
+			codegenPackagesForPackage(
+				pkg,
+				codegenPackages,
+			)
+
 		if err != nil {
 			return nil, err
 		}
 
-		cPath := filepath.Join(outDir, sanitizeFileName(pkg.Config.Name)+".c")
+		codegenInfo :=
+			emptyCodegenPackageInfo(
+				pkg.Config.Name,
+			)
 
-		resolverPackages[pkg.Config.Name] = resolverInfo
-		checkerPackages[pkg.Config.Name] = checkerInfo
-		codegenPackages[pkg.Config.Name] = codegenInfo
+		if file != nil &&
+			len(file.Decls) > 0 {
+			codegenInfo =
+				cgen.ExportPackageInfoWithSemanticInfo(
+					pkg.Config.Name,
+					file,
+					reporter,
+					dependencyCodegenPackages,
+					semantic,
+				)
 
-		loaded = append(loaded, &LoadedPackage{
-			Package:      pkg,
-			File:         file,
-			CPath:        cPath,
-			NativeCFiles: nativeCFiles,
-			CodegenInfo:  codegenInfo,
-		})
+			if reporter.HasErrors() {
+				return nil,
+					withDiagnostics(
+						fmt.Errorf(
+							"C package export failed for package %q",
+							pkg.Config.Name,
+						),
+						reporter,
+					)
+			}
+		}
+
+		nativeCFiles, err :=
+			CFiles(pkg.Config.RootDir)
+
+		if err != nil {
+			return nil, err
+		}
+
+		cPath := filepath.Join(
+			outDir,
+			sanitizeFileName(
+				pkg.Config.Name,
+			)+".c",
+		)
+
+		resolverPackages[pkg.Config.Name] =
+			resolverInfo
+
+		checkerPackages[pkg.Config.Name] =
+			checkerInfo
+
+		codegenPackages[pkg.Config.Name] =
+			codegenInfo
+
+		loaded = append(
+			loaded,
+			&LoadedPackage{
+				Package:      pkg,
+				File:         file,
+				CPath:        cPath,
+				NativeCFiles: nativeCFiles,
+				CodegenInfo:  codegenInfo,
+				SemanticInfo: semantic,
+			},
+		)
 	}
 
 	// Phase 2: generate C with cross-package generic instance requests.
-	if err := generateWorkspaceCWithGenericRequests(graph, loaded, codegenPackages); err != nil {
+	if err :=
+		generateWorkspaceCWithGenericRequests(
+			graph,
+			loaded,
+			codegenPackages,
+		); err != nil {
 		return nil, err
 	}
 
 	// Phase 3: write final fixed-point C output.
 	for _, pkg := range loaded {
-		if err := os.WriteFile(pkg.CPath, []byte(pkg.CCode), 0644); err != nil {
+		if err := os.WriteFile(
+			pkg.CPath,
+			[]byte(pkg.CCode),
+			0644,
+		); err != nil {
 			return nil, err
 		}
 	}
 
 	output := options.Output
+
 	if output == "" {
-		output = filepath.Join(outDir, graph.Root.Config.Name)
+		output = filepath.Join(
+			outDir,
+			graph.Root.Config.Name,
+		)
 	}
 
-	if runtime.GOOS == "windows" && filepath.Ext(output) == "" {
+	if runtime.GOOS == "windows" &&
+		filepath.Ext(output) == "" {
 		output += ".exe"
 	}
 
-	if !options.EmitOnly && graph.Root.Config.Kind == KindExecutable {
-		if err := compileExecutable(graph, loaded, output); err != nil {
+	if !options.EmitOnly &&
+		graph.Root.Config.Kind ==
+			KindExecutable {
+		if err := compileExecutable(
+			graph,
+			loaded,
+			output,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -150,10 +250,12 @@ func generateWorkspaceCWithGenericRequests(
 	loaded []*LoadedPackage,
 	codegenPackages map[string]*cgen.PackageInfo,
 ) error {
-	requestsByPackage := map[string]*cgen.GenericInstanceRequestSet{}
+	requestsByPackage :=
+		map[string]*cgen.GenericInstanceRequestSet{}
 
 	for _, loadedPkg := range loaded {
-		if loadedPkg == nil || loadedPkg.Package == nil {
+		if loadedPkg == nil ||
+			loadedPkg.Package == nil {
 			continue
 		}
 
@@ -164,36 +266,60 @@ func generateWorkspaceCWithGenericRequests(
 		changed := false
 
 		for _, loadedPkg := range loaded {
-			if loadedPkg == nil || loadedPkg.Package == nil {
+			if loadedPkg == nil ||
+				loadedPkg.Package == nil {
 				continue
 			}
 
 			pkg := loadedPkg.Package
 			pkgName := pkg.Config.Name
 
-			if loadedPkg.File == nil || len(loadedPkg.File.Decls) == 0 {
-				loadedPkg.CCode = fmt.Sprintf("/* empty package %s */\n", pkgName)
+			if loadedPkg.File == nil ||
+				len(loadedPkg.File.Decls) == 0 {
+				loadedPkg.CCode = fmt.Sprintf(
+					"/* empty package %s */\n",
+					pkgName,
+				)
+
 				continue
 			}
 
-			depPackages, err := codegenPackagesForPackage(pkg, codegenPackages)
+			depPackages, err :=
+				codegenPackagesForPackage(
+					pkg,
+					codegenPackages,
+				)
+
 			if err != nil {
 				return err
 			}
 
 			reporter := diag.NewReporter()
 
-			g := cgen.NewWithPackages(reporter, pkgName, depPackages)
+			g :=
+				cgen.NewWithPackagesAndSemanticInfo(
+					reporter,
+					pkgName,
+					depPackages,
+					loadedPkg.SemanticInfo,
+				)
 
-			if set := requestsByPackage[pkgName]; set != nil {
-				g.AddRequestedInstances(set.List())
+			if set :=
+				requestsByPackage[pkgName]; set != nil {
+				g.AddRequestedInstances(
+					set.List(),
+				)
 			}
 
-			cCode := g.Generate(loadedPkg.File)
+			cCode :=
+				g.Generate(loadedPkg.File)
 
 			if reporter.HasErrors() {
 				return withDiagnostics(
-					fmt.Errorf("C generation failed for package %q", pkgName),
+					fmt.Errorf(
+						"C generation failed for package %q",
+						pkgName,
+					),
 					reporter,
 				)
 			}
@@ -213,9 +339,13 @@ func generateWorkspaceCWithGenericRequests(
 					)
 				}
 
-				set := requestsByPackage[req.PackageName]
+				set :=
+					requestsByPackage[req.PackageName]
+
 				if set == nil {
-					set = cgen.NewGenericInstanceRequestSet()
+					set =
+						cgen.NewGenericInstanceRequestSet()
+
 					requestsByPackage[req.PackageName] = set
 				}
 
@@ -230,7 +360,10 @@ func generateWorkspaceCWithGenericRequests(
 		}
 	}
 
-	return fmt.Errorf("generic instance request fixed point did not converge after %d iterations", maxGenericRequestIterations)
+	return fmt.Errorf(
+		"generic instance request fixed point did not converge after %d iterations",
+		maxGenericRequestIterations,
+	)
 }
 
 func codegenPackagesForPackage(

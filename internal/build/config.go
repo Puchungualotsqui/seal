@@ -44,7 +44,6 @@ func defaultConfig() Config {
 		AutoInitializeVariables:        true,
 		AllowUninitializedVariables:    false,
 		AllowPartialInitializedStructs: false,
-		AllowPartialInitializedArrays:  true,
 		AllowPartialSwitches:           false,
 
 		IntegerOverflow: "trap",
@@ -228,13 +227,17 @@ func (p *configParser) parseDependencies(value string) ([]Dependency, error) {
 	return deps, nil
 }
 
-func (p *configParser) assign(key string, value string) error {
+func (p *configParser) assign(
+	key string,
+	value string,
+) error {
 	switch key {
 	case "name", "package.name":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Name = s
 
 	case "version", "package.version":
@@ -242,6 +245,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Version = s
 
 	case "kind", "package.kind":
@@ -249,6 +253,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Kind = Kind(s)
 
 	case "compiler", "build.compiler":
@@ -256,6 +261,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Compiler = s
 
 	case "compiler_path", "build.compiler_path":
@@ -263,6 +269,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.CompilerPath = s
 
 	case "compiler_args", "build.compiler_args":
@@ -270,6 +277,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.CompilerArgs = values
 
 	case "c_flags", "build.c_flags":
@@ -277,6 +285,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.CFlags = values
 
 	case "link_flags", "build.link_flags":
@@ -284,6 +293,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.LinkFlags = values
 
 	case "include_dirs", "build.include_dirs":
@@ -291,6 +301,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.IncludeDirs = values
 
 	case "library_dirs", "build.library_dirs":
@@ -298,6 +309,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.LibraryDirs = values
 
 	case "libraries", "build.libraries":
@@ -305,6 +317,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Libraries = values
 
 	case "defines", "build.defines":
@@ -312,6 +325,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Defines = values
 
 	case "target", "build.target":
@@ -319,6 +333,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Target = s
 
 	case "standard", "build.standard":
@@ -326,6 +341,7 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Standard = s
 
 	case "linkage", "build.linkage":
@@ -333,94 +349,115 @@ func (p *configParser) assign(key string, value string) error {
 		if err != nil {
 			return err
 		}
+
 		p.cfg.Linkage = s
 
-	case "generic_constraint_max_depth", "checker.generic_constraint_max_depth":
+	case "generic_constraint_max_depth",
+		"checker.generic_constraint_max_depth":
 		v, err := parseInt(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.GenericConstraintMaxDepth = v
 
-	case "auto_initialize_variables", "checks.auto_initialize_variables":
+	case "auto_initialize_variables",
+		"checks.auto_initialize_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AutoInitializeVariables = v
 
-	case "allow_uninitialized_variables", "checks.allow_uninitialized_variables":
+	case "allow_uninitialized_variables",
+		"checks.allow_uninitialized_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AllowUninitializedVariables = v
 
-	case "allow_partial_initialized_structs", "checks.allow_partial_initialized_structs":
+	case "allow_partial_initialized_structs",
+		"checks.allow_partial_initialized_structs":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AllowPartialInitializedStructs = v
 
-	case "allow_partial_initialized_arrays", "checks.allow_partial_initialized_arrays":
+	case "allow_partial_switches",
+		"checks.allow_partial_switches":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
-		p.cfg.AllowPartialInitializedArrays = v
 
-	case "allow_partial_switches", "checks.allow_partial_switches":
-		v, err := parseBool(value)
-		if err != nil {
-			return err
-		}
 		p.cfg.AllowPartialSwitches = v
 
-	case "integer_overflow", "checks.integer_overflow":
+	case "integer_overflow",
+		"checks.integer_overflow":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.IntegerOverflow = s
 
-	case "bounds_checking", "checks.bounds_checking":
+	case "bounds_checking",
+		"checks.bounds_checking":
 		s, err := parseString(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.BoundsChecking = s
 
-	case "fail_bad_style", "checks.fail_bad_style":
+	case "fail_bad_style",
+		"checks.fail_bad_style":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.FailBadStyle = v
 
-	case "allow_unused_variables", "checks.allow_unused_variables":
+	case "allow_unused_variables",
+		"checks.allow_unused_variables":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AllowUnusedVariables = v
 
-	case "allow_unused_parameters", "checks.allow_unused_parameters":
+	case "allow_unused_parameters",
+		"checks.allow_unused_parameters":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AllowUnusedParameters = v
 
-	case "allow_run_directives", "checks.allow_run_directives":
+	case "allow_run_directives",
+		"checks.allow_run_directives":
 		v, err := parseBool(value)
 		if err != nil {
 			return err
 		}
+
 		p.cfg.AllowRunDirectives = v
 
 	default:
-		return p.err(fmt.Sprintf("unknown seal.toml key %q", key))
+		return p.err(
+			fmt.Sprintf(
+				"unknown seal.toml key %q",
+				key,
+			),
+		)
 	}
 
 	return nil
