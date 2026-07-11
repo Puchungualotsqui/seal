@@ -970,26 +970,35 @@ Main :: task() {
 
 func TestGenerateInterfaceAssignmentAndDispatch(t *testing.T) {
 	out, reporter := generate(t, `
-Enemy :: interface <T type> {
-    Health :: task(e *T) int
+Enemy :: interface <Value type> {
+    Health :: task(e *self) Value
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+
+    GoblinHealth :: task(g *Goblin) int {
+
     return g.hp
 }
 
-Enemy<Goblin> :: impl {
-    Health :: Health
+Enemy<int> :: impl Goblin {
+    
+    Health :: GoblinHealth
+
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
+    
+	
+    e := cast<Enemy<int>>(&g)
+
+
     hp := Health(e)
+    assert(hp == 10)
 }
 `)
 
@@ -997,28 +1006,221 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "typedef enum Enemy_Tag") {
-		t.Fatalf("expected Enemy_Tag enum, got:\n%s", out)
+	checks := []string{
+		"typedef struct Enemy_int {",
+		"uintptr_t tag;",
+		"void *data;",
+		"Enemy_int_Tag_Goblin",
+		"Enemy_int_Goblin_Health",
+		".tag = Enemy_int_Tag_Goblin",
+		".data = (void *)",
+		"Enemy_int_Health(e)",
 	}
 
-	if !strings.Contains(out, "Enemy_Tag_Goblin") {
-		t.Fatalf("expected Goblin tag, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGeneratePositionedDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+    Position :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+    return transform.x
+}
+
+Positioned :: impl Transform {
+    Position :: ReadPosition
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Positioned :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 42},
+    }
+
+    positioned := cast<Positioned>(&entity)
+    position := Position(positioned)
+
+    assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "typedef struct Enemy") {
-		t.Fatalf("expected Enemy interface union struct, got:\n%s", out)
+	checks := []string{
+		"typedef struct Positioned {",
+		"Positioned_Transform_Position(void *data)",
+		"Positioned_Entity_Position(void *data)",
+		"return Positioned_Transform_Position(",
+		"->transform",
+		"(void *)&",
+		".tag = Positioned_Tag_Entity",
+		"Positioned_Position(positioned)",
 	}
 
-	if !strings.Contains(out, "Goblin *Goblin;") {
-		t.Fatalf("expected Goblin pointer payload, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGeneratePositionedNestedDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+    Position :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+    return transform.x
+}
+
+Positioned :: impl Transform {
+    Position :: ReadPosition
+}
+
+Components :: struct {
+    transform Transform
+}
+
+Entity :: struct {
+    components Components
+}
+
+Positioned :: impl Entity using components.transform
+
+Main :: task() {
+    entity := Entity{
+        components = Components{
+            transform = Transform{x = 64},
+        },
+    }
+
+    positioned := cast<Positioned>(&entity)
+    position := Position(positioned)
+
+    assert(position == 64)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "(Enemy){.tag = Enemy_Tag_Goblin, .as.Goblin = (&g)}") {
-		t.Fatalf("expected static interface boxing, got:\n%s", out)
+	checks := []string{
+		"Positioned_Transform_Position(void *data)",
+		"Positioned_Entity_Position(void *data)",
+		"return Positioned_Transform_Position(",
+		"->components",
+		").transform",
+		"Positioned_Position(positioned)",
 	}
 
-	if !strings.Contains(out, "Enemy_Health(e)") {
-		t.Fatalf("expected static interface dispatcher call, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGeneratePositionedPointerDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+    Position :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+    return transform.x
+}
+
+Positioned :: impl Transform {
+    Position :: ReadPosition
+}
+
+Entity :: struct {
+    transform *Transform
+}
+
+Positioned :: impl Entity using transform
+
+Main :: task() {
+    transform := Transform{x = 128}
+    entity := Entity{transform = &transform}
+
+    positioned := cast<Positioned>(&entity)
+    position := Position(positioned)
+
+    assert(position == 128)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Positioned_Transform_Position(void *data)",
+		"Positioned_Entity_Position(void *data)",
+		"return Positioned_Transform_Position((void *)",
+		"->transform",
+		"Positioned_Position(positioned)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(
+		out,
+		"return Positioned_Transform_Position((void *)&",
+	) {
+		t.Fatalf(
+			"pointer-field delegation must pass the pointer value, not its address:\n%s",
+			out,
+		)
 	}
 }
 
@@ -1356,26 +1558,35 @@ Main :: task() {
 
 func TestGenerateDynInterfaceAssignmentAndDispatch(t *testing.T) {
 	out, reporter := generate(t, `
-Enemy :: dyn interface <T type> {
-    Health :: task(e *T) int
+Enemy :: dyn interface <Value type> {
+    Health :: task(e *self) Value
 }
 
 Goblin :: struct {
     hp int
 }
 
-Health :: task(g *Goblin) int {
+
+    GoblinHealth :: task(g *Goblin) int {
+
     return g.hp
 }
 
-Enemy<Goblin> :: impl {
-    Health :: Health
+Enemy<int> :: impl Goblin {
+    
+    Health :: GoblinHealth
+
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    e: Enemy<Goblin> = &g
+    
+	
+    e := cast<Enemy<int>>(&g)
+
+
     hp := Health(e)
+    assert(hp == 10)
 }
 `)
 
@@ -1383,20 +1594,25 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 
-	if !strings.Contains(out, "typedef struct Enemy_vtable") {
-		t.Fatalf("expected Enemy_vtable, got:\n%s", out)
+	checks := []string{
+		"typedef struct Enemy_int_vtable",
+		"typedef struct Enemy_int {",
+		"void *data;",
+		"Enemy_int_vtable *vtable;",
+		"Enemy_int_Goblin_Health",
+		"Enemy_int_Goblin_vtable",
+		".vtable = &Enemy_int_Goblin_vtable",
+		"(e).vtable->Health((e).data)",
 	}
 
-	if !strings.Contains(out, "Enemy_Goblin_vtable") {
-		t.Fatalf("expected Goblin vtable, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "(Enemy){.data = (void *)(&g), .vtable = &Enemy_Goblin_vtable}") {
-		t.Fatalf("expected dyn interface boxing, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "(e).vtable->Health((e).data)") {
-		t.Fatalf("expected dyn interface dispatch, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
 	}
 }
 
