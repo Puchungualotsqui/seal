@@ -1,6 +1,7 @@
 package cgen
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -4254,4 +4255,777 @@ Main :: task() {
 	}
 
 	compileGeneratedC(t, out)
+}
+
+func TestGenerateEnumWithU32UnderlyingType(t *testing.T) {
+	out, reporter := generate(t, `
+ErrorCode :: enum u32 {
+	Success
+	NotFound
+	Invalid
+}
+
+GetError :: task() ErrorCode {
+	return .NotFound
+}
+
+Main :: task() {
+	code: ErrorCode = .Invalid
+	_ = code
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"typedef uint32_t ErrorCode;",
+	) {
+		t.Fatalf(
+			"expected enum to use uint32_t storage, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef enum ErrorCode",
+	) {
+		t.Fatalf(
+			"fixed-underlying enum must not use a C enum as its storage type, got:\n%s",
+			out,
+		)
+	}
+
+	expectedVariants := []string{
+		"ErrorCode_Success = 0",
+		"ErrorCode_NotFound = 1",
+		"ErrorCode_Invalid = 2",
+	}
+
+	for _, expected := range expectedVariants {
+		if !strings.Contains(out, expected) {
+			t.Fatalf(
+				"expected generated enum variant %q, got:\n%s",
+				expected,
+				out,
+			)
+		}
+	}
+
+	if !strings.Contains(
+		out,
+		"uint32_t GetError(void)",
+	) {
+		t.Fatalf(
+			"expected enum return type to use uint32_t, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"= ErrorCode_NotFound;",
+	) {
+		t.Fatalf(
+			"expected contextual enum return literal, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint32_t code = ErrorCode_Invalid;",
+	) {
+		t.Fatalf(
+			"expected contextual enum variable initialization, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateEnumUnderlyingIntegerTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		sealType string
+		cType    string
+		enumName string
+		variant  string
+	}{
+		{
+			name:     "u8",
+			sealType: "u8",
+			cType:    "uint8_t",
+			enumName: "EnumU8",
+			variant:  "ValueU8",
+		},
+		{
+			name:     "u16",
+			sealType: "u16",
+			cType:    "uint16_t",
+			enumName: "EnumU16",
+			variant:  "ValueU16",
+		},
+		{
+			name:     "u32",
+			sealType: "u32",
+			cType:    "uint32_t",
+			enumName: "EnumU32",
+			variant:  "ValueU32",
+		},
+		{
+			name:     "u64",
+			sealType: "u64",
+			cType:    "uint64_t",
+			enumName: "EnumU64",
+			variant:  "ValueU64",
+		},
+		{
+			name:     "i8",
+			sealType: "i8",
+			cType:    "int8_t",
+			enumName: "EnumI8",
+			variant:  "ValueI8",
+		},
+		{
+			name:     "i16",
+			sealType: "i16",
+			cType:    "int16_t",
+			enumName: "EnumI16",
+			variant:  "ValueI16",
+		},
+		{
+			name:     "i32",
+			sealType: "i32",
+			cType:    "int32_t",
+			enumName: "EnumI32",
+			variant:  "ValueI32",
+		},
+		{
+			name:     "i64",
+			sealType: "i64",
+			cType:    "int64_t",
+			enumName: "EnumI64",
+			variant:  "ValueI64",
+		},
+		{
+			name:     "int",
+			sealType: "int",
+			cType:    "intptr_t",
+			enumName: "EnumInt",
+			variant:  "ValueInt",
+		},
+		{
+			name:     "uint",
+			sealType: "uint",
+			cType:    "uintptr_t",
+			enumName: "EnumUint",
+			variant:  "ValueUint",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`
+%s :: enum %s {
+	%s
+}
+
+Main :: task() {
+	value: %s = .%s
+	_ = value
+}
+`,
+				test.enumName,
+				test.sealType,
+				test.variant,
+				test.enumName,
+				test.variant,
+			)
+
+			out, reporter := generate(t, input)
+
+			if reporter.HasErrors() {
+				t.Fatalf(
+					"unexpected diagnostics:\n%s",
+					reporter.String(),
+				)
+			}
+
+			expectedTypedef := fmt.Sprintf(
+				"typedef %s %s;",
+				test.cType,
+				test.enumName,
+			)
+
+			if !strings.Contains(out, expectedTypedef) {
+				t.Fatalf(
+					"expected %q, got:\n%s",
+					expectedTypedef,
+					out,
+				)
+			}
+
+			expectedVariable := fmt.Sprintf(
+				"%s value = %s_%s;",
+				test.cType,
+				test.enumName,
+				test.variant,
+			)
+
+			if !strings.Contains(out, expectedVariable) {
+				t.Fatalf(
+					"expected %q, got:\n%s",
+					expectedVariable,
+					out,
+				)
+			}
+		})
+	}
+}
+
+func TestGenerateEnumWithoutUnderlyingTypeStillUsesCEnum(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Direction :: enum {
+	North
+	South
+}
+
+Main :: task() {
+	direction: Direction = .South
+	_ = direction
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"typedef enum Direction {",
+	) {
+		t.Fatalf(
+			"expected ordinary enum to retain C enum lowering, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"Direction_North",
+	) ||
+		!strings.Contains(
+			out,
+			"Direction_South",
+		) {
+		t.Fatalf(
+			"expected ordinary enum variants, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef uint32_t Direction;",
+	) {
+		t.Fatalf(
+			"ordinary enum unexpectedly received fixed uint32 storage, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateEnumUnderlyingTypeInSwitch(t *testing.T) {
+	out, reporter := generate(t, `
+State :: enum u8 {
+	Waiting
+	Running
+	Stopped
+}
+
+Value :: task(state State) int {
+	switch state {
+	case .Waiting:
+		return 1
+	case .Running:
+		return 2
+	case .Stopped:
+		return 3
+	}
+
+	return 0
+}
+
+Main :: task() {
+	state: State = .Running
+	value := Value(state)
+	_ = value
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"typedef uint8_t State;",
+	) {
+		t.Fatalf(
+			"expected u8 enum storage, got:\n%s",
+			out,
+		)
+	}
+
+	expectedCases := []string{
+		"case State_Waiting:",
+		"case State_Running:",
+		"case State_Stopped:",
+	}
+
+	for _, expected := range expectedCases {
+		if !strings.Contains(out, expected) {
+			t.Fatalf(
+				"expected switch case %q, got:\n%s",
+				expected,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateDeferBlockRunsAtScopeExit(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+	value := 1
+
+	defer {
+		value = value + 10
+	}
+
+	value = 2
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	ordinaryAssignment := "value = 2;"
+	deferredAssignment := "value = (value + 10);"
+
+	ordinaryIndex := strings.Index(
+		out,
+		ordinaryAssignment,
+	)
+
+	deferredIndex := strings.Index(
+		out,
+		deferredAssignment,
+	)
+
+	if ordinaryIndex < 0 {
+		t.Fatalf(
+			"expected ordinary assignment %q, got:\n%s",
+			ordinaryAssignment,
+			out,
+		)
+	}
+
+	if deferredIndex < 0 {
+		t.Fatalf(
+			"expected deferred block assignment %q, got:\n%s",
+			deferredAssignment,
+			out,
+		)
+	}
+
+	if deferredIndex < ordinaryIndex {
+		t.Fatalf(
+			"deferred block ran before the remaining scope statements, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"__seal_defer_arg_",
+	) {
+		t.Fatalf(
+			"block-form defer must not capture call arguments, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateDeferBlockUsesExitTimeValues(t *testing.T) {
+	out, reporter := generate(t, `
+Observe :: task(value int) {
+	_ = value
+}
+
+Main :: task() {
+	value := 1
+
+	defer {
+		Observe(value)
+	}
+
+	value = 2
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	assignmentIndex := strings.Index(
+		out,
+		"value = 2;",
+	)
+
+	deferredCallIndex := strings.LastIndex(
+		out,
+		"Observe(value);",
+	)
+
+	if assignmentIndex < 0 {
+		t.Fatalf(
+			"expected value assignment, got:\n%s",
+			out,
+		)
+	}
+
+	if deferredCallIndex < 0 {
+		t.Fatalf(
+			"expected deferred Observe(value) call, got:\n%s",
+			out,
+		)
+	}
+
+	if deferredCallIndex < assignmentIndex {
+		t.Fatalf(
+			"deferred block call must be emitted after value mutation, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"__seal_defer_arg_",
+	) {
+		t.Fatalf(
+			"block-form defer unexpectedly captured its argument, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateDeferBlocksRunInLIFOOrder(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+	value := 1
+
+	defer {
+		value = value + 10
+	}
+
+	defer {
+		value = value * 2
+	}
+
+	value = 3
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	bodyAssignment := strings.Index(
+		out,
+		"value = 3;",
+	)
+
+	secondDefer := strings.Index(
+		out,
+		"value = (value * 2);",
+	)
+
+	firstDefer := strings.Index(
+		out,
+		"value = (value + 10);",
+	)
+
+	if bodyAssignment < 0 ||
+		secondDefer < 0 ||
+		firstDefer < 0 {
+		t.Fatalf(
+			"expected body and deferred assignments, got:\n%s",
+			out,
+		)
+	}
+
+	if !(bodyAssignment < secondDefer &&
+		secondDefer < firstDefer) {
+		t.Fatalf(
+			"expected deferred blocks in LIFO order, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateMixedCallAndBlockDefersInLIFOOrder(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Record :: task(value int) {
+	_ = value
+}
+
+Main :: task() {
+	value := 1
+
+	defer Record(value)
+
+	defer {
+		value = value + 10
+	}
+
+	value = 2
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	captureIndex := strings.Index(
+		out,
+		"__seal_defer_arg_",
+	)
+
+	assignmentIndex := strings.Index(
+		out,
+		"value = 2;",
+	)
+
+	blockDeferIndex := strings.Index(
+		out,
+		"value = (value + 10);",
+	)
+
+	callDeferIndex := strings.LastIndex(
+		out,
+		"Record(__seal_defer_arg_",
+	)
+
+	if captureIndex < 0 ||
+		assignmentIndex < 0 ||
+		blockDeferIndex < 0 ||
+		callDeferIndex < 0 {
+		t.Fatalf(
+			"expected captured call defer and deferred block, got:\n%s",
+			out,
+		)
+	}
+
+	if !(captureIndex < assignmentIndex &&
+		assignmentIndex < blockDeferIndex &&
+		blockDeferIndex < callDeferIndex) {
+		t.Fatalf(
+			"expected mixed defers to execute in LIFO order, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateDeferBlockAtNestedScopeExit(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+	value := 1
+
+	{
+		defer {
+			value = value + 10
+		}
+
+		value = value + 2
+	}
+
+	value = value + 4
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	innerBody := strings.Index(
+		out,
+		"value = (value + 2);",
+	)
+
+	innerDefer := strings.Index(
+		out,
+		"value = (value + 10);",
+	)
+
+	outerBody := strings.Index(
+		out,
+		"value = (value + 4);",
+	)
+
+	if innerBody < 0 ||
+		innerDefer < 0 ||
+		outerBody < 0 {
+		t.Fatalf(
+			"expected nested-scope statements, got:\n%s",
+			out,
+		)
+	}
+
+	if !(innerBody < innerDefer &&
+		innerDefer < outerBody) {
+		t.Fatalf(
+			"expected inner defer before continuing the outer scope, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateDeferBlockBeforeReturn(t *testing.T) {
+	out, reporter := generate(t, `
+Compute :: task() int {
+	value := 1
+
+	defer {
+		value = value + 10
+	}
+
+	return value
+}
+
+Main :: task() {
+	result := Compute()
+	_ = result
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	returnValueIndex := strings.Index(
+		out,
+		"= value;",
+	)
+
+	deferredIndex := strings.Index(
+		out,
+		"value = (value + 10);",
+	)
+
+	returnIndex := strings.Index(
+		out,
+		"return __seal_return_value_",
+	)
+
+	if returnValueIndex < 0 ||
+		deferredIndex < 0 ||
+		returnIndex < 0 {
+		t.Fatalf(
+			"expected return capture, deferred block, and return, got:\n%s",
+			out,
+		)
+	}
+
+	if !(returnValueIndex < deferredIndex &&
+		deferredIndex < returnIndex) {
+		t.Fatalf(
+			"expected return expression to be captured before defer and returned afterward, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateNestedDeferInsideDeferredBlock(t *testing.T) {
+	out, reporter := generate(t, `
+First :: task() {
+}
+
+Second :: task() {
+}
+
+Main :: task() {
+	defer {
+		defer Second()
+		First()
+	}
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	firstIndex := strings.LastIndex(
+		out,
+		"First();",
+	)
+
+	secondIndex := strings.LastIndex(
+		out,
+		"Second();",
+	)
+
+	if firstIndex < 0 ||
+		secondIndex < 0 {
+		t.Fatalf(
+			"expected both deferred-body calls, got:\n%s",
+			out,
+		)
+	}
+
+	if firstIndex > secondIndex {
+		t.Fatalf(
+			"expected nested defer to execute after the deferred block body, got:\n%s",
+			out,
+		)
+	}
 }

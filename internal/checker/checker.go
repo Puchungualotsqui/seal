@@ -574,6 +574,17 @@ type Checker struct {
 
 	currentResults []*Type
 
+	// currentDeferDepth is greater than zero while checking the contents of
+	// a deferred block:
+	//
+	//     defer {
+	//         ...
+	//     }
+	//
+	// It is reset when entering a nested task because that task has its own
+	// independent return and defer context.
+	currentDeferDepth int
+
 	preparingTasks map[*ast.TaskDecl]bool
 
 	preparingOverloads map[*ast.OverloadDecl]bool
@@ -1959,10 +1970,10 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 		}
 
 	case *ast.StructDecl:
-		// Already prepared.
+	// Already prepared.
 
 	case *ast.EnumDecl:
-		// Later phase.
+		// Already prepared and validated.
 
 	case *ast.UnionDecl:
 	// Later phase.
@@ -3665,11 +3676,20 @@ func (c *Checker) implMayParticipate(info *ImplInfo) bool {
 	return c.ensureImplChecked(info)
 }
 
-func (c *Checker) checkInlineImplTask(parent *Scope, d *ast.TaskDecl, taskType *Type) {
+func (c *Checker) checkInlineImplTask(
+	parent *Scope,
+	d *ast.TaskDecl,
+	taskType *Type,
+) {
+	if d == nil || taskType == nil {
+		return
+	}
+
 	taskScope := NewScope(parent)
 
 	for i, param := range d.Params {
 		paramType := InvalidType
+
 		if i < len(taskType.Params) {
 			paramType = taskType.Params[i]
 		}
@@ -3684,11 +3704,19 @@ func (c *Checker) checkInlineImplTask(parent *Scope, d *ast.TaskDecl, taskType *
 	}
 
 	oldResults := c.currentResults
-	c.currentResults = taskType.Results
+	oldDeferDepth := c.currentDeferDepth
 
-	c.checkBlockInScope(taskScope, d.Body, false)
+	c.currentResults = taskType.Results
+	c.currentDeferDepth = 0
+
+	c.checkBlockInScope(
+		taskScope,
+		d.Body,
+		false,
+	)
 
 	c.currentResults = oldResults
+	c.currentDeferDepth = oldDeferDepth
 }
 
 func (c *Checker) taskSignatureMatches(taskType *Type, expectedParams []*Type, expectedResults []*Type) bool {
@@ -3993,29 +4021,53 @@ func (c *Checker) prepareImplDecl(
 	c.implByDecl[d] = info
 }
 
-func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
+func (c *Checker) checkTaskDecl(
+	parent *Scope,
+	d *ast.TaskDecl,
+) {
 	taskSym := parent.LookupLocal(d.Name.Name)
 	if taskSym == nil {
 		return
 	}
 
 	taskType := taskSym.Type
-	if taskType == nil || taskType.Kind != TypeTask {
-		taskType = c.taskTypeFromDecl(parent, d)
+
+	if taskType == nil ||
+		taskType.Kind != TypeTask {
+		taskType = c.taskTypeFromDecl(
+			parent,
+			d,
+		)
 		taskSym.Type = taskType
 	}
 
-	genericScope := c.scopeWithGenericParams(parent, d.GenericParams)
+	genericScope := c.scopeWithGenericParams(
+		parent,
+		d.GenericParams,
+	)
 
-	c.checkTaskDefaultParameters(genericScope, d, taskType)
+	c.checkTaskDefaultParameters(
+		genericScope,
+		d,
+		taskType,
+	)
 
 	if d.IsExtern {
 		if d.IsPure && !d.IsTrustedPure {
-			c.diags.Add(d.Name.Span(), "extern task cannot be marked pure; use @trusted_pure extern(...) if this C function is safe to treat as pure")
+			c.diags.Add(
+				d.Name.Span(),
+				"extern task cannot be marked pure; use @trusted_pure extern(...) if this C function is safe to treat as pure",
+			)
 		}
 
 		if d.Body != nil {
-			c.diags.Add(d.Body.Span(), fmt.Sprintf("extern task %q cannot have a body", d.Name.Name))
+			c.diags.Add(
+				d.Body.Span(),
+				fmt.Sprintf(
+					"extern task %q cannot have a body",
+					d.Name.Name,
+				),
+			)
 		}
 
 		return
@@ -4023,7 +4075,13 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 
 	if d.IsIntrinsic {
 		if d.Body != nil {
-			c.diags.Add(d.Body.Span(), fmt.Sprintf("intrinsic task %q cannot have a body", d.Name.Name))
+			c.diags.Add(
+				d.Body.Span(),
+				fmt.Sprintf(
+					"intrinsic task %q cannot have a body",
+					d.Name.Name,
+				),
+			)
 		}
 
 		return
@@ -4033,6 +4091,7 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 
 	for i, param := range d.Params {
 		paramType := InvalidType
+
 		if i < len(taskType.Params) {
 			paramType = taskType.Params[i]
 		}
@@ -4055,11 +4114,21 @@ func (c *Checker) checkTaskDecl(parent *Scope, d *ast.TaskDecl) {
 	}
 
 	oldResults := c.currentResults
-	c.currentResults = taskType.Results
+	oldDeferDepth := c.currentDeferDepth
 
-	c.checkBlockInScope(taskScope, d.Body, false)
+	// Every task starts a new return/defer context. This matters when a nested
+	// task declaration appears inside a deferred block.
+	c.currentResults = taskType.Results
+	c.currentDeferDepth = 0
+
+	c.checkBlockInScope(
+		taskScope,
+		d.Body,
+		false,
+	)
 
 	c.currentResults = oldResults
+	c.currentDeferDepth = oldDeferDepth
 }
 
 func (c *Checker) importPackageImpls() {
@@ -4780,67 +4849,204 @@ func (c *Checker) checkBlockInScope(scope *Scope, block *ast.BlockStmt, createCh
 	}
 }
 
-func (c *Checker) checkStmt(scope *Scope, stmt ast.Stmt) {
+func (c *Checker) checkStmt(
+	scope *Scope,
+	stmt ast.Stmt,
+) {
 	switch s := stmt.(type) {
 	case *ast.DeclStmt:
-		c.declareDecl(scope, s.Decl)
-		c.prepareDecl(scope, s.Decl)
-		c.checkDecl(scope, s.Decl)
+		c.declareDecl(
+			scope,
+			s.Decl,
+		)
+		c.prepareDecl(
+			scope,
+			s.Decl,
+		)
+		c.checkDecl(
+			scope,
+			s.Decl,
+		)
 
 	case *ast.BlockStmt:
-		c.checkBlockInScope(scope, s, true)
+		c.checkBlockInScope(
+			scope,
+			s,
+			true,
+		)
 
 	case *ast.ReturnStmt:
-		c.checkReturnStmt(scope, s)
+		c.checkReturnStmt(
+			scope,
+			s,
+		)
 
 	case *ast.DeferStmt:
-		c.checkExpr(scope, s.Call)
+		c.checkDeferStmt(
+			scope,
+			s,
+		)
 
 	case *ast.SealStmt:
-		c.checkExpr(scope, s.Target)
+		c.checkExpr(
+			scope,
+			s.Target,
+		)
 
 	case *ast.MultiVarDeclStmt:
-		c.checkMultiVarDeclStmt(scope, s)
+		c.checkMultiVarDeclStmt(
+			scope,
+			s,
+		)
 
 	case *ast.ExprStmt:
-		c.checkExpr(scope, s.Expr)
+		c.checkExpr(
+			scope,
+			s.Expr,
+		)
 
 	case *ast.AssignStmt:
-		c.checkAssignStmt(scope, s)
+		c.checkAssignStmt(
+			scope,
+			s,
+		)
 
 	case *ast.VarDeclStmt:
-		c.checkVarDeclStmt(scope, s)
+		c.checkVarDeclStmt(
+			scope,
+			s,
+		)
 
 	case *ast.IfStmt:
-		cond := c.checkExpr(scope, s.Cond)
-		c.checkBoolCondition(cond, s.Cond.Span(), "if condition must be bool")
+		cond := c.checkExpr(
+			scope,
+			s.Cond,
+		)
 
-		c.checkBlockInScope(scope, s.Then, true)
+		c.checkBoolCondition(
+			cond,
+			s.Cond.Span(),
+			"if condition must be bool",
+		)
+
+		c.checkBlockInScope(
+			scope,
+			s.Then,
+			true,
+		)
 
 		if s.Else != nil {
-			c.checkStmt(scope, s.Else)
+			c.checkStmt(
+				scope,
+				s.Else,
+			)
 		}
 
 	case *ast.ForStmt:
 		forScope := NewScope(scope)
 
 		if s.Init != nil {
-			c.checkStmt(forScope, s.Init)
+			c.checkStmt(
+				forScope,
+				s.Init,
+			)
 		}
 
 		if s.Cond != nil {
-			cond := c.checkExpr(forScope, s.Cond)
-			c.checkBoolCondition(cond, s.Cond.Span(), "for condition must be bool")
+			cond := c.checkExpr(
+				forScope,
+				s.Cond,
+			)
+
+			c.checkBoolCondition(
+				cond,
+				s.Cond.Span(),
+				"for condition must be bool",
+			)
 		}
 
 		if s.Post != nil {
-			c.checkStmt(forScope, s.Post)
+			c.checkStmt(
+				forScope,
+				s.Post,
+			)
 		}
 
-		c.checkBlockInScope(forScope, s.Body, true)
+		c.checkBlockInScope(
+			forScope,
+			s.Body,
+			true,
+		)
 
 	case *ast.SwitchStmt:
-		c.checkSwitchStmt(scope, s)
+		c.checkSwitchStmt(
+			scope,
+			s,
+		)
+	}
+}
+
+func (c *Checker) checkDeferStmt(
+	scope *Scope,
+	s *ast.DeferStmt,
+) {
+	if s == nil {
+		return
+	}
+
+	if c.currentDeferDepth > 0 {
+		c.diags.Add(
+			s.Span(),
+			"nested defer is not allowed inside a defer block",
+		)
+	}
+
+	hasCall := s.Call != nil
+	hasBody := s.Body != nil
+
+	if hasCall == hasBody {
+		c.diags.Add(
+			s.Span(),
+			"defer must contain exactly one task call or one block",
+		)
+	}
+
+	if s.Call != nil {
+		call, ok := s.Call.(*ast.CallExpr)
+		if !ok {
+			c.diags.Add(
+				s.Call.Span(),
+				"defer expression must be a task call",
+			)
+
+			// Still check the expression so ordinary type/name diagnostics are
+			// not lost.
+			c.checkExpr(
+				scope,
+				s.Call,
+			)
+		} else {
+			// Use the result-list checker rather than checkExpr. A deferred
+			// task may return any number of values because its results are
+			// discarded.
+			c.checkCallResultTypes(
+				scope,
+				call,
+			)
+		}
+	}
+
+	if s.Body != nil {
+		oldDepth := c.currentDeferDepth
+		c.currentDeferDepth = oldDepth + 1
+
+		c.checkBlockInScope(
+			scope,
+			s.Body,
+			true,
+		)
+
+		c.currentDeferDepth = oldDepth
 	}
 }
 
@@ -4913,23 +5119,64 @@ func (c *Checker) taskHasDefaultParameters(taskType *Type) bool {
 	return false
 }
 
-func (c *Checker) checkReturnStmt(scope *Scope, s *ast.ReturnStmt) {
+func (c *Checker) checkReturnStmt(
+	scope *Scope,
+	s *ast.ReturnStmt,
+) {
+	if c.currentDeferDepth > 0 {
+		c.diags.Add(
+			s.Span(),
+			"return is not allowed inside a defer block",
+		)
+
+		// Check returned expressions for independent name and type errors, but
+		// do not compare them with the surrounding task's result signature.
+		for _, value := range s.Values {
+			if call, ok := value.(*ast.CallExpr); ok {
+				c.checkCallResultTypes(
+					scope,
+					call,
+				)
+				continue
+			}
+
+			c.checkExpr(
+				scope,
+				value,
+			)
+		}
+
+		return
+	}
+
 	expected := c.currentResults
 
-	if len(s.Values) == 1 && len(expected) > 1 {
+	if len(s.Values) == 1 &&
+		len(expected) > 1 {
 		if call, ok := s.Values[0].(*ast.CallExpr); ok {
-			results := c.checkCallResultTypes(scope, call)
+			results := c.checkCallResultTypes(
+				scope,
+				call,
+			)
 
 			if len(results) != len(expected) {
 				c.diags.Add(
 					s.Span(),
-					fmt.Sprintf("return count mismatch: expected %d value(s), got %d", len(expected), len(results)),
+					fmt.Sprintf(
+						"return count mismatch: expected %d value(s), got %d",
+						len(expected),
+						len(results),
+					),
 				)
 				return
 			}
 
 			for i, result := range results {
-				c.checkAssignable(expected[i], result, s.Values[0].Span())
+				c.checkAssignable(
+					expected[i],
+					result,
+					s.Values[0].Span(),
+				)
 			}
 
 			return
@@ -4939,19 +5186,34 @@ func (c *Checker) checkReturnStmt(scope *Scope, s *ast.ReturnStmt) {
 	if len(s.Values) != len(expected) {
 		c.diags.Add(
 			s.Span(),
-			fmt.Sprintf("return count mismatch: expected %d value(s), got %d", len(expected), len(s.Values)),
+			fmt.Sprintf(
+				"return count mismatch: expected %d value(s), got %d",
+				len(expected),
+				len(s.Values),
+			),
 		)
 
 		for _, value := range s.Values {
-			c.checkExpr(scope, value)
+			c.checkExpr(
+				scope,
+				value,
+			)
 		}
 
 		return
 	}
 
 	for i, value := range s.Values {
-		got := c.checkExpr(scope, value)
-		c.checkAssignable(expected[i], got, value.Span())
+		got := c.checkExpr(
+			scope,
+			value,
+		)
+
+		c.checkAssignable(
+			expected[i],
+			got,
+			value.Span(),
+		)
 	}
 }
 
@@ -9856,6 +10118,76 @@ func (c *Checker) isMutableAddressableExpr(
 	return false
 }
 
+func (c *Checker) isValidEnumUnderlying(
+	t *Type,
+) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64:
+		return true
+
+	default:
+		return false
+	}
+}
+
+func maxEnumVariantCount(
+	t *Type,
+) (uint64, bool) {
+	if t == nil {
+		return 0, false
+	}
+
+	// Enum values are assigned from zero upward. Signed representations can
+	// therefore use only their non-negative range.
+	switch t.Kind {
+	case TypeI8:
+		return uint64(1) << 7, true
+
+	case TypeI16:
+		return uint64(1) << 15, true
+
+	case TypeI32:
+		return uint64(1) << 31, true
+
+	case TypeI64:
+		return uint64(1) << 63, true
+
+	case TypeU8:
+		return uint64(1) << 8, true
+
+	case TypeU16:
+		return uint64(1) << 16, true
+
+	case TypeU32:
+		return uint64(1) << 32, true
+
+	case TypeInt,
+		TypeUint,
+		TypeU64:
+		// int and uint depend on the selected target ABI. u64 can represent
+		// more values than a Go uint64 count can express as a variant count.
+		// These limits are not practically reachable by a source file, so no
+		// checker-side count limit is necessary here.
+		return 0, false
+
+	default:
+		return 0, false
+	}
+}
+
 func (c *Checker) isValidDistinctUnderlying(t *Type) bool {
 	if t == nil {
 		return false
@@ -9954,22 +10286,83 @@ func (c *Checker) checkBoolCondition(t *Type, span source.Span, message string) 
 	}
 }
 
-func (c *Checker) prepareEnumDecl(parent *Scope, d *ast.EnumDecl) {
+func (c *Checker) prepareEnumDecl(
+	parent *Scope,
+	d *ast.EnumDecl,
+) {
+	if d == nil {
+		return
+	}
+
 	sym := parent.LookupLocal(d.Name.Name)
 	if sym == nil || sym.Type == nil {
 		return
 	}
 
+	// Preserve the existing untyped enum behavior by using int when no
+	// representation is explicitly selected.
+	underlying := IntType
+
+	if d.Underlying != nil {
+		underlying = c.typeFromAst(
+			parent,
+			d.Underlying,
+		)
+
+		if underlying != nil &&
+			underlying.Kind != TypeInvalid &&
+			!c.isValidEnumUnderlying(underlying) {
+			c.diags.Add(
+				d.Underlying.Span(),
+				fmt.Sprintf(
+					"enum underlying type must be a builtin integer type, got %s",
+					underlying.String(),
+				),
+			)
+
+			underlying = InvalidType
+		}
+	}
+
+	sym.Type.Underlying = underlying
+
 	var variants []EnumVariantInfo
 
 	for _, variant := range d.Variants {
-		variants = append(variants, EnumVariantInfo{
-			Name: variant.Name,
-			Span: variant.Span(),
-		})
+		variants = append(
+			variants,
+			EnumVariantInfo{
+				Name: variant.Name,
+				Span: variant.Span(),
+			},
+		)
 	}
 
 	sym.Type.Variants = variants
+
+	maxVariants, limited := maxEnumVariantCount(
+		underlying,
+	)
+
+	if limited &&
+		uint64(len(variants)) > maxVariants {
+		diagnosticSpan := d.Name.Span()
+
+		if d.Underlying != nil {
+			diagnosticSpan = d.Underlying.Span()
+		}
+
+		c.diags.Add(
+			diagnosticSpan,
+			fmt.Sprintf(
+				"enum %s has %d variants, but underlying type %s can represent only %d auto-assigned values starting at 0",
+				d.Name.Name,
+				len(variants),
+				underlying.String(),
+				maxVariants,
+			),
+		)
+	}
 }
 
 func (c *Checker) prepareUnionDecl(parent *Scope, d *ast.UnionDecl) {

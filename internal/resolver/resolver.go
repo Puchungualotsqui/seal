@@ -481,7 +481,7 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 		r.resolveType(scope, d.Underlying)
 
 	case *ast.EnumDecl:
-		r.resolveEnumDecl(d)
+		r.resolveEnumDecl(scope, d)
 
 	case *ast.UnionDecl:
 		for _, member := range d.Members {
@@ -515,14 +515,26 @@ func (r *Resolver) resolveStructDecl(parent *Scope, d *ast.StructDecl) {
 	}
 }
 
-func (r *Resolver) resolveEnumDecl(d *ast.EnumDecl) {
+func (r *Resolver) resolveEnumDecl(scope *Scope, d *ast.EnumDecl) {
+	if d == nil {
+		return
+	}
+
+	if d.Underlying != nil {
+		r.resolveType(scope, d.Underlying)
+	}
+
 	seen := map[string]source.Span{}
 
 	for _, variant := range d.Variants {
 		if prev, ok := seen[variant.Name]; ok {
 			r.diags.Add(
 				variant.Span(),
-				fmt.Sprintf("duplicate enum variant %q, previous declaration at %s", variant.Name, prev.String()),
+				fmt.Sprintf(
+					"duplicate enum variant %q, previous declaration at %s",
+					variant.Name,
+					prev.String(),
+				),
 			)
 			continue
 		}
@@ -753,7 +765,15 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 		}
 
 	case *ast.DeferStmt:
-		r.resolveExpr(scope, s.Call)
+		if s.Call != nil {
+			r.resolveExpr(scope, s.Call)
+		}
+
+		if s.Body != nil {
+			// A deferred block has its own local scope, but it may reference
+			// symbols visible at the defer declaration.
+			r.resolveBlockInScope(s.Body, scope, true)
+		}
 
 	case *ast.SealStmt:
 		r.resolveExpr(scope, s.Target)
@@ -769,7 +789,13 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 				continue
 			}
 
-			r.declareSymbol(scope, name.Name, SymbolVar, name.Span(), s)
+			r.declareSymbol(
+				scope,
+				name.Name,
+				SymbolVar,
+				name.Span(),
+				s,
+			)
 		}
 
 	case *ast.AssignStmt:
@@ -785,7 +811,13 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 			r.resolveExpr(scope, s.Value)
 		}
 
-		r.declareSymbol(scope, s.Name.Name, SymbolVar, s.Name.Span(), nil)
+		r.declareSymbol(
+			scope,
+			s.Name.Name,
+			SymbolVar,
+			s.Name.Span(),
+			nil,
+		)
 
 	case *ast.IfStmt:
 		r.resolveExpr(scope, s.Cond)

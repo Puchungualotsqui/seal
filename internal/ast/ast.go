@@ -305,7 +305,23 @@ func (d *TaskDecl) Span() source.Span {
 }
 
 type EnumDecl struct {
-	Name     Ident
+	Name Ident
+
+	// Underlying is the explicitly selected integer storage type:
+	//
+	//     ErrorCode :: enum u32 {
+	//         None
+	//         InvalidInput
+	//     }
+	//
+	// A nil Underlying preserves the default enum representation:
+	//
+	//     Status :: enum {
+	//         Ready
+	//         Done
+	//     }
+	Underlying Type
+
 	Variants []Ident
 	Loc      source.Span
 }
@@ -623,8 +639,24 @@ func (s *ReturnStmt) Span() source.Span {
 }
 
 type DeferStmt struct {
+	// Call is used by the call form:
+	//
+	//     defer Close(file)
+	//
+	// The checker must require this expression to be a task call.
 	Call Expr
-	Loc  source.Span
+
+	// Body is used by the block form:
+	//
+	//     defer {
+	//         Flush(file)
+	//         Close(file)
+	//     }
+	//
+	// Exactly one of Call or Body should be non-nil.
+	Body *BlockStmt
+
+	Loc source.Span
 }
 
 func (*DeferStmt) stmtNode() {}

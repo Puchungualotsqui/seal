@@ -73,10 +73,20 @@ type valueInfo struct {
 	Type CType
 }
 
+type deferredAction struct {
+	// Call contains a fully prepared C call. Call-form defer arguments are
+	// evaluated and captured when the defer statement is encountered.
+	Call string
+
+	// Body is emitted when the containing scope exits. Expressions inside a
+	// block-form defer are therefore evaluated at scope-exit time.
+	Body *ast.BlockStmt
+}
+
 type scope struct {
 	parent *scope
 	vars   map[string]valueInfo
-	defers []string
+	defers []deferredAction
 }
 
 func newScope(parent *scope) *scope {
@@ -86,8 +96,30 @@ func newScope(parent *scope) *scope {
 	}
 }
 
-func (s *scope) addDefer(code string) {
-	s.defers = append(s.defers, code)
+func (s *scope) addDeferredCall(code string) {
+	if s == nil || code == "" {
+		return
+	}
+
+	s.defers = append(
+		s.defers,
+		deferredAction{
+			Call: code,
+		},
+	)
+}
+
+func (s *scope) addDeferredBlock(body *ast.BlockStmt) {
+	if s == nil || body == nil {
+		return
+	}
+
+	s.defers = append(
+		s.defers,
+		deferredAction{
+			Body: body,
+		},
+	)
 }
 
 func (s *scope) declare(name string, typ CType) {
@@ -1424,6 +1456,7 @@ func (g *Generator) Generate(file *ast.File) string {
 
 	g.emitDistincts(file)
 	g.emitEnums(file)
+	g.emitImportedEnums()
 
 	// Interface value representations must exist before any ordinary,
 	// imported, or specialized struct that stores an interface by value.
@@ -2085,81 +2118,186 @@ func (g *Generator) collectGenericStructInstancesFromBlockWithGenericArgs(block 
 	}
 }
 
-func (g *Generator) collectGenericStructInstancesFromStmtWithGenericArgs(stmt ast.Stmt, subst map[string]ast.GenericArg) {
+func (g *Generator) collectGenericStructInstancesFromStmtWithGenericArgs(
+	stmt ast.Stmt,
+	subst map[string]ast.GenericArg,
+) {
 	switch s := stmt.(type) {
 	case *ast.DeclStmt:
 		// Local declarations are not supported by this C backend phase yet.
 
 	case *ast.BlockStmt:
-		g.collectGenericStructInstancesFromBlockWithGenericArgs(s, subst)
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(
+			s,
+			subst,
+		)
 
 	case *ast.ReturnStmt:
 		for _, value := range s.Values {
-			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(value, subst))
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					value,
+					subst,
+				),
+			)
 		}
 
 	case *ast.DeferStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Call, subst))
+		if s.Call != nil {
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					s.Call,
+					subst,
+				),
+			)
+		}
+
+		if s.Body != nil {
+			g.collectGenericStructInstancesFromBlockWithGenericArgs(
+				s.Body,
+				subst,
+			)
+		}
 
 	case *ast.SealStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Target, subst))
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Target,
+				subst,
+			),
+		)
 
 	case *ast.ExprStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Expr, subst))
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Expr,
+				subst,
+			),
+		)
 
 	case *ast.MultiVarDeclStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Value, subst))
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Value,
+				subst,
+			),
+		)
 
 	case *ast.AssignStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Left, subst))
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Right, subst))
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Left,
+				subst,
+			),
+		)
+
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Right,
+				subst,
+			),
+		)
 
 	case *ast.VarDeclStmt:
 		if s.HasType {
-			g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(s.Type, subst))
+			g.collectGenericStructInstancesFromType(
+				g.substituteTypeAstForCGen(
+					s.Type,
+					subst,
+				),
+			)
 		}
 
 		if s.HasValue {
-			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Value, subst))
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					s.Value,
+					subst,
+				),
+			)
 		}
 
 	case *ast.IfStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Cond, subst))
-		g.collectGenericStructInstancesFromBlockWithGenericArgs(s.Then, subst)
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Cond,
+				subst,
+			),
+		)
+
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(
+			s.Then,
+			subst,
+		)
 
 		if s.Else != nil {
-			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Else, subst)
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(
+				s.Else,
+				subst,
+			)
 		}
 
 	case *ast.ForStmt:
 		if s.Init != nil {
-			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Init, subst)
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(
+				s.Init,
+				subst,
+			)
 		}
 
 		if s.Cond != nil {
-			g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Cond, subst))
+			g.collectGenericStructInstancesFromExpr(
+				g.substituteExprForCGen(
+					s.Cond,
+					subst,
+				),
+			)
 		}
 
 		if s.Post != nil {
-			g.collectGenericStructInstancesFromStmtWithGenericArgs(s.Post, subst)
+			g.collectGenericStructInstancesFromStmtWithGenericArgs(
+				s.Post,
+				subst,
+			)
 		}
 
-		g.collectGenericStructInstancesFromBlockWithGenericArgs(s.Body, subst)
+		g.collectGenericStructInstancesFromBlockWithGenericArgs(
+			s.Body,
+			subst,
+		)
 
 	case *ast.SwitchStmt:
-		g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(s.Target, subst))
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Target,
+				subst,
+			),
+		)
 
 		for _, swCase := range s.Cases {
 			if swCase.UnionMember != nil {
-				g.collectGenericStructInstancesFromType(g.substituteTypeAstForCGen(swCase.UnionMember, subst))
+				g.collectGenericStructInstancesFromType(
+					g.substituteTypeAstForCGen(
+						swCase.UnionMember,
+						subst,
+					),
+				)
 			}
 
 			if swCase.Expr != nil {
-				g.collectGenericStructInstancesFromExpr(g.substituteExprForCGen(swCase.Expr, subst))
+				g.collectGenericStructInstancesFromExpr(
+					g.substituteExprForCGen(
+						swCase.Expr,
+						subst,
+					),
+				)
 			}
 
 			for _, bodyStmt := range swCase.Body {
-				g.collectGenericStructInstancesFromStmtWithGenericArgs(bodyStmt, subst)
+				g.collectGenericStructInstancesFromStmtWithGenericArgs(
+					bodyStmt,
+					subst,
+				)
 			}
 		}
 	}
@@ -2263,81 +2401,137 @@ func (g *Generator) collectGenericStructInstancesFromBlock(block *ast.BlockStmt)
 	}
 }
 
-func (g *Generator) collectGenericStructInstancesFromStmt(stmt ast.Stmt) {
+func (g *Generator) collectGenericStructInstancesFromStmt(
+	stmt ast.Stmt,
+) {
 	switch s := stmt.(type) {
 	case *ast.DeclStmt:
-		g.collectGenericStructInstancesFromDecl(s.Decl)
+		g.collectGenericStructInstancesFromDecl(
+			s.Decl,
+		)
 
 	case *ast.BlockStmt:
-		g.collectGenericStructInstancesFromBlock(s)
+		g.collectGenericStructInstancesFromBlock(
+			s,
+		)
 
 	case *ast.ReturnStmt:
 		for _, value := range s.Values {
-			g.collectGenericStructInstancesFromExpr(value)
+			g.collectGenericStructInstancesFromExpr(
+				value,
+			)
 		}
 
 	case *ast.DeferStmt:
-		g.collectGenericStructInstancesFromExpr(s.Call)
+		if s.Call != nil {
+			g.collectGenericStructInstancesFromExpr(
+				s.Call,
+			)
+		}
+
+		if s.Body != nil {
+			g.collectGenericStructInstancesFromBlock(
+				s.Body,
+			)
+		}
 
 	case *ast.SealStmt:
-		g.collectGenericStructInstancesFromExpr(s.Target)
+		g.collectGenericStructInstancesFromExpr(
+			s.Target,
+		)
 
 	case *ast.ExprStmt:
-		g.collectGenericStructInstancesFromExpr(s.Expr)
+		g.collectGenericStructInstancesFromExpr(
+			s.Expr,
+		)
 
 	case *ast.MultiVarDeclStmt:
-		g.collectGenericStructInstancesFromExpr(s.Value)
+		g.collectGenericStructInstancesFromExpr(
+			s.Value,
+		)
 
 	case *ast.AssignStmt:
-		g.collectGenericStructInstancesFromExpr(s.Left)
-		g.collectGenericStructInstancesFromExpr(s.Right)
+		g.collectGenericStructInstancesFromExpr(
+			s.Left,
+		)
+
+		g.collectGenericStructInstancesFromExpr(
+			s.Right,
+		)
 
 	case *ast.VarDeclStmt:
 		if s.HasType {
-			g.collectGenericStructInstancesFromType(s.Type)
+			g.collectGenericStructInstancesFromType(
+				s.Type,
+			)
 		}
 
 		if s.HasValue {
-			g.collectGenericStructInstancesFromExpr(s.Value)
+			g.collectGenericStructInstancesFromExpr(
+				s.Value,
+			)
 		}
 
 	case *ast.IfStmt:
-		g.collectGenericStructInstancesFromExpr(s.Cond)
-		g.collectGenericStructInstancesFromBlock(s.Then)
+		g.collectGenericStructInstancesFromExpr(
+			s.Cond,
+		)
+
+		g.collectGenericStructInstancesFromBlock(
+			s.Then,
+		)
 
 		if s.Else != nil {
-			g.collectGenericStructInstancesFromStmt(s.Else)
+			g.collectGenericStructInstancesFromStmt(
+				s.Else,
+			)
 		}
 
 	case *ast.ForStmt:
 		if s.Init != nil {
-			g.collectGenericStructInstancesFromStmt(s.Init)
+			g.collectGenericStructInstancesFromStmt(
+				s.Init,
+			)
 		}
 
 		if s.Cond != nil {
-			g.collectGenericStructInstancesFromExpr(s.Cond)
+			g.collectGenericStructInstancesFromExpr(
+				s.Cond,
+			)
 		}
 
 		if s.Post != nil {
-			g.collectGenericStructInstancesFromStmt(s.Post)
+			g.collectGenericStructInstancesFromStmt(
+				s.Post,
+			)
 		}
 
-		g.collectGenericStructInstancesFromBlock(s.Body)
+		g.collectGenericStructInstancesFromBlock(
+			s.Body,
+		)
 
 	case *ast.SwitchStmt:
-		g.collectGenericStructInstancesFromExpr(s.Target)
+		g.collectGenericStructInstancesFromExpr(
+			s.Target,
+		)
 
 		for _, swCase := range s.Cases {
 			if swCase.UnionMember != nil {
-				g.collectGenericStructInstancesFromType(swCase.UnionMember)
+				g.collectGenericStructInstancesFromType(
+					swCase.UnionMember,
+				)
 			}
 
 			if swCase.Expr != nil {
-				g.collectGenericStructInstancesFromExpr(swCase.Expr)
+				g.collectGenericStructInstancesFromExpr(
+					swCase.Expr,
+				)
 			}
 
 			for _, bodyStmt := range swCase.Body {
-				g.collectGenericStructInstancesFromStmt(bodyStmt)
+				g.collectGenericStructInstancesFromStmt(
+					bodyStmt,
+				)
 			}
 		}
 	}
@@ -3474,14 +3668,38 @@ func (g *Generator) emitDistincts(file *ast.File) {
 	}
 }
 
-func (g *Generator) emitEnums(file *ast.File) {
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.EnumDecl)
-		if !ok {
-			continue
+func (g *Generator) emitEnumDefinition(
+	cName string,
+	d *ast.EnumDecl,
+	underlying *CType,
+) {
+	if d == nil || cName == "" {
+		return
+	}
+
+	// Avoid invalid empty C enums even if an earlier compiler phase allowed
+	// one through. An empty enum is represented as its chosen integer type.
+	if len(d.Variants) == 0 {
+		base := CInt
+
+		if underlying != nil &&
+			!isInvalidCType(*underlying) {
+			base = *underlying
 		}
 
-		g.linef("typedef enum %s {", d.Name.Name)
+		g.linef(
+			"typedef %s %s;",
+			base.Name,
+			cName,
+		)
+		g.line("")
+		return
+	}
+
+	// Without an explicit Seal underlying type, retain the existing C enum
+	// representation.
+	if underlying == nil {
+		g.linef("typedef enum %s {", cName)
 		g.indent++
 
 		for i, variant := range d.Variants {
@@ -3490,12 +3708,159 @@ func (g *Generator) emitEnums(file *ast.File) {
 				comma = ""
 			}
 
-			g.linef("%s_%s%s", d.Name.Name, variant.Name, comma)
+			g.linef(
+				"%s_%s%s",
+				cName,
+				variant.Name,
+				comma,
+			)
 		}
 
 		g.indent--
-		g.linef("} %s;", d.Name.Name)
+		g.linef("} %s;", cName)
 		g.line("")
+		return
+	}
+
+	base := *underlying
+
+	if isInvalidCType(base) {
+		g.error(
+			d.Underlying.Span(),
+			fmt.Sprintf(
+				"cannot lower enum %s with invalid underlying type",
+				d.Name.Name,
+			),
+		)
+
+		base = CInt
+	}
+
+	// C11 does not provide portable syntax for fixing the underlying storage
+	// type of a C enum. Use an integer typedef for the value representation
+	// and an anonymous enum for integer constant expressions.
+	//
+	// This gives values of `enum u32` exact uint32_t storage while keeping
+	// variants usable in switch case labels.
+	g.linef(
+		"typedef %s %s;",
+		base.Name,
+		cName,
+	)
+
+	g.line("enum {")
+	g.indent++
+
+	for i, variant := range d.Variants {
+		comma := ","
+		if i == len(d.Variants)-1 {
+			comma = ""
+		}
+
+		g.linef(
+			"%s_%s = %d%s",
+			cName,
+			variant.Name,
+			i,
+			comma,
+		)
+	}
+
+	g.indent--
+	g.line("};")
+	g.line("")
+}
+
+func (g *Generator) emitEnums(file *ast.File) {
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+
+		var underlying *CType
+
+		if d.Underlying != nil {
+			converted := g.cTypeFromAst(d.Underlying)
+			underlying = &converted
+		}
+
+		g.emitEnumDefinition(
+			d.Name.Name,
+			d,
+			underlying,
+		)
+	}
+}
+
+func (g *Generator) emitImportedEnums() {
+	if len(g.packages) == 0 {
+		return
+	}
+
+	packageNames := make(
+		[]string,
+		0,
+		len(g.packages),
+	)
+
+	for packageName := range g.packages {
+		packageNames = append(
+			packageNames,
+			packageName,
+		)
+	}
+
+	sort.Strings(packageNames)
+
+	for _, packageName := range packageNames {
+		pkg := g.packages[packageName]
+		if pkg == nil {
+			continue
+		}
+
+		enumNames := make(
+			[]string,
+			0,
+			len(pkg.Enums),
+		)
+
+		for enumName := range pkg.Enums {
+			enumNames = append(
+				enumNames,
+				enumName,
+			)
+		}
+
+		sort.Strings(enumNames)
+
+		for _, enumName := range enumNames {
+			d := pkg.Enums[enumName]
+			if d == nil {
+				continue
+			}
+
+			var underlying *CType
+
+			if d.Underlying != nil {
+				converted :=
+					g.cTypeFromAstInTypeContext(
+						packageName,
+						d.Underlying,
+					)
+
+				underlying = &converted
+			}
+
+			g.emitEnumDefinition(
+				cImportedTypeName(
+					packageName,
+					enumName,
+				),
+				d,
+				underlying,
+			)
+		}
 	}
 }
 
@@ -4216,9 +4581,65 @@ func (g *Generator) emitActiveDefers() {
 }
 
 func (g *Generator) emitDefersInScope(sc *scope) {
-	for i := len(sc.defers) - 1; i >= 0; i-- {
-		g.linef("%s;", sc.defers[i])
+	if sc == nil {
+		return
 	}
+
+	// A deferred block must be emitted using the lexical scope in which the
+	// defer statement was registered. This prevents an inner scope that
+	// happens to contain the return statement from changing identifier/type
+	// lookup inside an outer deferred block.
+	previousScope := g.scope
+	g.scope = sc
+
+	defer func() {
+		g.scope = previousScope
+	}()
+
+	for i := len(sc.defers) - 1; i >= 0; i-- {
+		g.emitDeferredAction(
+			sc.defers[i],
+		)
+	}
+}
+
+func (g *Generator) emitDeferredAction(
+	action deferredAction,
+) {
+	if action.Call != "" {
+		g.linef(
+			"%s;",
+			action.Call,
+		)
+		return
+	}
+
+	if action.Body == nil {
+		return
+	}
+
+	// Give the deferred body its own lexical scope. This supports local
+	// variables and nested defers within the deferred body.
+	g.line("{")
+	g.indent++
+
+	parentScope := g.scope
+	g.scope = newScope(parentScope)
+
+	g.emitBlockStatements(
+		action.Body,
+	)
+
+	// A defer declared inside this deferred block exits when the deferred
+	// block itself finishes.
+	g.emitDefersInScope(
+		g.scope,
+	)
+
+	g.scope = parentScope
+
+	g.indent--
+	g.line("}")
 }
 
 func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
@@ -4831,81 +5252,137 @@ func (g *Generator) collectInterfaceInstancesFromBlock(block *ast.BlockStmt) {
 	}
 }
 
-func (g *Generator) collectInterfaceInstancesFromStmt(stmt ast.Stmt) {
+func (g *Generator) collectInterfaceInstancesFromStmt(
+	stmt ast.Stmt,
+) {
 	switch s := stmt.(type) {
 	case *ast.DeclStmt:
-		g.collectInterfaceInstancesFromDecl(s.Decl)
+		g.collectInterfaceInstancesFromDecl(
+			s.Decl,
+		)
 
 	case *ast.BlockStmt:
-		g.collectInterfaceInstancesFromBlock(s)
+		g.collectInterfaceInstancesFromBlock(
+			s,
+		)
 
 	case *ast.ReturnStmt:
 		for _, value := range s.Values {
-			g.collectInterfaceInstancesFromExpr(value)
+			g.collectInterfaceInstancesFromExpr(
+				value,
+			)
 		}
 
 	case *ast.DeferStmt:
-		g.collectInterfaceInstancesFromExpr(s.Call)
+		if s.Call != nil {
+			g.collectInterfaceInstancesFromExpr(
+				s.Call,
+			)
+		}
+
+		if s.Body != nil {
+			g.collectInterfaceInstancesFromBlock(
+				s.Body,
+			)
+		}
 
 	case *ast.SealStmt:
-		g.collectInterfaceInstancesFromExpr(s.Target)
+		g.collectInterfaceInstancesFromExpr(
+			s.Target,
+		)
 
 	case *ast.ExprStmt:
-		g.collectInterfaceInstancesFromExpr(s.Expr)
+		g.collectInterfaceInstancesFromExpr(
+			s.Expr,
+		)
 
 	case *ast.MultiVarDeclStmt:
-		g.collectInterfaceInstancesFromExpr(s.Value)
+		g.collectInterfaceInstancesFromExpr(
+			s.Value,
+		)
 
 	case *ast.AssignStmt:
-		g.collectInterfaceInstancesFromExpr(s.Left)
-		g.collectInterfaceInstancesFromExpr(s.Right)
+		g.collectInterfaceInstancesFromExpr(
+			s.Left,
+		)
+
+		g.collectInterfaceInstancesFromExpr(
+			s.Right,
+		)
 
 	case *ast.VarDeclStmt:
 		if s.HasType {
-			g.collectInterfaceInstancesFromType(s.Type)
+			g.collectInterfaceInstancesFromType(
+				s.Type,
+			)
 		}
 
 		if s.HasValue {
-			g.collectInterfaceInstancesFromExpr(s.Value)
+			g.collectInterfaceInstancesFromExpr(
+				s.Value,
+			)
 		}
 
 	case *ast.IfStmt:
-		g.collectInterfaceInstancesFromExpr(s.Cond)
-		g.collectInterfaceInstancesFromBlock(s.Then)
+		g.collectInterfaceInstancesFromExpr(
+			s.Cond,
+		)
+
+		g.collectInterfaceInstancesFromBlock(
+			s.Then,
+		)
 
 		if s.Else != nil {
-			g.collectInterfaceInstancesFromStmt(s.Else)
+			g.collectInterfaceInstancesFromStmt(
+				s.Else,
+			)
 		}
 
 	case *ast.ForStmt:
 		if s.Init != nil {
-			g.collectInterfaceInstancesFromStmt(s.Init)
+			g.collectInterfaceInstancesFromStmt(
+				s.Init,
+			)
 		}
 
 		if s.Cond != nil {
-			g.collectInterfaceInstancesFromExpr(s.Cond)
+			g.collectInterfaceInstancesFromExpr(
+				s.Cond,
+			)
 		}
 
 		if s.Post != nil {
-			g.collectInterfaceInstancesFromStmt(s.Post)
+			g.collectInterfaceInstancesFromStmt(
+				s.Post,
+			)
 		}
 
-		g.collectInterfaceInstancesFromBlock(s.Body)
+		g.collectInterfaceInstancesFromBlock(
+			s.Body,
+		)
 
 	case *ast.SwitchStmt:
-		g.collectInterfaceInstancesFromExpr(s.Target)
+		g.collectInterfaceInstancesFromExpr(
+			s.Target,
+		)
 
 		for _, swCase := range s.Cases {
 			if swCase.UnionMember != nil {
-				g.collectInterfaceInstancesFromType(swCase.UnionMember)
+				g.collectInterfaceInstancesFromType(
+					swCase.UnionMember,
+				)
 			}
 
 			if swCase.Expr != nil {
-				g.collectInterfaceInstancesFromExpr(swCase.Expr)
+				g.collectInterfaceInstancesFromExpr(
+					swCase.Expr,
+				)
 			}
 
 			for _, bodyStmt := range swCase.Body {
-				g.collectInterfaceInstancesFromStmt(bodyStmt)
+				g.collectInterfaceInstancesFromStmt(
+					bodyStmt,
+				)
 			}
 		}
 	}
@@ -6908,15 +7385,13 @@ func (g *Generator) emitExpr(
 
 	case *ast.DotIdentExpr:
 		if expected != nil &&
-			expected.SealName != "" {
-			if _, ok :=
-				g.enums[expected.SealName]; ok {
-				return fmt.Sprintf(
-					"%s_%s",
-					expected.SealName,
-					e.Name.Name,
-				)
-			}
+			expected.SealName != "" &&
+			g.isEnumCType(*expected) {
+			return fmt.Sprintf(
+				"%s_%s",
+				expected.SealName,
+				e.Name.Name,
+			)
 		}
 
 		g.error(
@@ -8258,15 +8733,50 @@ func (g *Generator) emitVariadicLiteral(elem CType, args []ast.Expr, preparedArg
 	)
 }
 
-func (g *Generator) emitDeferStmt(s *ast.DeferStmt) {
+func (g *Generator) emitDeferStmt(
+	s *ast.DeferStmt,
+) {
+	if s == nil {
+		return
+	}
+
+	if s.Body != nil {
+		if s.Call != nil {
+			g.error(
+				s.Span(),
+				"defer cannot contain both a call and a block",
+			)
+			return
+		}
+
+		g.scope.addDeferredBlock(
+			s.Body,
+		)
+		return
+	}
+
+	if s.Call == nil {
+		g.error(
+			s.Span(),
+			"defer requires a task call or a block",
+		)
+		return
+	}
+
 	call, ok := s.Call.(*ast.CallExpr)
 	if !ok {
-		g.error(s.Span(), "defer currently supports only task calls")
+		g.error(
+			s.Span(),
+			"call-form defer requires a task call",
+		)
 		return
 	}
 
 	code := g.emitDeferredCall(call)
-	g.scope.addDefer(code)
+
+	g.scope.addDeferredCall(
+		code,
+	)
 }
 
 func (g *Generator) emitDeferredCall(call *ast.CallExpr) string {
@@ -9621,6 +10131,29 @@ func (g *Generator) emitByteIndexExpr(e *ast.IndexExpr, leftType CType, left str
 func (g *Generator) isUnion(t CType) bool {
 	_, ok := g.unions[t.SealName]
 	return ok
+}
+
+func (g *Generator) isEnumCType(t CType) bool {
+	if g.enums[t.SealName] != nil {
+		return true
+	}
+
+	for packageName, pkg := range g.packages {
+		if pkg == nil {
+			continue
+		}
+
+		for enumName := range pkg.Enums {
+			if cImportedTypeName(
+				packageName,
+				enumName,
+			) == t.SealName {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (g *Generator) isInterfaceCType(t CType) bool {

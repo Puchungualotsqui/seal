@@ -441,6 +441,29 @@ func (p *Parser) parseStructDecl(name ast.Ident, start int, intrinsic bool) ast.
 }
 
 func (p *Parser) parseEnumDecl(name ast.Ident, start int) ast.Decl {
+	var underlying ast.Type
+
+	// Preserve the existing default form:
+	//
+	//     Status :: enum {
+	//         Ready
+	//         Done
+	//     }
+	//
+	// When the next token is not `{`, parse an explicit underlying type:
+	//
+	//     ErrorCode :: enum u32 {
+	//         None
+	//         InvalidInput
+	//     }
+	if !p.at(token.LBrace) {
+		underlying = p.parseType()
+		if underlying == nil {
+			p.errorHere("expected enum underlying type or '{'")
+			return nil
+		}
+	}
+
 	if !p.expect(token.LBrace, "expected '{' after enum declaration") {
 		return nil
 	}
@@ -461,9 +484,10 @@ func (p *Parser) parseEnumDecl(name ast.Ident, start int) ast.Decl {
 	endTok := p.expectToken(token.RBrace, "expected '}' after enum variants")
 
 	return &ast.EnumDecl{
-		Name:     name,
-		Variants: variants,
-		Loc:      p.span(start, endTok.Span.End),
+		Name:       name,
+		Underlying: underlying,
+		Variants:   variants,
+		Loc:        p.span(start, endTok.Span.End),
 	}
 }
 
@@ -1594,15 +1618,40 @@ func (p *Parser) parseStmt() ast.Stmt {
 		}
 
 		end := p.previous().Span.End
+
 		return &ast.ReturnStmt{
 			Values: values,
 			Loc:    p.span(start, end),
 		}
 
 	case p.match(token.KeywordDefer):
+		// Block-form defer:
+		//
+		//     defer {
+		//         Flush(file)
+		//         Close(file)
+		//     }
+		if p.at(token.LBrace) {
+			body := p.parseBlock()
+			if body == nil {
+				return nil
+			}
+
+			return &ast.DeferStmt{
+				Body: body,
+				Loc:  p.span(start, body.Span().End),
+			}
+		}
+
+		// Call-form defer:
+		//
+		//     defer Close(file)
+		//
+		// The parser accepts an expression here. The checker is responsible
+		// for requiring it to be a valid task call.
 		call := p.parseExpr(0)
 		if call == nil {
-			p.errorHere("expected expression after defer")
+			p.errorHere("expected task call or block after defer")
 			return nil
 		}
 
@@ -1636,6 +1685,7 @@ func (p *Parser) parseStmt() ast.Stmt {
 		}
 
 		var elseStmt ast.Stmt
+
 		if p.match(token.KeywordElse) {
 			if p.at(token.KeywordIf) {
 				elseStmt = p.parseStmt()
