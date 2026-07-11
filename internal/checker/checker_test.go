@@ -4850,3 +4850,476 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCheckImplRejectsWrongParameterCount(t *testing.T) {
+	reporter := checkSource(t, `
+Movable :: interface {
+	Move :: task(self *self, x int, y int)
+}
+
+Transform :: struct {
+	x int
+	y int
+}
+
+Movable :: impl Transform {
+	Move :: task(self *Transform, x int) {
+		self.x = x
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Move" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsWrongParameterType(t *testing.T) {
+	reporter := checkSource(t, `
+Movable :: interface {
+	Move :: task(self *self, amount int)
+}
+
+Transform :: struct {
+	x int
+}
+
+Movable :: impl Transform {
+	Move :: task(self *Transform, amount string) {
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Move" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsWrongResultCount(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int, bool
+}
+
+Box :: struct {
+	value int
+}
+
+Readable :: impl Box {
+	Read :: task(self *Box) int {
+		return self.value
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Read" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsWrongResultType(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+Readable :: impl Box {
+	Read :: task(self *Box) string {
+		return "invalid"
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Read" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsAliasWithWrongSignature(t *testing.T) {
+	reporter := checkSource(t, `
+Movable :: interface {
+	Move :: task(self *self, amount int)
+}
+
+Transform :: struct {
+	x int
+}
+
+MoveTransformWrong :: task(transform *Transform, amount string) {
+}
+
+Movable :: impl Transform {
+	Move :: MoveTransformWrong
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Move" has wrong signature`,
+	)
+}
+
+func TestCheckImplRejectsAliasWithWrongReceiver(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+Other :: struct {
+	value int
+}
+
+ReadOther :: task(other *Other) int {
+	return other.value
+}
+
+Readable :: impl Box {
+	Read :: ReadOther
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Read" has wrong signature`,
+	)
+}
+
+func TestCheckImplRequiresExactRequirementParameterTypes(t *testing.T) {
+	reporter := checkSource(t, `
+Id :: distinct int
+
+Lookup :: interface {
+	Find :: task(self *self, id Id) int
+}
+
+Store :: struct {
+	value int
+}
+
+Lookup :: impl Store {
+	Find :: task(self *Store, id int) int {
+		return self.value + id
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "Find" has wrong signature`,
+	)
+}
+
+func TestCheckImplRequiresExactRequirementResultTypes(t *testing.T) {
+	reporter := checkSource(t, `
+Id :: distinct int
+
+Identifiable :: interface {
+	IdOf :: task(self *self) Id
+}
+
+Entity :: struct {
+	id int
+}
+
+Identifiable :: impl Entity {
+	IdOf :: task(self *Entity) int {
+		return self.id
+	}
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`impl entry "IdOf" has wrong signature`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsMissingDirectField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) int {
+		return self.position
+	}
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using missing
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`has no field "missing"`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsMissingNestedField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) int {
+		return self.position
+	}
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Entity :: struct {
+	components Components
+}
+
+Positioned :: impl Entity using components.missing
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`has no field "missing"`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsNonStructIntermediateField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Entity :: struct {
+	components int
+}
+
+Positioned :: impl Entity using components.transform
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot select delegated field "transform" on non-struct type int`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsPointerToNonStructIntermediateField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Entity :: struct {
+	components *int
+}
+
+Positioned :: impl Entity using components.transform
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot select delegated field "transform" on non-struct type int`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsPrimitiveFinalField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Entity :: struct {
+	position int
+}
+
+Positioned :: impl Entity using position
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`selected type int does not implement the interface`,
+	)
+}
+
+func TestCheckDelegatedImplRequiresImplementationOfSameInterface(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Named :: interface {
+	Name :: task(self *self) string
+}
+
+Transform :: struct {
+	position int
+}
+
+Named :: impl Transform {
+	Name :: task(self *Transform) string {
+		return "transform"
+	}
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`selected type Transform does not implement the interface`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsWrongGenericSpecialization(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface <T type> {
+	Read :: task(self *self) T
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Readable<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Holder :: struct {
+	box Box<string>
+}
+
+Readable<int> :: impl Holder using box
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`selected type Box<string> does not implement the interface`,
+	)
+}
+
+func TestCheckDelegatedImplAcceptsMatchingGenericSpecialization(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface <T type> {
+	Read :: task(self *self) T
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Readable<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Holder :: struct {
+	box Box<int>
+}
+
+Readable<int> :: impl Holder using box
+
+Main :: task() {
+	holder := Holder{
+		box = Box<int>{value = 42},
+	}
+
+	readable := cast<Readable<int>>(&holder)
+	value := Read(readable)
+
+	assert(value == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckDelegatedImplAcceptsPointerIntermediateField(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) int {
+		return self.position
+	}
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Entity :: struct {
+	components *Components
+}
+
+Positioned :: impl Entity using components.transform
+
+Main :: task() {
+	transform := Transform{position = 42}
+	components := Components{transform = transform}
+	entity := Entity{components = &components}
+
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+
+	assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}

@@ -8289,12 +8289,18 @@ func (g *Generator) emitStaticInterfaceDispatcher(
 
 	g.line("default:")
 	g.indent++
+
 	g.line(
 		`seal_panic_cstring("static interface dispatch on nil or invalid tag");`,
 	)
 
-	if ret.SealName != "void" {
-		g.line("return 0;")
+	if ret.SealName == "void" {
+		g.line("return;")
+	} else {
+		g.linef(
+			"return (%s){0};",
+			ret.Name,
+		)
 	}
 
 	g.indent--

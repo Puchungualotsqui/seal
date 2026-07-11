@@ -1,6 +1,9 @@
 package cgen
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +15,55 @@ import (
 	"seal/internal/resolver"
 	"seal/internal/source"
 )
+
+func compileGeneratedC(t *testing.T, generated string) {
+	t.Helper()
+
+	var compiler string
+
+	for _, candidate := range []string{"cc", "clang", "gcc"} {
+		path, err := exec.LookPath(candidate)
+		if err == nil {
+			compiler = path
+			break
+		}
+	}
+
+	if compiler == "" {
+		t.Skip("no C compiler found; install cc, clang, or gcc to run generated-C compilation tests")
+	}
+
+	tempDir := t.TempDir()
+	sourcePath := filepath.Join(tempDir, "generated.c")
+	objectPath := filepath.Join(tempDir, "generated.o")
+
+	if err := os.WriteFile(sourcePath, []byte(generated), 0o600); err != nil {
+		t.Fatalf("failed to write generated C source: %v", err)
+	}
+
+	cmd := exec.Command(
+		compiler,
+		"-std=c11",
+		"-c",
+		sourcePath,
+		"-o",
+		objectPath,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"generated C failed to compile with %s:\n%s\n\ngenerated C:\n%s",
+			compiler,
+			string(output),
+			generated,
+		)
+	}
+
+	if _, err := os.Stat(objectPath); err != nil {
+		t.Fatalf("C compiler reported success but object file was not created: %v", err)
+	}
+}
 
 func generate(t *testing.T, input string) (string, *diag.Reporter) {
 	t.Helper()
@@ -4200,4 +4252,196 @@ Main :: task() {
 			)
 		}
 	}
+}
+
+func TestCompileGeneratedStaticDelegatedInterface(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	Position :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+	return transform.x
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPosition
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+
+Main :: task() {
+	entity := Entity{
+		transform = Transform{x = 42},
+	}
+
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+
+	assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestCompileGeneratedDynamicDelegatedInterface(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: dyn interface {
+	Position :: task(value *self) int
+	SetPosition :: task(value *self, position int)
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+	return transform.x
+}
+
+WritePosition :: task(transform *Transform, position int) {
+	transform.x = position
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPosition
+	SetPosition :: WritePosition
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+
+ReadAndUpdate :: task(positioned Positioned) int {
+	before := Position(positioned)
+	SetPosition(positioned, before + 1)
+	return Position(positioned)
+}
+
+Main :: task() {
+	entity := Entity{
+		transform = Transform{x = 41},
+	}
+
+	positioned := cast<Positioned>(&entity)
+	result := ReadAndUpdate(positioned)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestCompileGeneratedDelegatedMultipleReturnInterface(t *testing.T) {
+	out, reporter := generate(t, `
+Coordinates :: interface {
+	Read :: task(value *self) int, int
+}
+
+Transform :: struct {
+	x int
+	y int
+}
+
+ReadTransform :: task(transform *Transform) int, int {
+	return transform.x, transform.y
+}
+
+Coordinates :: impl Transform {
+	Read :: ReadTransform
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Coordinates :: impl Entity using transform
+
+Main :: task() {
+	entity := Entity{
+		transform = Transform{
+			x = 20,
+			y = 22,
+		},
+	}
+
+	coordinates := cast<Coordinates>(&entity)
+	x, y := Read(coordinates)
+
+	assert(x + y == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestCompileGeneratedPointerIntermediateDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+ReadPosition :: task(transform *Transform) int {
+	return transform.position
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPosition
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Entity :: struct {
+	components *Components
+}
+
+Positioned :: impl Entity using components.transform
+
+Main :: task() {
+	transform := Transform{position = 42}
+	components := Components{transform = transform}
+	entity := Entity{components = &components}
+
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+
+	assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	compileGeneratedC(t, out)
 }
