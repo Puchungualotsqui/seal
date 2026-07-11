@@ -5821,3 +5821,138 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCheckNilAcceptedWithPointerContext(t *testing.T) {
+	reporter := checkSource(t, `
+TakePointer :: task(value *int) {
+}
+
+ReturnPointer :: task() *int {
+	return nil
+}
+
+Identity :: task <T type>(value T) T {
+	return value
+}
+
+Main :: task() {
+	value: *int = nil
+	TakePointer(nil)
+
+	other := ReturnPointer()
+	explicit := Identity<*int>(nil)
+
+	TakePointer(value)
+	TakePointer(other)
+	TakePointer(explicit)
+}
+`)
+
+	if reporter.String() != "" {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckNilCannotInferVariableType(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+	value := nil
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`nil needs explicit type`,
+	)
+}
+
+func TestCheckNilCannotInferGenericArgument(t *testing.T) {
+	reporter := checkSource(t, `
+Identity :: task <T type>(value T) T {
+	return value
+}
+
+Main :: task() {
+	value := Identity(nil)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`generic task "Identity" requires generic arguments`,
+	)
+}
+
+func TestCheckNilCannotInitializeAny(t *testing.T) {
+	reporter := checkSource(t, `
+TakeAny :: task(value any) {
+}
+
+Main :: task() {
+	value: any = nil
+	TakeAny(nil)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot assign nil to any`,
+	)
+}
+
+func TestCheckNilCannotBeCastToNonNullableType(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+	value := cast<int>(nil)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot cast nil to int`,
+	)
+}
+
+func TestCheckNilCannotInitializeUntypedConstant(t *testing.T) {
+	reporter := checkSource(t, `
+Nothing :: nil
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`nil cannot initialize an untyped constant`,
+	)
+}
+
+func TestCheckAllNilArrayNeedsElementType(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+	values := [nil, nil]
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`array literal containing only nil needs an explicit nullable element type`,
+	)
+}
+
+func TestCheckCannotTakeAddressOfNil(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+	value := &nil
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`cannot take the address of nil`,
+	)
+}

@@ -885,6 +885,14 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		return 0, true
 	}
 
+	if src.Kind == TypeNil {
+		if c.typeAcceptsNil(dst) {
+			return 1, true
+		}
+
+		return 0, false
+	}
+
 	if dst.Kind == TypeAny {
 		return 20, true
 	}
@@ -912,7 +920,7 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 	}
 
 	if dst.Kind == TypeUnion {
-		if src.Kind == TypeNil || c.unionHasMember(dst, src) {
+		if c.unionHasMember(dst, src) {
 			return 1, true
 		}
 
@@ -920,18 +928,6 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 	}
 
 	if dst.Kind == TypeInterface {
-		if src.Kind == TypeNil {
-			return 1, true
-		}
-
-		return 0, false
-	}
-
-	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion || dst.Kind == TypeInterface {
-			return 1, true
-		}
-
 		return 0, false
 	}
 
@@ -1753,7 +1749,19 @@ func (c *Checker) addImplConstraintToTypeParam(scope *Scope, param ast.GenericPa
 func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 	switch d := decl.(type) {
 	case *ast.ConstDecl:
-		typ := c.defaultType(c.checkExpr(scope, d.Value))
+		valueType := c.checkExpr(scope, d.Value)
+
+		typ := InvalidType
+
+		if valueType != nil && valueType.Kind == TypeNil {
+			c.diags.Add(
+				d.Value.Span(),
+				"nil cannot initialize an untyped constant",
+			)
+		} else {
+			typ = c.defaultType(valueType)
+		}
+
 		if sym := scope.LookupLocal(d.Name.Name); sym != nil {
 			sym.Type = typ
 		}
@@ -4150,6 +4158,14 @@ func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
 		return BoolType
 
 	case token.Amp:
+		if typ.Kind == TypeNil {
+			c.diags.Add(
+				e.Span(),
+				"cannot take the address of nil",
+			)
+			return InvalidType
+		}
+
 		return &Type{
 			Kind: TypePointer,
 			Elem: typ,
@@ -5172,6 +5188,23 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 	case builtin.TaskCast:
 		sourceType := argTypes[0]
 
+		if sourceType != nil &&
+			sourceType.Kind == TypeNil &&
+			targetType.Kind != TypeInterface {
+			if targetType.Kind != TypeInvalid &&
+				!c.typeAcceptsNil(targetType) {
+				c.diags.Add(
+					args[0].Span(),
+					fmt.Sprintf(
+						"cannot cast nil to %s",
+						targetType.String(),
+					),
+				)
+			}
+
+			return targetType
+		}
+
 		if targetType.Kind != TypeInterface {
 			return targetType
 		}
@@ -5398,7 +5431,10 @@ func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) 
 	return qualified.Type
 }
 
-func (c *Checker) checkArrayLiteralExpr(scope *Scope, e *ast.ArrayLiteralExpr) *Type {
+func (c *Checker) checkArrayLiteralExpr(
+	scope *Scope,
+	e *ast.ArrayLiteralExpr,
+) *Type {
 	if len(e.Values) == 0 {
 		return &Type{
 			Kind: TypeArray,
@@ -5407,17 +5443,63 @@ func (c *Checker) checkArrayLiteralExpr(scope *Scope, e *ast.ArrayLiteralExpr) *
 		}
 	}
 
-	firstType := c.defaultType(c.checkExpr(scope, e.Values[0]))
+	itemTypes := make([]*Type, len(e.Values))
 
-	for i := 1; i < len(e.Values); i++ {
-		itemType := c.checkExpr(scope, e.Values[i])
-		c.checkAssignable(firstType, itemType, e.Values[i].Span())
+	var elemType *Type
+	allNil := true
+
+	for i, value := range e.Values {
+		itemType := c.checkExpr(scope, value)
+		itemTypes[i] = itemType
+
+		if itemType == nil ||
+			itemType.Kind == TypeInvalid {
+			continue
+		}
+
+		if itemType.Kind == TypeNil {
+			continue
+		}
+
+		allNil = false
+
+		if elemType == nil {
+			candidate := c.defaultType(itemType)
+
+			if candidate != nil &&
+				candidate.Kind != TypeInvalid {
+				elemType = candidate
+			}
+		}
+	}
+
+	if elemType == nil {
+		if allNil {
+			c.diags.Add(
+				e.Span(),
+				"array literal containing only nil needs an explicit nullable element type",
+			)
+		}
+
+		return &Type{
+			Kind: TypeArray,
+			Len:  len(e.Values),
+			Elem: InvalidType,
+		}
+	}
+
+	for i, itemType := range itemTypes {
+		c.checkAssignable(
+			elemType,
+			itemType,
+			e.Values[i].Span(),
+		)
 	}
 
 	return &Type{
 		Kind: TypeArray,
 		Len:  len(e.Values),
-		Elem: firstType,
+		Elem: elemType,
 	}
 }
 
@@ -7894,7 +7976,11 @@ func (c *Checker) checkMultiVarDeclStmt(scope *Scope, s *ast.MultiVarDeclStmt) {
 	}
 }
 
-func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
+func (c *Checker) checkAssignable(
+	dst *Type,
+	src *Type,
+	span source.Span,
+) {
 	if dst == nil || src == nil {
 		return
 	}
@@ -7904,6 +7990,21 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 
 	if c.sameType(dst, src) {
+		return
+	}
+
+	if src.Kind == TypeNil {
+		if c.typeAcceptsNil(dst) {
+			return
+		}
+
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"cannot assign nil to %s",
+				dst.String(),
+			),
+		)
 		return
 	}
 
@@ -7924,10 +8025,6 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 
 	if dst.Kind == TypeInterface {
-		if src.Kind == TypeNil {
-			return
-		}
-
 		c.diags.Add(
 			span,
 			fmt.Sprintf(
@@ -7941,15 +8038,18 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 
 	if dst.Kind == TypeUnion {
-		if src.Kind == TypeNil {
-			return
-		}
-
 		if c.unionHasMember(dst, src) {
 			return
 		}
 
-		c.diags.Add(span, fmt.Sprintf("cannot assign %s to union %s", src.String(), dst.String()))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"cannot assign %s to union %s",
+				src.String(),
+				dst.String(),
+			),
+		)
 		return
 	}
 
@@ -7967,6 +8067,23 @@ func (c *Checker) checkAssignable(dst *Type, src *Type, span source.Span) {
 	}
 }
 
+func (c *Checker) typeAcceptsNil(t *Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypePointer,
+		TypeRawptr,
+		TypeUnion,
+		TypeInterface:
+		return true
+
+	default:
+		return false
+	}
+}
+
 func (c *Checker) assignable(dst *Type, src *Type) bool {
 	if dst == nil || src == nil {
 		return true
@@ -7978,6 +8095,10 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 
 	if c.sameType(dst, src) {
 		return true
+	}
+
+	if src.Kind == TypeNil {
+		return c.typeAcceptsNil(dst)
 	}
 
 	if dst.Kind == TypeAny {
@@ -8001,15 +8122,11 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if dst.Kind == TypeInterface {
-		return src.Kind == TypeNil
+		return false
 	}
 
 	if dst.Kind == TypeUnion {
-		return src.Kind == TypeNil || c.unionHasMember(dst, src)
-	}
-
-	if src.Kind == TypeNil {
-		return dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeUnion || dst.Kind == TypeInterface
+		return c.unionHasMember(dst, src)
 	}
 
 	if src.Kind == TypeUntypedInt {
