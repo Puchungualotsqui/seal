@@ -917,13 +917,6 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 	case *ast.PointerType:
 		r.resolveTypeWithInterfaceSelf(scope, t.Elem, allowInterfaceSelf)
 
-	case *ast.ArrayType:
-		if !t.Inferred && t.Len != nil {
-			r.resolveExpr(scope, t.Len)
-		}
-
-		r.resolveTypeWithInterfaceSelf(scope, t.Elem, allowInterfaceSelf)
-
 	case *ast.GenericType:
 		r.resolveTypeWithInterfaceSelf(scope, t.Base, allowInterfaceSelf)
 
@@ -990,8 +983,8 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		r.resolveSymbolUse(scope, e.Name.Name, e.Name.Span())
 
 	case *ast.DotIdentExpr:
-	// .None / .ErrorReading need type context.
-	// The type checker resolves these later.
+		// .None / .ErrorReading need type context.
+		// The type checker resolves these later.
 
 	case *ast.IntLitExpr,
 		*ast.FloatLitExpr,
@@ -1028,20 +1021,37 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 
 	case *ast.SelectorExpr:
 		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			sym := r.resolveSymbolUse(scope, id.Name.Name, id.Name.Span())
+			sym := r.resolveSymbolUse(
+				scope,
+				id.Name.Name,
+				id.Name.Span(),
+			)
 			if sym == nil {
 				return
 			}
 
 			if sym.Kind == SymbolPackage {
 				if sym.Package == nil {
-					r.diags.Add(id.Span(), fmt.Sprintf("package %q has no symbol table", id.Name.Name))
+					r.diags.Add(
+						id.Span(),
+						fmt.Sprintf(
+							"package %q has no symbol table",
+							id.Name.Name,
+						),
+					)
 					return
 				}
 
 				member := sym.Package.Symbols[e.Name.Name]
 				if member == nil {
-					r.diags.Add(e.Name.Span(), fmt.Sprintf("package %s has no symbol %q", id.Name.Name, e.Name.Name))
+					r.diags.Add(
+						e.Name.Span(),
+						fmt.Sprintf(
+							"package %s has no symbol %q",
+							id.Name.Name,
+							e.Name.Name,
+						),
+					)
 					return
 				}
 
@@ -1054,11 +1064,6 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 	case *ast.IndexExpr:
 		r.resolveExpr(scope, e.Left)
 		r.resolveExpr(scope, e.Index)
-
-	case *ast.ArrayLiteralExpr:
-		for _, value := range e.Values {
-			r.resolveExpr(scope, value)
-		}
 
 	case *ast.CompoundLiteralExpr:
 		r.resolveType(scope, e.Type)

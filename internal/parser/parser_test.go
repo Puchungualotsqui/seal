@@ -186,30 +186,6 @@ Foo :: task(number int) int {
 	}
 }
 
-func TestParseTypedVarDeclWithArray(t *testing.T) {
-	file, reporter := parse(t, `
-Main :: task() {
-    arr: []int = [2, 3, 4]
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	task := file.Decls[0].(*ast.TaskDecl)
-	stmt := task.Body.Stmts[0].(*ast.VarDeclStmt)
-
-	arrayType, ok := stmt.Type.(*ast.ArrayType)
-	if !ok {
-		t.Fatalf("expected ArrayType, got %T", stmt.Type)
-	}
-
-	if !arrayType.Inferred {
-		t.Fatalf("expected inferred array length")
-	}
-}
-
 func TestParseCStyleFor(t *testing.T) {
 	file, reporter := parse(t, `
 Main :: task() {
@@ -562,52 +538,6 @@ printf :: extern("printf") task(format string, args ...any) int
 	}
 }
 
-func TestParseVariadicArrayOfAny(t *testing.T) {
-	file, reporter := parse(t, `
-TakeArrays :: task(args ...[10]any) {
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	if len(file.Decls) != 1 {
-		t.Fatalf("expected 1 decl, got %d", len(file.Decls))
-	}
-
-	taskDecl, ok := file.Decls[0].(*ast.TaskDecl)
-	if !ok {
-		t.Fatalf("expected TaskDecl")
-	}
-
-	if len(taskDecl.Params) != 1 {
-		t.Fatalf("expected 1 param, got %d", len(taskDecl.Params))
-	}
-
-	if !taskDecl.Params[0].IsVariadic {
-		t.Fatalf("expected variadic parameter")
-	}
-
-	arrayType, ok := taskDecl.Params[0].Type.(*ast.ArrayType)
-	if !ok {
-		t.Fatalf("expected variadic element type to be array, got %T", taskDecl.Params[0].Type)
-	}
-
-	if arrayType.Inferred {
-		t.Fatalf("expected fixed array length")
-	}
-
-	namedType, ok := arrayType.Elem.(*ast.NamedType)
-	if !ok {
-		t.Fatalf("expected array element type to be named type, got %T", arrayType.Elem)
-	}
-
-	if len(namedType.Parts) != 1 || namedType.Parts[0].Name != "any" {
-		t.Fatalf("expected array element type any, got %+v", namedType.Parts)
-	}
-}
-
 func TestParseGenericAnyIntrinsics(t *testing.T) {
 	file, reporter := parse(t, `
 Main :: task() {
@@ -755,39 +685,6 @@ Example :: task(a, b ...int) {
 
 	if !decl.Params[1].IsVariadic {
 		t.Fatalf("expected second grouped param to be variadic")
-	}
-}
-
-func TestParseInferredArrayType(t *testing.T) {
-	file, reporter := parse(t, `
-Main :: task() {
-    values: []int = [1, 2, 3]
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	mainDecl := file.Decls[0].(*ast.TaskDecl)
-	stmt := mainDecl.Body.Stmts[0].(*ast.VarDeclStmt)
-
-	arrType, ok := stmt.Type.(*ast.ArrayType)
-	if !ok {
-		t.Fatalf("expected array type, got %T", stmt.Type)
-	}
-
-	if !arrType.Inferred {
-		t.Fatalf("expected inferred array type")
-	}
-
-	elem, ok := arrType.Elem.(*ast.NamedType)
-	if !ok {
-		t.Fatalf("expected named element type, got %T", arrType.Elem)
-	}
-
-	if elem.Parts[0].Name != "int" {
-		t.Fatalf("expected int element type, got %q", elem.Parts[0].Name)
 	}
 }
 

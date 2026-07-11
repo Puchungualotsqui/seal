@@ -49,46 +49,52 @@ func (p *Parser) ParseFile() *ast.File {
 func (p *Parser) parseDecl() ast.Decl {
 	start := p.peek().Span.Start
 
-	nameTok := p.peek()
-	if !p.isDeclName(nameTok.Kind) {
-		p.errorHere("expected declaration name")
-		return nil
-	}
-
-	var name ast.Ident
 	var declHead ast.Type
 	operatorName := ""
+	operatorLoc := source.Span{}
 
-	if nameTok.Kind == token.Ident {
-		p.advance()
-
-		name = ast.Ident{
-			Name: nameTok.Lexeme,
-			Loc:  nameTok.Span,
+	if name, loc, ok := p.parseBracketOperatorDeclName(); ok {
+		operatorName = name
+		operatorLoc = loc
+	} else {
+		nameTok := p.peek()
+		if !p.isDeclName(nameTok.Kind) {
+			p.errorHere("expected declaration name")
+			return nil
 		}
 
-		parts := []ast.Ident{name}
+		if nameTok.Kind == token.Ident {
+			p.advance()
 
-		for p.match(token.Dot) {
-			part := p.expectIdent("expected declaration name after '.'")
-			if part.Name == "" {
-				return nil
+			name := ast.Ident{
+				Name: nameTok.Lexeme,
+				Loc:  nameTok.Span,
 			}
 
-			parts = append(parts, part)
-		}
+			parts := []ast.Ident{name}
 
-		declHead = &ast.NamedType{
-			Parts: parts,
-			Loc:   p.span(start, parts[len(parts)-1].Span().End),
-		}
+			for p.match(token.Dot) {
+				part := p.expectIdent("expected declaration name after '.'")
+				if part.Name == "" {
+					return nil
+				}
 
-		if p.at(token.Lt) {
-			declHead = p.parseGenericTypeSuffix(declHead, start)
+				parts = append(parts, part)
+			}
+
+			declHead = &ast.NamedType{
+				Parts: parts,
+				Loc:   p.span(start, parts[len(parts)-1].Span().End),
+			}
+
+			if p.at(token.Lt) {
+				declHead = p.parseGenericTypeSuffix(declHead, start)
+			}
+		} else {
+			p.advance()
+			operatorName = nameTok.Lexeme
+			operatorLoc = nameTok.Span
 		}
-	} else {
-		p.advance()
-		operatorName = nameTok.Lexeme
 	}
 
 	if !p.expect(token.ColonColon, "expected '::' after declaration name") {
@@ -202,7 +208,15 @@ doneModifiers:
 				return nil
 			}
 
-			return p.parseTaskDecl(ast.Ident{Name: operatorName, Loc: nameTok.Span}, start, true, false)
+			return p.parseTaskDecl(
+				ast.Ident{
+					Name: operatorName,
+					Loc:  operatorLoc,
+				},
+				start,
+				true,
+				false,
+			)
 		}
 
 		if p.match(token.KeywordOverload) {
@@ -1223,7 +1237,7 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 	}
 
 	switch p.peek().Kind {
-	case token.Star, token.LBracket, token.KeywordSelf:
+	case token.Star, token.KeywordSelf:
 		t := p.parseType()
 		if t == nil {
 			return ast.GenericArg{}
@@ -1465,41 +1479,15 @@ func (p *Parser) parseType() ast.Type {
 			Loc:  p.span(start, elem.Span().End),
 		}
 
-	case p.match(token.LBracket):
-		inferred := false
-		var length ast.Expr
-
-		if p.match(token.RBracket) {
-			inferred = true
-		} else {
-			length = p.parseExpr(0)
-			if length == nil {
-				p.errorHere("expected array length or ']'")
-			}
-
-			p.expect(token.RBracket, "expected ']' after array length")
-		}
-
-		elem := p.parseType()
-		if elem == nil {
-			p.errorHere("expected array element type")
-			return nil
-		}
-
-		t = &ast.ArrayType{
-			Len:      length,
-			Inferred: inferred,
-			Elem:     elem,
-			Loc:      p.span(start, elem.Span().End),
-		}
-
 	case p.match(token.KeywordSelf):
 		t = &ast.InterfaceSelfType{
 			Loc: p.previous().Span,
 		}
 
 	case p.at(token.Ident):
-		parts := []ast.Ident{p.expectIdent("expected type name")}
+		parts := []ast.Ident{
+			p.expectIdent("expected type name"),
+		}
 
 		for p.match(token.Dot) {
 			part := p.expectIdent("expected name after '.'")
@@ -2178,9 +2166,6 @@ func (p *Parser) parsePrefix() ast.Expr {
 		p.expect(token.RParen, "expected ')' after expression")
 		return expr
 
-	case p.match(token.LBracket):
-		return p.parseArrayLiteral(start)
-
 	case p.isUnaryOp(p.peek().Kind):
 		op := p.advance()
 		expr := p.parseExpr(7)
@@ -2206,6 +2191,23 @@ func (p *Parser) looksLikeDeclStartAt(pos int) bool {
 	}
 
 	kind := p.tokens[pos].Kind
+
+	// Composite bracket operator declarations:
+	//
+	//     [] :: overload { get }
+	//     []= :: overload { set }
+	if kind == token.LBracket &&
+		pos+1 < len(p.tokens) &&
+		p.tokens[pos+1].Kind == token.RBracket {
+		i := pos + 2
+
+		if i < len(p.tokens) && p.tokens[i].Kind == token.Assign {
+			i++
+		}
+
+		return i < len(p.tokens) &&
+			p.tokens[i].Kind == token.ColonColon
+	}
 
 	if p.isDeclName(kind) && kind != token.Ident {
 		return pos+1 < len(p.tokens) &&
@@ -2463,13 +2465,69 @@ func (p *Parser) parsePostfix(left ast.Expr) ast.Expr {
 		return p.parseCompoundLiteralAfterLBrace(t, start)
 
 	case p.match(token.LBracket):
-		index := p.parseExpr(0)
-		if index == nil {
-			p.errorHere("expected index expression")
+		openTok := p.previous()
+
+		if p.at(token.RBracket) {
+			closeTok := p.advance()
+
+			p.diags.Add(
+				p.span(openTok.Span.Start, closeTok.Span.End),
+				"bracket index cannot be empty",
+			)
+
 			return left
 		}
 
-		endTok := p.expectToken(token.RBracket, "expected ']' after index")
+		index := p.parseExprUntil(
+			0,
+			token.Comma,
+			token.Colon,
+			token.RBracket,
+		)
+		if index == nil {
+			p.synchronizeUntil(token.RBracket)
+			p.expect(token.RBracket, "expected ']' after index")
+			return left
+		}
+
+		var invalidMessage string
+
+		switch {
+		case p.at(token.Comma):
+			invalidMessage = "brackets accept exactly one index expression"
+
+		case p.at(token.Colon), p.at(token.Ellipsis):
+			invalidMessage = "slices and ranges are not supported in brackets"
+
+		case !p.at(token.RBracket) && !p.at(token.EOF):
+			invalidMessage = "brackets accept exactly one index expression"
+		}
+
+		if invalidMessage != "" {
+			invalidStart := p.peek().Span.Start
+
+			p.synchronizeUntil(token.RBracket)
+			endTok := p.expectToken(
+				token.RBracket,
+				"expected ']' after index",
+			)
+
+			p.diags.Add(
+				p.span(invalidStart, endTok.Span.End),
+				invalidMessage,
+			)
+
+			return &ast.IndexExpr{
+				Left:  left,
+				Index: index,
+				Loc:   p.span(start, endTok.Span.End),
+			}
+		}
+
+		endTok := p.expectToken(
+			token.RBracket,
+			"expected ']' after index",
+		)
 
 		return &ast.IndexExpr{
 			Left:  left,
@@ -2479,30 +2537,6 @@ func (p *Parser) parsePostfix(left ast.Expr) ast.Expr {
 	}
 
 	return left
-}
-
-func (p *Parser) parseArrayLiteral(start int) ast.Expr {
-	var values []ast.Expr
-
-	for !p.at(token.RBracket) && !p.at(token.EOF) {
-		value := p.parseExpr(0)
-		if value == nil {
-			break
-		}
-
-		values = append(values, value)
-
-		if !p.match(token.Comma) {
-			break
-		}
-	}
-
-	endTok := p.expectToken(token.RBracket, "expected ']' after array literal")
-
-	return &ast.ArrayLiteralExpr{
-		Values: values,
-		Loc:    p.span(start, endTok.Span.End),
-	}
 }
 
 func (p *Parser) typeFromExprForLiteral(expr ast.Expr) ast.Type {
@@ -2726,6 +2760,25 @@ func (p *Parser) isDeclName(kind token.Kind) bool {
 	default:
 		return false
 	}
+}
+
+func (p *Parser) parseBracketOperatorDeclName() (string, source.Span, bool) {
+	if !p.at(token.LBracket) || p.peekNext().Kind != token.RBracket {
+		return "", source.Span{}, false
+	}
+
+	openTok := p.advance()
+	closeTok := p.advance()
+
+	name := "[]"
+	end := closeTok.Span.End
+
+	if p.match(token.Assign) {
+		name = "[]="
+		end = p.previous().Span.End
+	}
+
+	return name, p.span(openTok.Span.Start, end), true
 }
 
 func (p *Parser) expectParamName(message string) ast.Ident {

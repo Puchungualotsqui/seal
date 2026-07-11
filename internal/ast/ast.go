@@ -584,19 +584,6 @@ func (t *PointerType) Span() source.Span {
 	return t.Loc
 }
 
-type ArrayType struct {
-	Len      Expr
-	Inferred bool
-	Elem     Type
-	Loc      source.Span
-}
-
-func (*ArrayType) typeNode() {}
-
-func (t *ArrayType) Span() source.Span {
-	return t.Loc
-}
-
 type GenericType struct {
 	Base Type
 	Args []GenericArg
@@ -970,17 +957,6 @@ type IndexExpr struct {
 func (*IndexExpr) exprNode() {}
 
 func (e *IndexExpr) Span() source.Span {
-	return e.Loc
-}
-
-type ArrayLiteralExpr struct {
-	Values []Expr
-	Loc    source.Span
-}
-
-func (*ArrayLiteralExpr) exprNode() {}
-
-func (e *ArrayLiteralExpr) Span() source.Span {
 	return e.Loc
 }
 

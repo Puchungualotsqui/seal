@@ -52,7 +52,6 @@ const (
 	TypeUntypedFloat
 
 	TypePointer
-	TypeArray
 	TypeVariadic
 	TypeStruct
 	TypeDistinct
@@ -194,9 +193,6 @@ type Type struct {
 
 	Elem *Type
 
-	Len      int
-	Inferred bool
-
 	Fields   []FieldInfo
 	Variants []EnumVariantInfo
 	Members  []*Type
@@ -307,12 +303,6 @@ func (t *Type) String() string {
 	case TypePointer:
 		return "*" + t.Elem.String()
 
-	case TypeArray:
-		if t.Inferred {
-			return "[]" + t.Elem.String()
-		}
-
-		return fmt.Sprintf("[%d]%s", t.Len, t.Elem.String())
 	case TypeVariadic:
 		if t.Elem == nil {
 			return "...<invalid>"
@@ -652,7 +642,6 @@ func currentPackageOwnsImplTarget(typ *Type) bool {
 
 	switch typ.Kind {
 	case TypePointer,
-		TypeArray,
 		TypeVariadic:
 		// A wrapper does not create ownership of the wrapped type.
 		return currentPackageOwnsImplTarget(typ.Elem)
@@ -680,7 +669,6 @@ func packageNameFromType(typ *Type) (string, bool) {
 
 	switch typ.Kind {
 	case TypePointer,
-		TypeArray,
 		TypeVariadic:
 		return packageNameFromType(typ.Elem)
 	}
@@ -761,7 +749,20 @@ type overloadResolution struct {
 	Ambiguous bool
 }
 
-func (c *Checker) checkCallArgumentTypes(scope *Scope, args []ast.Expr) ([]*Type, []source.Span) {
+type bracketOverloadResolution struct {
+	Candidate *Symbol
+	TaskType  *Type
+	Score     int
+
+	Matched     bool
+	Ambiguous   bool
+	HadOverload bool
+}
+
+func (c *Checker) checkCallArgumentTypes(
+	scope *Scope,
+	args []ast.Expr,
+) ([]*Type, []source.Span) {
 	var types []*Type
 	var spans []source.Span
 
@@ -774,45 +775,40 @@ func (c *Checker) checkCallArgumentTypes(scope *Scope, args []ast.Expr) ([]*Type
 		}
 
 		if i != len(args)-1 {
-			c.diags.Add(spread.Span(), "spread argument must be the last argument")
+			c.diags.Add(
+				spread.Span(),
+				"spread argument must be the last argument",
+			)
 		}
 
 		spreadType := c.checkExpr(scope, spread.Expr)
 
-		switch spreadType.Kind {
-		case TypeArray:
-			if spreadType.Elem == nil {
-				types = append(types, InvalidType)
-				spans = append(spans, spread.Span())
-				continue
-			}
+		if spreadType.Kind != TypeVariadic {
+			c.diags.Add(
+				spread.Span(),
+				fmt.Sprintf(
+					"cannot spread %s; expected variadic value",
+					spreadType.String(),
+				),
+			)
 
-			types = append(types, &Type{
-				Kind: TypeVariadic,
-				Elem: spreadType.Elem,
-				Name: "..." + spreadType.Elem.String(),
-			})
-			spans = append(spans, spread.Span())
-
-		case TypeVariadic:
-			if spreadType.Elem == nil {
-				types = append(types, InvalidType)
-				spans = append(spans, spread.Span())
-				continue
-			}
-
-			types = append(types, &Type{
-				Kind: TypeVariadic,
-				Elem: spreadType.Elem,
-				Name: "..." + spreadType.Elem.String(),
-			})
-			spans = append(spans, spread.Span())
-
-		default:
-			c.diags.Add(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", spreadType.String()))
 			types = append(types, InvalidType)
 			spans = append(spans, spread.Span())
+			continue
 		}
+
+		if spreadType.Elem == nil {
+			types = append(types, InvalidType)
+			spans = append(spans, spread.Span())
+			continue
+		}
+
+		types = append(types, &Type{
+			Kind: TypeVariadic,
+			Elem: spreadType.Elem,
+			Name: "..." + spreadType.Elem.String(),
+		})
+		spans = append(spans, spread.Span())
 	}
 
 	return types, spans
@@ -1011,19 +1007,6 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		case TypeF32:
 			return 2, true
 		}
-	}
-
-	if dst.Kind == TypeArray && src.Kind == TypeArray {
-		if !dst.Inferred && src.Len >= 0 && dst.Len >= 0 && dst.Len != src.Len {
-			return 0, false
-		}
-
-		score, ok := c.conversionScore(dst.Elem, src.Elem)
-		if !ok {
-			return 0, false
-		}
-
-		return score + 1, true
 	}
 
 	if c.assignable(dst, src) {
@@ -1854,7 +1837,194 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 	}
 }
 
-func (c *Checker) checkOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
+func (c *Checker) bracketCandidateSignatureValid(
+	overloadName string,
+	taskType *Type,
+) bool {
+	if taskType == nil || taskType.Kind != TypeTask {
+		return false
+	}
+
+	if c.taskHasDefaultParameters(taskType) {
+		return false
+	}
+
+	if taskType.IsVariadic ||
+		taskTypeHasVariadicParam(taskType) {
+		return false
+	}
+
+	switch overloadName {
+	case "[]":
+		if !taskType.IsPure &&
+			!taskType.IsTrustedPure {
+			return false
+		}
+
+		if len(taskType.Params) != 2 ||
+			len(taskType.Results) != 1 {
+			return false
+		}
+
+	case "[]=":
+		if len(taskType.Params) != 3 ||
+			len(taskType.Results) != 0 {
+			return false
+		}
+
+	default:
+		return false
+	}
+
+	if !c.isBracketReceiverParameter(taskType.Params[0]) {
+		return false
+	}
+
+	if len(taskType.Params) < 2 ||
+		!c.sameType(taskType.Params[1], IntType) {
+		return false
+	}
+
+	return true
+}
+
+func (c *Checker) isBracketReceiverParameter(t *Type) bool {
+	if t == nil ||
+		t.Kind != TypePointer ||
+		t.Elem == nil {
+		return false
+	}
+
+	switch t.Elem.Kind {
+	case TypeStruct:
+		return true
+
+	case TypeString:
+		// Temporary compatibility with the current builtin string type.
+		// String indexing still uses overload resolution and has no intrinsic
+		// checker path.
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (c *Checker) checkBracketOverloadCandidate(
+	overloadName string,
+	candidate *Symbol,
+	taskType *Type,
+) {
+	if candidate == nil ||
+		taskType == nil ||
+		taskType.Kind != TypeTask {
+		return
+	}
+
+	if overloadName == "[]" &&
+		!taskType.IsPure &&
+		!taskType.IsTrustedPure {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"bracket operator [] candidate %q must be pure",
+				candidate.Name,
+			),
+		)
+	}
+
+	if c.taskHasDefaultParameters(taskType) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"bracket operator %s candidate %q cannot have default parameters",
+				overloadName,
+				candidate.Name,
+			),
+		)
+	}
+
+	if taskType.IsVariadic ||
+		taskTypeHasVariadicParam(taskType) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"bracket operator %s candidate %q cannot be variadic",
+				overloadName,
+				candidate.Name,
+			),
+		)
+	}
+
+	expectedParams := 2
+	expectedResults := 1
+
+	if overloadName == "[]=" {
+		expectedParams = 3
+		expectedResults = 0
+	}
+
+	if len(taskType.Params) != expectedParams {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"bracket operator %s candidate %q must have exactly %d parameters",
+				overloadName,
+				candidate.Name,
+				expectedParams,
+			),
+		)
+	}
+
+	if len(taskType.Results) != expectedResults {
+		if expectedResults == 0 {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"bracket assignment operator []= candidate %q must not return a value",
+					candidate.Name,
+				),
+			)
+		} else {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"bracket operator [] candidate %q must return exactly 1 value",
+					candidate.Name,
+				),
+			)
+		}
+	}
+
+	if len(taskType.Params) > 0 &&
+		!c.isBracketReceiverParameter(taskType.Params[0]) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"first parameter of bracket operator %s candidate %q must be a pointer to a struct",
+				overloadName,
+				candidate.Name,
+			),
+		)
+	}
+
+	if len(taskType.Params) > 1 &&
+		!c.sameType(taskType.Params[1], IntType) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				"second parameter of bracket operator %s candidate %q must have type int",
+				overloadName,
+				candidate.Name,
+			),
+		)
+	}
+}
+
+func (c *Checker) checkOverloadDecl(
+	scope *Scope,
+	d *ast.OverloadDecl,
+) {
 	sym := scope.LookupLocal(d.Name)
 	if sym == nil || sym.Overload == nil {
 		return
@@ -1863,39 +2033,94 @@ func (c *Checker) checkOverloadDecl(scope *Scope, d *ast.OverloadDecl) {
 	info := sym.Overload
 
 	for _, candidate := range info.Candidates {
-		taskDecl, _ := candidate.Node.(*ast.TaskDecl)
 		taskType := candidate.Type
 
 		if taskType == nil || taskType.Kind != TypeTask {
 			continue
 		}
 
-		if info.IsOperator {
-			if taskDecl == nil || !taskDecl.IsPure {
-				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q requires pure task candidate %q", d.Name, candidate.Name))
-			}
+		if !info.IsOperator {
+			continue
+		}
 
-			if c.taskHasDefaultParameters(taskType) {
-				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q cannot have default parameters", d.Name, candidate.Name))
-			}
+		switch d.Name {
+		case "[]", "[]=":
+			c.checkBracketOverloadCandidate(
+				d.Name,
+				candidate,
+				taskType,
+			)
+			continue
+		}
 
-			if len(taskType.Params) != 2 {
-				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q must have exactly 2 parameters", d.Name, candidate.Name))
-			}
+		if !taskType.IsPure &&
+			!taskType.IsTrustedPure {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"operator overload %q requires pure task candidate %q",
+					d.Name,
+					candidate.Name,
+				),
+			)
+		}
 
-			if len(taskType.Results) != 1 {
-				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q candidate %q must return exactly 1 value", d.Name, candidate.Name))
-			}
+		if c.taskHasDefaultParameters(taskType) {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"operator overload %q candidate %q cannot have default parameters",
+					d.Name,
+					candidate.Name,
+				),
+			)
+		}
 
-			if isComparisonOperatorName(d.Name) && len(taskType.Results) == 1 && !c.sameType(taskType.Results[0], BoolType) {
-				c.diags.Add(candidate.Span, fmt.Sprintf("comparison operator overload %q candidate %q must return bool", d.Name, candidate.Name))
-			}
+		if len(taskType.Params) != 2 {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"operator overload %q candidate %q must have exactly 2 parameters",
+					d.Name,
+					candidate.Name,
+				),
+			)
+		}
 
-			if len(taskType.Params) == 2 &&
-				c.isBuiltinPrimitiveForOperator(taskType.Params[0]) &&
-				c.isBuiltinPrimitiveForOperator(taskType.Params[1]) {
-				c.diags.Add(candidate.Span, fmt.Sprintf("operator overload %q cannot replace built-in primitive operator behavior", d.Name))
-			}
+		if len(taskType.Results) != 1 {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"operator overload %q candidate %q must return exactly 1 value",
+					d.Name,
+					candidate.Name,
+				),
+			)
+		}
+
+		if isComparisonOperatorName(d.Name) &&
+			len(taskType.Results) == 1 &&
+			!c.sameType(taskType.Results[0], BoolType) {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"comparison operator overload %q candidate %q must return bool",
+					d.Name,
+					candidate.Name,
+				),
+			)
+		}
+
+		if len(taskType.Params) == 2 &&
+			c.isBuiltinPrimitiveForOperator(taskType.Params[0]) &&
+			c.isBuiltinPrimitiveForOperator(taskType.Params[1]) {
+			c.diags.Add(
+				candidate.Span,
+				fmt.Sprintf(
+					"operator overload %q cannot replace built-in primitive operator behavior",
+					d.Name,
+				),
+			)
 		}
 	}
 
@@ -2010,18 +2235,6 @@ func (c *Checker) substituteInterfaceSelf(
 		return &Type{
 			Kind: TypePointer,
 			Elem: c.substituteInterfaceSelf(t.Elem, self),
-		}
-
-	case TypeArray:
-		return &Type{
-			Kind:     TypeArray,
-			Name:     t.Name,
-			Len:      t.Len,
-			Inferred: t.Inferred,
-			Elem: c.substituteInterfaceSelf(
-				t.Elem,
-				self,
-			),
 		}
 
 	case TypeVariadic:
@@ -2396,22 +2609,6 @@ func (c *Checker) matchImplType(
 			match,
 		)
 
-	case TypeArray:
-		if !pattern.Inferred &&
-			!actual.Inferred &&
-			pattern.Len >= 0 &&
-			actual.Len >= 0 &&
-			pattern.Len != actual.Len {
-			return false
-		}
-
-		return c.matchImplType(
-			pattern.Elem,
-			actual.Elem,
-			paramKinds,
-			match,
-		)
-
 	case TypeStruct, TypeInterface:
 		if pattern.GenericBaseName != "" ||
 			actual.GenericBaseName != "" {
@@ -2486,6 +2683,390 @@ func (c *Checker) matchImplGenericArgument(
 	}
 
 	return pattern.Key == actual.Key
+}
+
+func bracketGenericMatchComplete(
+	params []ast.GenericParam,
+	match ImplMatch,
+) bool {
+	for _, param := range params {
+		name := param.Name.Name
+		if name == "" {
+			continue
+		}
+
+		switch {
+		case isTypeGenericCategory(param.Category):
+			if match.Types[name] == nil {
+				return false
+			}
+
+		case isValueGenericCategory(param.Category):
+			if _, ok := match.Values[name]; !ok {
+				return false
+			}
+
+		default:
+			// Task-generic parameters cannot be inferred from the bracket
+			// receiver.
+			return false
+		}
+	}
+
+	return true
+}
+
+func genericArgumentInfoDisplay(
+	arg GenericArgumentInfo,
+) string {
+	switch {
+	case isTypeGenericCategory(arg.Category):
+		if arg.Type != nil {
+			return arg.Type.String()
+		}
+
+	case arg.Category == ast.GenericParamTask:
+		if arg.Type != nil {
+			return arg.Type.String()
+		}
+
+	default:
+		if arg.Key != "" {
+			return arg.Key
+		}
+
+		if arg.Expr != nil {
+			return exprDisplay(arg.Expr)
+		}
+	}
+
+	return "<invalid>"
+}
+
+func genericTypeNameFromArgumentInfo(
+	base string,
+	args []GenericArgumentInfo,
+) string {
+	parts := make([]string, 0, len(args))
+
+	for _, arg := range args {
+		parts = append(
+			parts,
+			genericArgumentInfoDisplay(arg),
+		)
+	}
+
+	return fmt.Sprintf(
+		"%s<%s>",
+		base,
+		strings.Join(parts, ", "),
+	)
+}
+
+func (c *Checker) substituteBracketMatchType(
+	t *Type,
+	match ImplMatch,
+	seen map[*Type]*Type,
+) *Type {
+	if t == nil {
+		return InvalidType
+	}
+
+	if t.Kind == TypeTypeParam {
+		if replacement := match.Types[t.Name]; replacement != nil {
+			return replacement
+		}
+
+		return t
+	}
+
+	if cached := seen[t]; cached != nil {
+		return cached
+	}
+
+	out := *t
+	seen[t] = &out
+
+	out.Elem = c.substituteBracketMatchType(
+		t.Elem,
+		match,
+		seen,
+	)
+	out.Underlying = c.substituteBracketMatchType(
+		t.Underlying,
+		match,
+		seen,
+	)
+
+	out.GenericArguments = nil
+
+	for _, arg := range t.GenericArguments {
+		cloned := arg
+
+		if isValueGenericCategory(cloned.Category) {
+			if id, ok := cloned.Expr.(*ast.IdentExpr); ok {
+				if replacement, found :=
+					match.Values[id.Name.Name]; found {
+					cloned = replacement
+				}
+			}
+		}
+
+		cloned.Type = c.substituteBracketMatchType(
+			cloned.Type,
+			match,
+			seen,
+		)
+
+		out.GenericArguments = append(
+			out.GenericArguments,
+			cloned,
+		)
+	}
+
+	if out.GenericBaseName != "" &&
+		len(out.GenericArguments) > 0 {
+		out.Name = genericTypeNameFromArgumentInfo(
+			out.GenericBaseName,
+			out.GenericArguments,
+		)
+	}
+
+	out.Fields = nil
+	for _, field := range t.Fields {
+		out.Fields = append(
+			out.Fields,
+			FieldInfo{
+				Name: field.Name,
+				Type: c.substituteBracketMatchType(
+					field.Type,
+					match,
+					seen,
+				),
+				TypeAst: field.TypeAst,
+				Span:    field.Span,
+			},
+		)
+	}
+
+	out.Members = nil
+	for _, member := range t.Members {
+		out.Members = append(
+			out.Members,
+			c.substituteBracketMatchType(
+				member,
+				match,
+				seen,
+			),
+		)
+	}
+
+	out.InterfaceRequirements = nil
+	for _, req := range t.InterfaceRequirements {
+		cloned := InterfaceRequirementInfo{
+			Name: req.Name,
+			ParamIsVariadic: append(
+				[]bool(nil),
+				req.ParamIsVariadic...,
+			),
+			IsPure:        req.IsPure,
+			IsTrustedPure: req.IsTrustedPure,
+			Span:          req.Span,
+		}
+
+		for _, param := range req.Params {
+			cloned.Params = append(
+				cloned.Params,
+				c.substituteBracketMatchType(
+					param,
+					match,
+					seen,
+				),
+			)
+		}
+
+		for _, result := range req.Results {
+			cloned.Results = append(
+				cloned.Results,
+				c.substituteBracketMatchType(
+					result,
+					match,
+					seen,
+				),
+			)
+		}
+
+		out.InterfaceRequirements = append(
+			out.InterfaceRequirements,
+			cloned,
+		)
+	}
+
+	out.Implements = nil
+	for _, iface := range t.Implements {
+		out.Implements = append(
+			out.Implements,
+			c.substituteBracketMatchType(
+				iface,
+				match,
+				seen,
+			),
+		)
+	}
+
+	out.Params = nil
+	for _, param := range t.Params {
+		out.Params = append(
+			out.Params,
+			c.substituteBracketMatchType(
+				param,
+				match,
+				seen,
+			),
+		)
+	}
+
+	out.Results = nil
+	for _, result := range t.Results {
+		out.Results = append(
+			out.Results,
+			c.substituteBracketMatchType(
+				result,
+				match,
+				seen,
+			),
+		)
+	}
+
+	return &out
+}
+
+func (c *Checker) bracketCandidateTaskType(
+	candidate *Symbol,
+	argTypes []*Type,
+) (*Type, int, bool) {
+	if candidate == nil ||
+		candidate.Type == nil ||
+		candidate.Type.Kind != TypeTask {
+		return nil, 0, false
+	}
+
+	taskType := candidate.Type
+
+	if len(taskType.GenericParams) == 0 {
+		score, ok := c.callScore(taskType, argTypes)
+		return taskType, score, ok
+	}
+
+	if len(taskType.Params) != len(argTypes) ||
+		len(taskType.Params) == 0 {
+		return nil, 0, false
+	}
+
+	match := ImplMatch{
+		Types:  map[string]*Type{},
+		Values: map[string]GenericArgumentInfo{},
+	}
+
+	kinds := genericParamKinds(taskType.GenericParams)
+
+	// Bracket generic arguments are inferred exclusively from the receiver.
+	// The assigned value must not select a conflicting specialization.
+	if !c.matchImplType(
+		taskType.Params[0],
+		argTypes[0],
+		kinds,
+		&match,
+	) {
+		return nil, 0, false
+	}
+
+	if !bracketGenericMatchComplete(
+		taskType.GenericParams,
+		match,
+	) {
+		return nil, 0, false
+	}
+
+	specialized := c.substituteBracketMatchType(
+		taskType,
+		match,
+		map[*Type]*Type{},
+	)
+	specialized.GenericParams = nil
+
+	score, ok := c.callScore(
+		specialized,
+		argTypes,
+	)
+	if !ok {
+		return nil, 0, false
+	}
+
+	return specialized, score, true
+}
+
+func (c *Checker) resolveBracketOverloadAt(
+	scope *Scope,
+	name string,
+	argTypes []*Type,
+) bracketOverloadResolution {
+	lookups := c.operatorOverloadLookups(
+		scope,
+		name,
+		argTypes,
+	)
+
+	best := bracketOverloadResolution{
+		Score:       1 << 30,
+		HadOverload: len(lookups) > 0,
+	}
+
+	for _, lookup := range lookups {
+		c.ensureOverloadSymbolPrepared(
+			lookup.Scope,
+			lookup.Symbol,
+		)
+
+		if lookup.Symbol == nil ||
+			lookup.Symbol.Overload == nil {
+			continue
+		}
+
+		for _, candidate := range lookup.Symbol.Overload.Candidates {
+			if candidate == nil ||
+				!c.bracketCandidateSignatureValid(
+					name,
+					candidate.Type,
+				) {
+				continue
+			}
+
+			taskType, score, ok :=
+				c.bracketCandidateTaskType(
+					candidate,
+					argTypes,
+				)
+			if !ok {
+				continue
+			}
+
+			if !best.Matched || score < best.Score {
+				best.Candidate = candidate
+				best.TaskType = taskType
+				best.Score = score
+				best.Matched = true
+				best.Ambiguous = false
+				continue
+			}
+
+			if score == best.Score {
+				best.Ambiguous = true
+			}
+		}
+	}
+
+	return best
 }
 
 func (c *Checker) implPatternMatches(
@@ -2887,9 +3468,6 @@ func typeAstContainsInterfaceSelf(t ast.Type) bool {
 	case *ast.PointerType:
 		return typeAstContainsInterfaceSelf(x.Elem)
 
-	case *ast.ArrayType:
-		return typeAstContainsInterfaceSelf(x.Elem)
-
 	case *ast.GenericType:
 		if typeAstContainsInterfaceSelf(x.Base) {
 			return true
@@ -3234,15 +3812,6 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 	case TypeInterfaceSelf:
 		return typ
 
-	case TypeArray:
-		return &Type{
-			Kind:     TypeArray,
-			Name:     typ.Name,
-			Elem:     c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
-			Len:      typ.Len,
-			Inferred: typ.Inferred,
-		}
-
 	case TypeVariadic:
 		return &Type{
 			Kind: TypeVariadic,
@@ -3466,15 +4035,6 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 
 	case TypeInterfaceSelf:
 		return typ
-
-	case TypeArray:
-		return &Type{
-			Kind:     TypeArray,
-			Name:     typ.Name,
-			Elem:     c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
-			Len:      typ.Len,
-			Inferred: typ.Inferred,
-		}
 
 	case TypeVariadic:
 		return &Type{
@@ -3990,39 +4550,74 @@ func (c *Checker) checkReturnStmt(scope *Scope, s *ast.ReturnStmt) {
 	}
 }
 
-func (c *Checker) checkAssignStmt(scope *Scope, s *ast.AssignStmt) {
+func (c *Checker) checkAssignStmt(
+	scope *Scope,
+	s *ast.AssignStmt,
+) {
+	if index, ok := s.Left.(*ast.IndexExpr); ok {
+		if s.Op != token.Assign {
+			c.diags.Add(
+				s.Left.Span(),
+				"indexed compound assignment is not supported; use an explicit bracket read and bracket assignment",
+			)
+
+			c.checkExpr(scope, index.Left)
+
+			indexType := c.checkExpr(
+				scope,
+				index.Index,
+			)
+			c.checkBracketIndexType(
+				indexType,
+				index.Index.Span(),
+			)
+
+			c.checkExpr(scope, s.Right)
+			return
+		}
+
+		c.checkIndexAssignment(
+			scope,
+			index,
+			s.Right,
+		)
+		return
+	}
+
 	if id, ok := s.Left.(*ast.IdentExpr); ok {
 		sym := scope.Lookup(id.Name.Name)
 
 		if sym != nil {
 			if sym.Kind == SymbolParam {
-				c.diags.Add(id.Span(), fmt.Sprintf("cannot reassign parameter %q", id.Name.Name))
+				c.diags.Add(
+					id.Span(),
+					fmt.Sprintf(
+						"cannot reassign parameter %q",
+						id.Name.Name,
+					),
+				)
 			}
 
 			if sym.Kind == SymbolConst {
-				c.diags.Add(id.Span(), fmt.Sprintf("cannot assign to constant %q", id.Name.Name))
+				c.diags.Add(
+					id.Span(),
+					fmt.Sprintf(
+						"cannot assign to constant %q",
+						id.Name.Name,
+					),
+				)
 			}
 
-			if sym.Kind == SymbolTask || sym.Kind == SymbolType || sym.Kind == SymbolPackage {
-				c.diags.Add(id.Span(), fmt.Sprintf("cannot assign to %q", id.Name.Name))
-			}
-		}
-	}
-
-	if index, ok := s.Left.(*ast.IndexExpr); ok {
-		containerType := c.checkExpr(scope, index.Left)
-
-		if containerType.Kind == TypeString {
-			c.diags.Add(index.Span(), "cannot assign to string index because strings are immutable")
-		}
-
-		if containerType.Kind == TypeCstring {
-			c.diags.Add(index.Span(), "cannot assign to cstring index")
-		}
-
-		if c.isByteIndexableValue(containerType) && containerType.Kind != TypeRawptr {
-			if !c.isAddressableExpr(scope, index.Left) {
-				c.diags.Add(index.Left.Span(), "byte-index assignment requires an addressable value")
+			if sym.Kind == SymbolTask ||
+				sym.Kind == SymbolType ||
+				sym.Kind == SymbolPackage {
+				c.diags.Add(
+					id.Span(),
+					fmt.Sprintf(
+						"cannot assign to %q",
+						id.Name.Name,
+					),
+				)
 			}
 		}
 	}
@@ -4030,48 +4625,253 @@ func (c *Checker) checkAssignStmt(scope *Scope, s *ast.AssignStmt) {
 	leftType := c.checkExpr(scope, s.Left)
 	rightType := c.checkExpr(scope, s.Right)
 
-	c.checkAssignable(leftType, rightType, s.Right.Span())
+	c.checkAssignable(
+		leftType,
+		rightType,
+		s.Right.Span(),
+	)
 }
 
-func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
+func (c *Checker) checkIndexAssignment(
+	scope *Scope,
+	index *ast.IndexExpr,
+	value ast.Expr,
+) {
+	receiverType := c.checkExpr(
+		scope,
+		index.Left,
+	)
+	indexType := c.checkExpr(
+		scope,
+		index.Index,
+	)
+	valueType := c.checkExpr(
+		scope,
+		value,
+	)
+
+	c.checkBracketIndexType(
+		indexType,
+		index.Index.Span(),
+	)
+
+	if receiverType == nil {
+		return
+	}
+
+	switch receiverType.Kind {
+	case TypeInvalid:
+		return
+
+	case TypeVariadic:
+		if receiverType.Elem != nil {
+			c.checkAssignable(
+				receiverType.Elem,
+				valueType,
+				value.Span(),
+			)
+		}
+		return
+
+	case TypeRawptr:
+		c.checkAssignable(
+			U8Type,
+			valueType,
+			value.Span(),
+		)
+		return
+
+	case TypeCstring:
+		c.diags.Add(
+			index.Span(),
+			"cannot assign to cstring index",
+		)
+		return
+	}
+
+	if c.isPrimitiveByteIndexable(receiverType) {
+		if !c.isMutableAddressableExpr(
+			scope,
+			index.Left,
+		) {
+			c.diags.Add(
+				index.Left.Span(),
+				"byte-index assignment requires a mutable addressable value",
+			)
+		}
+
+		c.checkAssignable(
+			U8Type,
+			valueType,
+			value.Span(),
+		)
+		return
+	}
+
+	switch receiverType.Kind {
+	case TypeStruct, TypeString:
+		if !c.isMutableAddressableExpr(
+			scope,
+			index.Left,
+		) {
+			c.diags.Add(
+				index.Left.Span(),
+				"bracket assignment operator []= requires a mutable addressable receiver",
+			)
+		}
+
+		receiverPointer := &Type{
+			Kind: TypePointer,
+			Elem: receiverType,
+		}
+
+		resolution := c.resolveBracketOverloadAt(
+			scope,
+			"[]=",
+			[]*Type{
+				receiverPointer,
+				IntType,
+				valueType,
+			},
+		)
+
+		if resolution.Ambiguous {
+			c.diags.Add(
+				index.Span(),
+				fmt.Sprintf(
+					"ambiguous bracket assignment operator []= for receiver %s, index int, and value %s",
+					receiverType.String(),
+					valueType.String(),
+				),
+			)
+			return
+		}
+
+		if !resolution.HadOverload {
+			c.diags.Add(
+				index.Span(),
+				fmt.Sprintf(
+					"type %s does not define bracket assignment operator []=",
+					receiverType.String(),
+				),
+			)
+			return
+		}
+
+		if !resolution.Matched {
+			c.diags.Add(
+				index.Span(),
+				fmt.Sprintf(
+					"no bracket assignment operator []= matches receiver %s, index int, and value %s",
+					receiverType.String(),
+					valueType.String(),
+				),
+			)
+		}
+
+	case TypeEnum:
+		c.diags.Add(
+			index.Left.Span(),
+			fmt.Sprintf(
+				"enum type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypeUnion:
+		c.diags.Add(
+			index.Left.Span(),
+			fmt.Sprintf(
+				"union type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypeInterface:
+		c.diags.Add(
+			index.Left.Span(),
+			fmt.Sprintf(
+				"interface type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypePointer:
+		c.diags.Add(
+			index.Left.Span(),
+			fmt.Sprintf(
+				"typed pointer %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	default:
+		c.diags.Add(
+			index.Left.Span(),
+			fmt.Sprintf(
+				"type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+	}
+}
+
+func (c *Checker) checkVarDeclStmt(
+	scope *Scope,
+	s *ast.VarDeclStmt,
+) {
 	var varType *Type
 
 	if s.HasType {
-		varType = c.typeFromAst(scope, s.Type)
+		varType = c.typeFromAst(
+			scope,
+			s.Type,
+		)
 	}
 
 	if s.HasValue {
 		var valueType *Type
 
 		if s.HasType {
-			valueType = c.checkExprWithExpected(scope, s.Value, varType)
-			c.checkAssignable(varType, valueType, s.Value.Span())
+			valueType = c.checkExprWithExpected(
+				scope,
+				s.Value,
+				varType,
+			)
 
-			// Preserve inferred array length:
-			//
-			//     a: []int = [1, 2, 3]
-			//
-			// The declared type starts as []int, but after checking the literal
-			// we know its concrete length is 3. Keep that concrete type for later
-			// operations like a...
-			if varType != nil &&
-				valueType != nil &&
-				varType.Kind == TypeArray &&
-				varType.Inferred &&
-				valueType.Kind == TypeArray {
-				varType = valueType
-			}
+			c.checkAssignable(
+				varType,
+				valueType,
+				s.Value.Span(),
+			)
 		} else {
-			valueType = c.checkExpr(scope, s.Value)
+			valueType = c.checkExpr(
+				scope,
+				s.Value,
+			)
 
-			if valueType.Kind == TypeEnumLiteral {
-				c.diags.Add(s.Value.Span(), fmt.Sprintf("enum literal .%s needs explicit type", valueType.Name))
+			switch valueType.Kind {
+			case TypeEnumLiteral:
+				c.diags.Add(
+					s.Value.Span(),
+					fmt.Sprintf(
+						"enum literal .%s needs explicit type",
+						valueType.Name,
+					),
+				)
 				varType = InvalidType
-			} else if valueType.Kind == TypeNil {
-				c.diags.Add(s.Value.Span(), "nil needs explicit type")
+
+			case TypeNil:
+				c.diags.Add(
+					s.Value.Span(),
+					"nil needs explicit type",
+				)
 				varType = InvalidType
-			} else {
-				varType = c.defaultType(valueType)
+
+			default:
+				varType = c.defaultType(
+					valueType,
+				)
 			}
 		}
 	}
@@ -4093,7 +4893,10 @@ func (c *Checker) checkVarDeclStmt(scope *Scope, s *ast.VarDeclStmt) {
 	})
 }
 
-func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
+func (c *Checker) checkExpr(
+	scope *Scope,
+	expr ast.Expr,
+) *Type {
 	if expr == nil {
 		return InvalidType
 	}
@@ -4102,7 +4905,13 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 	case *ast.IdentExpr:
 		sym := scope.Lookup(e.Name.Name)
 		if sym == nil {
-			c.diags.Add(e.Span(), fmt.Sprintf("undefined symbol %q", e.Name.Name))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"undefined symbol %q",
+					e.Name.Name,
+				),
+			)
 			return InvalidType
 		}
 
@@ -4115,12 +4924,18 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 		}
 
 	case *ast.SpreadExpr:
-		c.diags.Add(e.Span(), "spread can only be used as a call argument")
+		c.diags.Add(
+			e.Span(),
+			"spread can only be used as a call argument",
+		)
 		c.checkExpr(scope, e.Expr)
 		return InvalidType
 
 	case *ast.GenericExpr:
-		c.diags.Add(e.Span(), "generic expression cannot be used as a value")
+		c.diags.Add(
+			e.Span(),
+			"generic expression cannot be used as a value",
+		)
 		return InvalidType
 
 	case *ast.IntLitExpr:
@@ -4138,12 +4953,21 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 	case *ast.CharLitExpr:
 		value, err := strconv.Unquote(e.Value)
 		if err != nil {
-			c.diags.Add(e.Span(), fmt.Sprintf("invalid char literal: %v", err))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"invalid char literal: %v",
+					err,
+				),
+			)
 			return CharType
 		}
 
 		if len([]rune(value)) != 1 {
-			c.diags.Add(e.Span(), "char literal must contain exactly one Unicode scalar value")
+			c.diags.Add(
+				e.Span(),
+				"char literal must contain exactly one Unicode scalar value",
+			)
 		}
 
 		return CharType
@@ -4169,9 +4993,6 @@ func (c *Checker) checkExpr(scope *Scope, expr ast.Expr) *Type {
 	case *ast.IndexExpr:
 		return c.checkIndexExpr(scope, e)
 
-	case *ast.ArrayLiteralExpr:
-		return c.checkArrayLiteralExpr(scope, e)
-
 	case *ast.CompoundLiteralExpr:
 		return c.checkCompoundLiteralExpr(scope, e)
 	}
@@ -4184,44 +5005,9 @@ func (c *Checker) checkExprWithExpected(
 	expr ast.Expr,
 	expected *Type,
 ) *Type {
-	if expected == nil || expected.Kind == TypeInvalid {
-		return c.checkExpr(scope, expr)
-	}
+	_ = expected
 
-	switch e := expr.(type) {
-	case *ast.ArrayLiteralExpr:
-		return c.checkArrayLiteralExprWithExpected(
-			scope,
-			e,
-			expected,
-		)
-
-	default:
-		return c.checkExpr(scope, expr)
-	}
-}
-
-func (c *Checker) checkArrayLiteralExprWithExpected(scope *Scope, e *ast.ArrayLiteralExpr, expected *Type) *Type {
-	if expected == nil || expected.Kind != TypeArray || expected.Elem == nil {
-		return c.checkArrayLiteralExpr(scope, e)
-	}
-
-	for _, value := range e.Values {
-		valueType := c.checkExpr(scope, value)
-		c.checkAssignable(expected.Elem, valueType, value.Span())
-	}
-
-	length := len(e.Values)
-	if !expected.Inferred && expected.Len >= 0 && expected.Len != length {
-		c.diags.Add(e.Span(), fmt.Sprintf("array length mismatch: expected %d, got %d", expected.Len, length))
-	}
-
-	return &Type{
-		Kind:     TypeArray,
-		Len:      length,
-		Inferred: expected.Inferred,
-		Elem:     expected.Elem,
-	}
+	return c.checkExpr(scope, expr)
 }
 
 func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
@@ -4970,29 +5756,40 @@ func (c *Checker) checkGenericTaskCallArguments(
 	}
 }
 
-func (c *Checker) checkGenericVariadicSpreadArgument(scope *Scope, spread *ast.SpreadExpr, expectedElem *Type) {
-	spreadType := c.checkExpr(scope, spread.Expr)
+func (c *Checker) checkGenericVariadicSpreadArgument(
+	scope *Scope,
+	spread *ast.SpreadExpr,
+	expectedElem *Type,
+) {
+	spreadType := c.checkExpr(
+		scope,
+		spread.Expr,
+	)
 
-	switch spreadType.Kind {
-	case TypeArray:
-		if spreadType.Elem == nil {
-			c.diags.Add(spread.Span(), "cannot spread invalid array")
-			return
-		}
-
-		c.checkAssignable(expectedElem, spreadType.Elem, spread.Span())
-
-	case TypeVariadic:
-		if spreadType.Elem == nil {
-			c.diags.Add(spread.Span(), "cannot spread invalid variadic value")
-			return
-		}
-
-		c.checkAssignable(expectedElem, spreadType.Elem, spread.Span())
-
-	default:
-		c.diags.Add(spread.Span(), fmt.Sprintf("cannot spread %s; expected array or variadic value", spreadType.String()))
+	if spreadType.Kind != TypeVariadic {
+		c.diags.Add(
+			spread.Span(),
+			fmt.Sprintf(
+				"cannot spread %s; expected variadic value",
+				spreadType.String(),
+			),
+		)
+		return
 	}
+
+	if spreadType.Elem == nil {
+		c.diags.Add(
+			spread.Span(),
+			"cannot spread invalid variadic value",
+		)
+		return
+	}
+
+	c.checkAssignable(
+		expectedElem,
+		spreadType.Elem,
+		spread.Span(),
+	)
 }
 
 func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
@@ -5368,9 +6165,19 @@ func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.S
 	return UintType
 }
 
-func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
+func (c *Checker) checkLenCall(
+	args []ast.Expr,
+	argTypes []*Type,
+	span source.Span,
+) *Type {
 	if len(argTypes) != 1 {
-		c.diags.Add(span, fmt.Sprintf("len expects 1 argument, got %d", len(argTypes)))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"len expects 1 argument, got %d",
+				len(argTypes),
+			),
+		)
 		return UintType
 	}
 
@@ -5379,14 +6186,19 @@ func (c *Checker) checkLenCall(args []ast.Expr, argTypes []*Type, span source.Sp
 		return UintType
 	}
 
-	switch t.Kind {
-	case TypeArray, TypeVariadic:
-		return UintType
-
-	default:
-		c.diags.Add(args[0].Span(), fmt.Sprintf("len does not support %s", t.String()))
+	if t.Kind == TypeVariadic {
 		return UintType
 	}
+
+	c.diags.Add(
+		args[0].Span(),
+		fmt.Sprintf(
+			"len does not support %s",
+			t.String(),
+		),
+	)
+
+	return UintType
 }
 
 func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
@@ -5463,39 +6275,161 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 	return InvalidType
 }
 
-func (c *Checker) checkIndexExpr(scope *Scope, e *ast.IndexExpr) *Type {
-	leftType := c.checkExpr(scope, e.Left)
-	indexType := c.checkExpr(scope, e.Index)
+func (c *Checker) checkIndexExpr(
+	scope *Scope,
+	e *ast.IndexExpr,
+) *Type {
+	receiverType := c.checkExpr(
+		scope,
+		e.Left,
+	)
+	indexType := c.checkExpr(
+		scope,
+		e.Index,
+	)
 
-	if !c.isIndexType(indexType) {
-		c.diags.Add(e.Index.Span(), fmt.Sprintf("index must be integer, got %s", indexType.String()))
+	c.checkBracketIndexType(
+		indexType,
+		e.Index.Span(),
+	)
+
+	if receiverType == nil {
+		return InvalidType
 	}
 
-	switch leftType.Kind {
-	case TypeArray:
-		return leftType.Elem
+	switch receiverType.Kind {
+	case TypeInvalid:
+		return InvalidType
 
 	case TypeVariadic:
-		return leftType.Elem
+		if receiverType.Elem == nil {
+			return InvalidType
+		}
 
-	case TypeString:
-		return CharType
+		return receiverType.Elem
 
 	case TypeRawptr:
 		return U8Type
 
 	case TypeCstring:
-		c.diags.Add(e.Left.Span(), "cstring does not support character indexing")
-		return InvalidType
+		return U8Type
+	}
 
-	default:
-		if c.isByteIndexableValue(leftType) {
-			return U8Type
+	if c.isPrimitiveByteIndexable(receiverType) {
+		return U8Type
+	}
+
+	switch receiverType.Kind {
+	case TypeStruct, TypeString:
+		if !c.isAddressableExpr(
+			scope,
+			e.Left,
+		) {
+			c.diags.Add(
+				e.Left.Span(),
+				"bracket operator [] requires an addressable receiver",
+			)
 		}
 
-		c.diags.Add(e.Left.Span(), fmt.Sprintf("cannot index type %s", leftType.String()))
-		return InvalidType
+		receiverPointer := &Type{
+			Kind: TypePointer,
+			Elem: receiverType,
+		}
+
+		resolution := c.resolveBracketOverloadAt(
+			scope,
+			"[]",
+			[]*Type{
+				receiverPointer,
+				IntType,
+			},
+		)
+
+		if resolution.Ambiguous {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"ambiguous bracket operator [] for receiver %s and index int",
+					receiverType.String(),
+				),
+			)
+			return InvalidType
+		}
+
+		if !resolution.HadOverload {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"type %s does not define bracket operator []",
+					receiverType.String(),
+				),
+			)
+			return InvalidType
+		}
+
+		if !resolution.Matched {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"no bracket operator [] matches receiver %s and index int",
+					receiverType.String(),
+				),
+			)
+			return InvalidType
+		}
+
+		return c.resultTypeFromCall(
+			resolution.TaskType,
+			e.Span(),
+		)
+
+	case TypeEnum:
+		c.diags.Add(
+			e.Left.Span(),
+			fmt.Sprintf(
+				"enum type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypeUnion:
+		c.diags.Add(
+			e.Left.Span(),
+			fmt.Sprintf(
+				"union type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypeInterface:
+		c.diags.Add(
+			e.Left.Span(),
+			fmt.Sprintf(
+				"interface type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	case TypePointer:
+		c.diags.Add(
+			e.Left.Span(),
+			fmt.Sprintf(
+				"typed pointer %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
+
+	default:
+		c.diags.Add(
+			e.Left.Span(),
+			fmt.Sprintf(
+				"type %s cannot be indexed",
+				receiverType.String(),
+			),
+		)
 	}
+
+	return InvalidType
 }
 
 func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) *Type {
@@ -5516,78 +6450,6 @@ func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) 
 	}
 
 	return qualified.Type
-}
-
-func (c *Checker) checkArrayLiteralExpr(
-	scope *Scope,
-	e *ast.ArrayLiteralExpr,
-) *Type {
-	if len(e.Values) == 0 {
-		return &Type{
-			Kind: TypeArray,
-			Len:  0,
-			Elem: InvalidType,
-		}
-	}
-
-	itemTypes := make([]*Type, len(e.Values))
-
-	var elemType *Type
-	allNil := true
-
-	for i, value := range e.Values {
-		itemType := c.checkExpr(scope, value)
-		itemTypes[i] = itemType
-
-		if itemType == nil ||
-			itemType.Kind == TypeInvalid {
-			continue
-		}
-
-		if itemType.Kind == TypeNil {
-			continue
-		}
-
-		allNil = false
-
-		if elemType == nil {
-			candidate := c.defaultType(itemType)
-
-			if candidate != nil &&
-				candidate.Kind != TypeInvalid {
-				elemType = candidate
-			}
-		}
-	}
-
-	if elemType == nil {
-		if allNil {
-			c.diags.Add(
-				e.Span(),
-				"array literal containing only nil needs an explicit nullable element type",
-			)
-		}
-
-		return &Type{
-			Kind: TypeArray,
-			Len:  len(e.Values),
-			Elem: InvalidType,
-		}
-	}
-
-	for i, itemType := range itemTypes {
-		c.checkAssignable(
-			elemType,
-			itemType,
-			e.Values[i].Span(),
-		)
-	}
-
-	return &Type{
-		Kind: TypeArray,
-		Len:  len(e.Values),
-		Elem: elemType,
-	}
 }
 
 func (c *Checker) checkCompoundLiteralExpr(scope *Scope, e *ast.CompoundLiteralExpr) *Type {
@@ -5793,42 +6655,6 @@ func (c *Checker) typeFromAstContext(
 	case *ast.PointerType:
 		return &Type{
 			Kind: TypePointer,
-			Elem: c.typeFromAstContext(
-				scope,
-				t.Elem,
-				allowInterfaceSelf,
-			),
-		}
-
-	case *ast.ArrayType:
-		lenValue := -1
-
-		if !t.Inferred && t.Len != nil {
-			if lit, ok := t.Len.(*ast.IntLitExpr); ok {
-				parsed, err := strconv.Atoi(
-					strings.ReplaceAll(lit.Value, "_", ""),
-				)
-				if err == nil {
-					lenValue = parsed
-				}
-			}
-
-			lenType := c.checkExpr(scope, t.Len)
-			if !c.isIntegerLike(lenType) {
-				c.diags.Add(
-					t.Len.Span(),
-					fmt.Sprintf(
-						"array length must be integer, got %s",
-						lenType.String(),
-					),
-				)
-			}
-		}
-
-		return &Type{
-			Kind:     TypeArray,
-			Len:      lenValue,
-			Inferred: t.Inferred,
 			Elem: c.typeFromAstContext(
 				scope,
 				t.Elem,
@@ -6150,32 +6976,6 @@ func (c *Checker) typeFromAstWithGenericArgs(scope *Scope, typ ast.Type, subst m
 			Elem: c.typeFromAstWithGenericArgs(scope, t.Elem, subst),
 		}
 
-	case *ast.ArrayType:
-		lenValue := -1
-
-		if !t.Inferred && t.Len != nil {
-			lenExpr := c.substituteGenericExpr(t.Len, subst)
-
-			if lit, ok := lenExpr.(*ast.IntLitExpr); ok {
-				parsed, err := strconv.Atoi(lit.Value)
-				if err == nil {
-					lenValue = parsed
-				}
-			}
-
-			lenType := c.checkExpr(scope, lenExpr)
-			if !c.isIntegerLike(lenType) {
-				c.diags.Add(lenExpr.Span(), fmt.Sprintf("array length must be integer, got %s", lenType.String()))
-			}
-		}
-
-		return &Type{
-			Kind:     TypeArray,
-			Len:      lenValue,
-			Inferred: t.Inferred,
-			Elem:     c.typeFromAstWithGenericArgs(scope, t.Elem, subst),
-		}
-
 	case *ast.GenericType:
 		args := make([]ast.GenericArg, 0, len(t.Args))
 		for _, arg := range t.Args {
@@ -6240,14 +7040,6 @@ func (c *Checker) substituteTypeAst(typ ast.Type, subst map[string]ast.GenericAr
 		return &ast.PointerType{
 			Elem: c.substituteTypeAst(t.Elem, subst),
 			Loc:  t.Loc,
-		}
-
-	case *ast.ArrayType:
-		return &ast.ArrayType{
-			Len:      c.substituteGenericExpr(t.Len, subst),
-			Inferred: t.Inferred,
-			Elem:     c.substituteTypeAst(t.Elem, subst),
-			Loc:      t.Loc,
 		}
 
 	case *ast.GenericType:
@@ -6396,17 +7188,6 @@ func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.Gene
 			Loc:  e.Loc,
 		}
 
-	case *ast.ArrayLiteralExpr:
-		values := make([]ast.Expr, 0, len(e.Values))
-		for _, value := range e.Values {
-			values = append(values, c.substituteGenericExpr(value, subst))
-		}
-
-		return &ast.ArrayLiteralExpr{
-			Values: values,
-			Loc:    e.Loc,
-		}
-
 	case *ast.CompoundLiteralExpr:
 		fields := make([]ast.LiteralField, 0, len(e.Fields))
 		for _, field := range e.Fields {
@@ -6469,13 +7250,6 @@ func typeDisplay(typ ast.Type) string {
 
 	case *ast.PointerType:
 		return "*" + typeDisplay(t.Elem)
-
-	case *ast.ArrayType:
-		if t.Inferred {
-			return "[]" + typeDisplay(t.Elem)
-		}
-
-		return "[" + exprDisplay(t.Len) + "]" + typeDisplay(t.Elem)
 
 	case *ast.GenericType:
 		var args []string
@@ -6548,6 +7322,12 @@ func exprDisplay(expr ast.Expr) string {
 
 		return exprDisplay(e.Base) + "<" + strings.Join(args, ", ") + ">"
 
+	case *ast.IndexExpr:
+		return exprDisplay(e.Left) +
+			"[" +
+			exprDisplay(e.Index) +
+			"]"
+
 	case *ast.CompoundLiteralExpr:
 		return typeDisplay(e.Type) + "{...}"
 	}
@@ -6576,15 +7356,6 @@ func (c *Checker) substituteGenericTypes(t *Type, subst map[string]*Type) *Type 
 
 	case TypeInterfaceSelf:
 		return t
-
-	case TypeArray:
-		return &Type{
-			Kind:     TypeArray,
-			Name:     t.Name,
-			Elem:     c.substituteGenericTypes(t.Elem, subst),
-			Len:      t.Len,
-			Inferred: t.Inferred,
-		}
 
 	case TypeVariadic:
 		return &Type{
@@ -7322,15 +8093,6 @@ func (c *Checker) isCompileTimeGenericExpr(scope *Scope, expr ast.Expr) bool {
 		}
 
 		return len(e.Args) == 1 && c.isCompileTimeGenericExpr(scope, e.Args[0])
-
-	case *ast.ArrayLiteralExpr:
-		for _, value := range e.Values {
-			if !c.isCompileTimeGenericExpr(scope, value) {
-				return false
-			}
-		}
-
-		return true
 
 	case *ast.CompoundLiteralExpr:
 		for _, field := range e.Fields {
@@ -8224,14 +8986,6 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return dst.Kind == TypeF32 || dst.Kind == TypeF64
 	}
 
-	if dst.Kind == TypeArray && src.Kind == TypeArray {
-		if !dst.Inferred && src.Len >= 0 && dst.Len >= 0 && dst.Len != src.Len {
-			return false
-		}
-
-		return c.assignable(dst.Elem, src.Elem)
-	}
-
 	return false
 }
 
@@ -8255,13 +9009,6 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 	switch a.Kind {
 	case TypePointer:
 		return c.sameType(a.Elem, b.Elem)
-
-	case TypeArray:
-		if a.Inferred || b.Inferred {
-			return c.sameType(a.Elem, b.Elem)
-		}
-
-		return a.Len == b.Len && c.sameType(a.Elem, b.Elem)
 
 	case TypeVariadic:
 		return c.sameType(a.Elem, b.Elem)
@@ -8413,48 +9160,114 @@ func (c *Checker) isNumeric(t *Type) bool {
 	return c.isIntegerLike(t) || c.isFloat(t)
 }
 
-func (c *Checker) isIndexType(t *Type) bool {
-	return c.isIntegerLike(t)
+func (c *Checker) isBracketIndexType(
+	t *Type,
+) bool {
+	if t == nil ||
+		t.Kind == TypeInvalid {
+		return true
+	}
+
+	return t.Kind == TypeInt ||
+		t.Kind == TypeUntypedInt
 }
 
-func (c *Checker) isByteIndexableValue(t *Type) bool {
+func (c *Checker) checkBracketIndexType(
+	t *Type,
+	span source.Span,
+) bool {
+	if c.isBracketIndexType(t) {
+		return true
+	}
+
+	c.diags.Add(
+		span,
+		fmt.Sprintf(
+			"bracket index must be int, got %s",
+			t.String(),
+		),
+	)
+
+	return false
+}
+
+func (c *Checker) isPrimitiveByteIndexable(
+	t *Type,
+) bool {
 	if t == nil {
 		return false
 	}
 
+	if t.Kind == TypeDistinct {
+		return c.isPrimitiveByteIndexable(
+			t.Underlying,
+		)
+	}
+
 	switch t.Kind {
-	case TypeInvalid,
-		TypeVoid,
-		TypeNil,
-		TypePackage,
-		TypeTask,
-		TypeEnumLiteral,
-		TypeArray,
-		TypeVariadic,
-		TypeString,
-		TypeCstring:
-		return false
+	case TypeBool,
+		TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
+		TypeF32,
+		TypeF64,
+		TypeChar:
+		return true
 
 	default:
-		return true
+		return false
 	}
 }
 
-func (c *Checker) isAddressableExpr(scope *Scope, expr ast.Expr) bool {
+func (c *Checker) isAddressableExpr(
+	scope *Scope,
+	expr ast.Expr,
+) bool {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		sym := scope.Lookup(e.Name.Name)
-		return sym != nil && sym.Kind == SymbolVar
+		if sym == nil {
+			return false
+		}
+
+		return sym.Kind == SymbolVar ||
+			sym.Kind == SymbolParam
 
 	case *ast.SelectorExpr:
-		return c.isAddressableExpr(scope, e.Left)
+		return c.isAddressableExpr(
+			scope,
+			e.Left,
+		)
 
-	case *ast.IndexExpr:
-		leftType := c.checkExpr(scope, e.Left)
-		return leftType.Kind == TypeArray ||
-			leftType.Kind == TypeVariadic ||
-			leftType.Kind == TypeRawptr ||
-			c.isAddressableExpr(scope, e.Left)
+	case *ast.UnaryExpr:
+		return e.Op == token.Star
+	}
+
+	return false
+}
+
+func (c *Checker) isMutableAddressableExpr(
+	scope *Scope,
+	expr ast.Expr,
+) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		return sym != nil &&
+			sym.Kind == SymbolVar
+
+	case *ast.SelectorExpr:
+		return c.isMutableAddressableExpr(
+			scope,
+			e.Left,
+		)
 
 	case *ast.UnaryExpr:
 		return e.Op == token.Star
@@ -9000,8 +9813,24 @@ func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *
 
 func isOperatorOverloadName(name string) bool {
 	switch name {
-	case "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "^":
+	case "+",
+		"-",
+		"*",
+		"/",
+		"%",
+		"==",
+		"!=",
+		"<",
+		">",
+		"<=",
+		">=",
+		"&",
+		"|",
+		"^",
+		"[]",
+		"[]=":
 		return true
+
 	default:
 		return false
 	}
