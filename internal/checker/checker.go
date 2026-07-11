@@ -450,6 +450,54 @@ type OverloadInfo struct {
 	Span       source.Span
 }
 
+type IndexResolutionKind int
+
+const (
+	IndexResolutionInvalid IndexResolutionKind = iota
+
+	IndexResolutionVariadicRead
+	IndexResolutionVariadicWrite
+
+	IndexResolutionPrimitiveByteRead
+	IndexResolutionPrimitiveByteWrite
+
+	IndexResolutionRawptrRead
+	IndexResolutionRawptrWrite
+
+	IndexResolutionCstringRead
+
+	IndexResolutionOverloadRead
+	IndexResolutionOverloadWrite
+)
+
+type IndexResolution struct {
+	Kind IndexResolutionKind
+
+	Candidate *Symbol
+	TaskType  *Type
+
+	PackageName      string
+	GenericArguments []GenericArgumentInfo
+}
+
+type LenResolutionKind int
+
+const (
+	LenResolutionInvalid LenResolutionKind = iota
+	LenResolutionVariadic
+	LenResolutionOverload
+)
+
+type LenResolution struct {
+	Kind LenResolutionKind
+
+	Candidate *Symbol
+	TaskType  *Type
+
+	PackageName      string
+	GenericArguments []GenericArgumentInfo
+}
+
 type Scope struct {
 	Parent  *Scope
 	Symbols map[string]*Symbol
@@ -503,6 +551,9 @@ type Checker struct {
 	preparingOverloads map[*ast.OverloadDecl]bool
 	preparedOverloads  map[*ast.OverloadDecl]bool
 
+	indexResolutions map[*ast.IndexExpr]IndexResolution
+	lenResolutions   map[*ast.CallExpr]LenResolution
+
 	options Options
 
 	genericConstraintEvalStack []string
@@ -528,6 +579,8 @@ func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*Packag
 		preparingTasks:     map[*ast.TaskDecl]bool{},
 		preparingOverloads: map[*ast.OverloadDecl]bool{},
 		preparedOverloads:  map[*ast.OverloadDecl]bool{},
+		indexResolutions:   map[*ast.IndexExpr]IndexResolution{},
+		lenResolutions:     map[*ast.CallExpr]LenResolution{},
 		options:            options,
 		packageScopes:      map[string]*Scope{},
 		implByDecl:         map[*ast.ImplDecl]*ImplInfo{},
@@ -541,22 +594,58 @@ func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*Packag
 	return c
 }
 
-type operatorOverloadLookup struct {
+func (c *Checker) IndexResolutionFor(
+	expr *ast.IndexExpr,
+) (IndexResolution, bool) {
+	if c == nil || expr == nil {
+		return IndexResolution{}, false
+	}
+
+	resolution, ok := c.indexResolutions[expr]
+	return resolution, ok
+}
+
+func (c *Checker) LenResolutionFor(
+	expr *ast.CallExpr,
+) (LenResolution, bool) {
+	if c == nil || expr == nil {
+		return LenResolution{}, false
+	}
+
+	resolution, ok := c.lenResolutions[expr]
+	return resolution, ok
+}
+
+type overloadLookup struct {
 	Symbol *Symbol
 	Scope  *Scope
 	Name   string
+
+	PackageName string
 }
 
-func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []*Type) []operatorOverloadLookup {
+func (c *Checker) overloadLookups(
+	scope *Scope,
+	name string,
+	argTypes []*Type,
+) []overloadLookup {
 	if scope == nil {
 		scope = c.global
 	}
 
-	var out []operatorOverloadLookup
+	var out []overloadLookup
 	seen := map[string]bool{}
 
-	add := func(key string, sym *Symbol, lookupScope *Scope, displayName string) {
-		if sym == nil || sym.Kind != SymbolOverload || sym.Overload == nil {
+	add := func(
+		key string,
+		sym *Symbol,
+		lookupScope *Scope,
+		displayName string,
+		packageName string,
+	) {
+		if sym == nil ||
+			sym.Kind != SymbolOverload ||
+			sym.Overload == nil {
 			return
 		}
 
@@ -565,14 +654,22 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 		}
 
 		seen[key] = true
-		out = append(out, operatorOverloadLookup{
-			Symbol: sym,
-			Scope:  lookupScope,
-			Name:   displayName,
+
+		out = append(out, overloadLookup{
+			Symbol:      sym,
+			Scope:       lookupScope,
+			Name:        displayName,
+			PackageName: packageName,
 		})
 	}
 
-	add(name, scope.Lookup(name), scope, name)
+	add(
+		name,
+		scope.Lookup(name),
+		scope,
+		name,
+		"",
+	)
 
 	for _, typ := range argTypes {
 		pkgName, ok := packageNameFromType(typ)
@@ -581,19 +678,35 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 		}
 
 		pkgSym := scope.Lookup(pkgName)
-		if pkgSym == nil || pkgSym.Kind != SymbolPackage || pkgSym.Package == nil {
+		if pkgSym == nil ||
+			pkgSym.Kind != SymbolPackage ||
+			pkgSym.Package == nil {
 			continue
 		}
 
 		member := pkgSym.Package.Symbols[name]
-		if member == nil || member.Kind != SymbolOverload || member.Overload == nil {
+		if member == nil ||
+			member.Kind != SymbolOverload ||
+			member.Overload == nil {
 			continue
 		}
 
-		pkgScope := c.scopeForPackageInfo(pkgName, pkgSym.Package)
-		qualifiedMember := c.importedPackageMemberSymbol(pkgName, member)
+		pkgScope := c.scopeForPackageInfo(
+			pkgName,
+			pkgSym.Package,
+		)
+		qualifiedMember := c.importedPackageMemberSymbol(
+			pkgName,
+			member,
+		)
 
-		add(pkgName+"."+name, qualifiedMember, pkgScope, pkgName+"."+name)
+		add(
+			pkgName+"."+name,
+			qualifiedMember,
+			pkgScope,
+			pkgName+"."+name,
+			pkgName,
+		)
 	}
 
 	return out
@@ -749,10 +862,14 @@ type overloadResolution struct {
 	Ambiguous bool
 }
 
-type bracketOverloadResolution struct {
+type receiverOverloadResolution struct {
 	Candidate *Symbol
 	TaskType  *Type
-	Score     int
+
+	GenericArguments []GenericArgumentInfo
+	PackageName      string
+
+	Score int
 
 	Matched     bool
 	Ambiguous   bool
@@ -1876,7 +1993,7 @@ func (c *Checker) bracketCandidateSignatureValid(
 		return false
 	}
 
-	if !c.isBracketReceiverParameter(taskType.Params[0]) {
+	if !c.isOverloadReceiverParameter(taskType.Params[0]) {
 		return false
 	}
 
@@ -1888,7 +2005,9 @@ func (c *Checker) bracketCandidateSignatureValid(
 	return true
 }
 
-func (c *Checker) isBracketReceiverParameter(t *Type) bool {
+func (c *Checker) isOverloadReceiverParameter(
+	t *Type,
+) bool {
 	if t == nil ||
 		t.Kind != TypePointer ||
 		t.Elem == nil {
@@ -1900,9 +2019,8 @@ func (c *Checker) isBracketReceiverParameter(t *Type) bool {
 		return true
 
 	case TypeString:
-		// Temporary compatibility with the current builtin string type.
-		// String indexing still uses overload resolution and has no intrinsic
-		// checker path.
+		// Temporary compatibility until string becomes a standard-library
+		// struct.
 		return true
 
 	default:
@@ -1997,7 +2115,7 @@ func (c *Checker) checkBracketOverloadCandidate(
 	}
 
 	if len(taskType.Params) > 0 &&
-		!c.isBracketReceiverParameter(taskType.Params[0]) {
+		!c.isOverloadReceiverParameter(taskType.Params[0]) {
 		c.diags.Add(
 			candidate.Span,
 			fmt.Sprintf(
@@ -2021,6 +2139,136 @@ func (c *Checker) checkBracketOverloadCandidate(
 	}
 }
 
+func (c *Checker) lenCandidateSignatureValid(
+	taskType *Type,
+) bool {
+	if taskType == nil ||
+		taskType.Kind != TypeTask {
+		return false
+	}
+
+	if !taskType.IsPure &&
+		!taskType.IsTrustedPure {
+		return false
+	}
+
+	if c.taskHasDefaultParameters(taskType) {
+		return false
+	}
+
+	if taskType.IsVariadic ||
+		taskTypeHasVariadicParam(taskType) {
+		return false
+	}
+
+	if len(taskType.Params) != 1 ||
+		len(taskType.Results) != 1 {
+		return false
+	}
+
+	if !c.isOverloadReceiverParameter(
+		taskType.Params[0],
+	) {
+		return false
+	}
+
+	// Keep overloaded len consistent with builtin variadic len.
+	return c.sameType(
+		taskType.Results[0],
+		UintType,
+	)
+}
+
+func (c *Checker) checkLenOverloadCandidate(
+	candidate *Symbol,
+	taskType *Type,
+) {
+	if candidate == nil ||
+		taskType == nil ||
+		taskType.Kind != TypeTask {
+		return
+	}
+
+	if !taskType.IsPure &&
+		!taskType.IsTrustedPure {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q must be pure`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if c.taskHasDefaultParameters(taskType) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q cannot have default parameters`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if taskType.IsVariadic ||
+		taskTypeHasVariadicParam(taskType) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q cannot be variadic`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if len(taskType.Params) != 1 {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q must have exactly 1 parameter`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if len(taskType.Results) != 1 {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q must return exactly 1 value`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if len(taskType.Params) > 0 &&
+		!c.isOverloadReceiverParameter(
+			taskType.Params[0],
+		) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`first parameter of len overload candidate %q must be a pointer to a struct`,
+				candidate.Name,
+			),
+		)
+	}
+
+	if len(taskType.Results) == 1 &&
+		!c.sameType(
+			taskType.Results[0],
+			UintType,
+		) {
+		c.diags.Add(
+			candidate.Span,
+			fmt.Sprintf(
+				`len overload candidate %q must return uint`,
+				candidate.Name,
+			),
+		)
+	}
+}
+
 func (c *Checker) checkOverloadDecl(
 	scope *Scope,
 	d *ast.OverloadDecl,
@@ -2036,6 +2284,14 @@ func (c *Checker) checkOverloadDecl(
 		taskType := candidate.Type
 
 		if taskType == nil || taskType.Kind != TypeTask {
+			continue
+		}
+
+		if d.Name == "len" {
+			c.checkLenOverloadCandidate(
+				candidate,
+				taskType,
+			)
 			continue
 		}
 
@@ -2125,6 +2381,26 @@ func (c *Checker) checkOverloadDecl(
 	}
 
 	c.checkDuplicateOverloadSignatures(info)
+}
+
+func (c *Checker) shouldUseLenDispatch(
+	scope *Scope,
+	name string,
+) bool {
+	if name != "len" {
+		return false
+	}
+
+	sym := scope.Lookup(name)
+
+	// No checker symbol means the builtin len name is active.
+	if sym == nil {
+		return true
+	}
+
+	// A local len overload augments builtin variadic len rather than disabling
+	// it.
+	return sym.Kind == SymbolOverload
 }
 
 func (c *Checker) checkDuplicateOverloadSignatures(info *OverloadInfo) {
@@ -2685,7 +2961,7 @@ func (c *Checker) matchImplGenericArgument(
 	return pattern.Key == actual.Key
 }
 
-func bracketGenericMatchComplete(
+func receiverGenericMatchComplete(
 	params []ast.GenericParam,
 	match ImplMatch,
 ) bool {
@@ -2714,6 +2990,59 @@ func bracketGenericMatchComplete(
 	}
 
 	return true
+}
+
+func receiverGenericArguments(
+	params []ast.GenericParam,
+	match ImplMatch,
+) ([]GenericArgumentInfo, bool) {
+	args := make(
+		[]GenericArgumentInfo,
+		0,
+		len(params),
+	)
+
+	for _, param := range params {
+		name := param.Name.Name
+		if name == "" {
+			return nil, false
+		}
+
+		switch {
+		case isTypeGenericCategory(param.Category):
+			typ := match.Types[name]
+			if typ == nil {
+				return nil, false
+			}
+
+			args = append(args, GenericArgumentInfo{
+				Category: param.Category,
+				Type:     typ,
+				Key:      typ.String(),
+			})
+
+		case isValueGenericCategory(param.Category):
+			value, ok := match.Values[name]
+			if !ok {
+				return nil, false
+			}
+
+			value.Category = param.Category
+
+			if value.Key == "" {
+				value.Key = genericArgumentInfoDisplay(value)
+			}
+
+			args = append(args, value)
+
+		default:
+			// Task-generic parameters cannot be inferred solely from a
+			// receiver type.
+			return nil, false
+		}
+	}
+
+	return args, true
 }
 
 func genericArgumentInfoDisplay(
@@ -2763,7 +3092,7 @@ func genericTypeNameFromArgumentInfo(
 	)
 }
 
-func (c *Checker) substituteBracketMatchType(
+func (c *Checker) substituteReceiverMatchType(
 	t *Type,
 	match ImplMatch,
 	seen map[*Type]*Type,
@@ -2787,12 +3116,12 @@ func (c *Checker) substituteBracketMatchType(
 	out := *t
 	seen[t] = &out
 
-	out.Elem = c.substituteBracketMatchType(
+	out.Elem = c.substituteReceiverMatchType(
 		t.Elem,
 		match,
 		seen,
 	)
-	out.Underlying = c.substituteBracketMatchType(
+	out.Underlying = c.substituteReceiverMatchType(
 		t.Underlying,
 		match,
 		seen,
@@ -2812,7 +3141,7 @@ func (c *Checker) substituteBracketMatchType(
 			}
 		}
 
-		cloned.Type = c.substituteBracketMatchType(
+		cloned.Type = c.substituteReceiverMatchType(
 			cloned.Type,
 			match,
 			seen,
@@ -2838,7 +3167,7 @@ func (c *Checker) substituteBracketMatchType(
 			out.Fields,
 			FieldInfo{
 				Name: field.Name,
-				Type: c.substituteBracketMatchType(
+				Type: c.substituteReceiverMatchType(
 					field.Type,
 					match,
 					seen,
@@ -2853,7 +3182,7 @@ func (c *Checker) substituteBracketMatchType(
 	for _, member := range t.Members {
 		out.Members = append(
 			out.Members,
-			c.substituteBracketMatchType(
+			c.substituteReceiverMatchType(
 				member,
 				match,
 				seen,
@@ -2877,7 +3206,7 @@ func (c *Checker) substituteBracketMatchType(
 		for _, param := range req.Params {
 			cloned.Params = append(
 				cloned.Params,
-				c.substituteBracketMatchType(
+				c.substituteReceiverMatchType(
 					param,
 					match,
 					seen,
@@ -2888,7 +3217,7 @@ func (c *Checker) substituteBracketMatchType(
 		for _, result := range req.Results {
 			cloned.Results = append(
 				cloned.Results,
-				c.substituteBracketMatchType(
+				c.substituteReceiverMatchType(
 					result,
 					match,
 					seen,
@@ -2906,7 +3235,7 @@ func (c *Checker) substituteBracketMatchType(
 	for _, iface := range t.Implements {
 		out.Implements = append(
 			out.Implements,
-			c.substituteBracketMatchType(
+			c.substituteReceiverMatchType(
 				iface,
 				match,
 				seen,
@@ -2918,7 +3247,7 @@ func (c *Checker) substituteBracketMatchType(
 	for _, param := range t.Params {
 		out.Params = append(
 			out.Params,
-			c.substituteBracketMatchType(
+			c.substituteReceiverMatchType(
 				param,
 				match,
 				seen,
@@ -2930,7 +3259,7 @@ func (c *Checker) substituteBracketMatchType(
 	for _, result := range t.Results {
 		out.Results = append(
 			out.Results,
-			c.substituteBracketMatchType(
+			c.substituteReceiverMatchType(
 				result,
 				match,
 				seen,
@@ -2941,26 +3270,30 @@ func (c *Checker) substituteBracketMatchType(
 	return &out
 }
 
-func (c *Checker) bracketCandidateTaskType(
+func (c *Checker) receiverCandidateTaskType(
 	candidate *Symbol,
 	argTypes []*Type,
-) (*Type, int, bool) {
+) (*Type, []GenericArgumentInfo, int, bool) {
 	if candidate == nil ||
 		candidate.Type == nil ||
 		candidate.Type.Kind != TypeTask {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
 	taskType := candidate.Type
 
 	if len(taskType.GenericParams) == 0 {
-		score, ok := c.callScore(taskType, argTypes)
-		return taskType, score, ok
+		score, ok := c.callScore(
+			taskType,
+			argTypes,
+		)
+
+		return taskType, nil, score, ok
 	}
 
 	if len(taskType.Params) != len(argTypes) ||
 		len(taskType.Params) == 0 {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
 	match := ImplMatch{
@@ -2968,56 +3301,73 @@ func (c *Checker) bracketCandidateTaskType(
 		Values: map[string]GenericArgumentInfo{},
 	}
 
-	kinds := genericParamKinds(taskType.GenericParams)
+	kinds := genericParamKinds(
+		taskType.GenericParams,
+	)
 
-	// Bracket generic arguments are inferred exclusively from the receiver.
-	// The assigned value must not select a conflicting specialization.
+	// Receiver-owned overloads infer generic arguments only from the first
+	// receiver parameter. Other arguments validate the selected
+	// specialization but do not select another specialization.
 	if !c.matchImplType(
 		taskType.Params[0],
 		argTypes[0],
 		kinds,
 		&match,
 	) {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
-	if !bracketGenericMatchComplete(
+	if !receiverGenericMatchComplete(
 		taskType.GenericParams,
 		match,
 	) {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
-	specialized := c.substituteBracketMatchType(
+	genericArgs, ok := receiverGenericArguments(
+		taskType.GenericParams,
+		match,
+	)
+	if !ok {
+		return nil, nil, 0, false
+	}
+
+	specialized := c.substituteReceiverMatchType(
 		taskType,
 		match,
 		map[*Type]*Type{},
 	)
+
 	specialized.GenericParams = nil
+	specialized.Name = genericTypeNameFromArgumentInfo(
+		taskType.Name,
+		genericArgs,
+	)
 
 	score, ok := c.callScore(
 		specialized,
 		argTypes,
 	)
 	if !ok {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
-	return specialized, score, true
+	return specialized, genericArgs, score, true
 }
 
-func (c *Checker) resolveBracketOverloadAt(
+func (c *Checker) resolveReceiverOverloadAt(
 	scope *Scope,
 	name string,
 	argTypes []*Type,
-) bracketOverloadResolution {
-	lookups := c.operatorOverloadLookups(
+	validCandidate func(*Type) bool,
+) receiverOverloadResolution {
+	lookups := c.overloadLookups(
 		scope,
 		name,
 		argTypes,
 	)
 
-	best := bracketOverloadResolution{
+	best := receiverOverloadResolution{
 		Score:       1 << 30,
 		HadOverload: len(lookups) > 0,
 	}
@@ -3035,15 +3385,18 @@ func (c *Checker) resolveBracketOverloadAt(
 
 		for _, candidate := range lookup.Symbol.Overload.Candidates {
 			if candidate == nil ||
-				!c.bracketCandidateSignatureValid(
-					name,
-					candidate.Type,
-				) {
+				candidate.Type == nil ||
+				candidate.Type.Kind != TypeTask {
 				continue
 			}
 
-			taskType, score, ok :=
-				c.bracketCandidateTaskType(
+			if validCandidate != nil &&
+				!validCandidate(candidate.Type) {
+				continue
+			}
+
+			taskType, genericArgs, score, ok :=
+				c.receiverCandidateTaskType(
 					candidate,
 					argTypes,
 				)
@@ -3052,11 +3405,15 @@ func (c *Checker) resolveBracketOverloadAt(
 			}
 
 			if !best.Matched || score < best.Score {
-				best.Candidate = candidate
-				best.TaskType = taskType
-				best.Score = score
-				best.Matched = true
-				best.Ambiguous = false
+				best = receiverOverloadResolution{
+					Candidate:        candidate,
+					TaskType:         taskType,
+					GenericArguments: genericArgs,
+					PackageName:      lookup.PackageName,
+					Score:            score,
+					Matched:          true,
+					HadOverload:      true,
+				}
 				continue
 			}
 
@@ -3067,6 +3424,24 @@ func (c *Checker) resolveBracketOverloadAt(
 	}
 
 	return best
+}
+
+func (c *Checker) resolveBracketOverloadAt(
+	scope *Scope,
+	name string,
+	argTypes []*Type,
+) receiverOverloadResolution {
+	return c.resolveReceiverOverloadAt(
+		scope,
+		name,
+		argTypes,
+		func(taskType *Type) bool {
+			return c.bracketCandidateSignatureValid(
+				name,
+				taskType,
+			)
+		},
+	)
 }
 
 func (c *Checker) implPatternMatches(
@@ -5231,7 +5606,7 @@ func (c *Checker) numericComparable(a *Type, b *Type) bool {
 }
 
 func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*Type, span source.Span, diagnoseMissing bool) (*Type, bool) {
-	lookups := c.operatorOverloadLookups(scope, name, argTypes)
+	lookups := c.overloadLookups(scope, name, argTypes)
 	if len(lookups) == 0 {
 		return InvalidType, false
 	}
@@ -5239,7 +5614,6 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 	best := overloadResolution{
 		Score: 1 << 30,
 	}
-	var bestLookup operatorOverloadLookup
 
 	for _, lookup := range lookups {
 		c.ensureOverloadSymbolPrepared(lookup.Scope, lookup.Symbol)
@@ -5259,7 +5633,6 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 
 		if !best.Matched || result.Score < best.Score {
 			best = result
-			bestLookup = lookup
 			continue
 		}
 
@@ -5267,8 +5640,6 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 			best.Ambiguous = true
 		}
 	}
-
-	_ = bestLookup
 
 	if !best.Matched {
 		if diagnoseMissing {
@@ -5462,11 +5833,23 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if c.shouldUseLenDispatch(
+			scope,
+			id.Name.Name,
+		) {
+			return []*Type{
+				c.checkLenCall(
+					scope,
+					e,
+					argTypes,
+				),
+			}
+		}
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
 			switch kind {
-			case builtin.TaskLen:
-				return []*Type{c.checkLenCall(e.Args, argTypes, e.Span())}
-
 			case builtin.TaskSize:
 				return []*Type{c.checkSizeCall(e.Args, argTypes, e.Span())}
 
@@ -5813,11 +6196,21 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if c.shouldUseLenDispatch(
+			scope,
+			id.Name.Name,
+		) {
+			return c.checkLenCall(
+				scope,
+				e,
+				argTypes,
+			)
+		}
+	}
+
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
 			switch kind {
-			case builtin.TaskLen:
-				return c.checkLenCall(e.Args, argTypes, e.Span())
-
 			case builtin.TaskSize:
 				return c.checkSizeCall(e.Args, argTypes, e.Span())
 
@@ -6166,13 +6559,17 @@ func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.S
 }
 
 func (c *Checker) checkLenCall(
-	args []ast.Expr,
+	scope *Scope,
+	call *ast.CallExpr,
 	argTypes []*Type,
-	span source.Span,
 ) *Type {
+	if call == nil {
+		return UintType
+	}
+
 	if len(argTypes) != 1 {
 		c.diags.Add(
-			span,
+			call.Span(),
 			fmt.Sprintf(
 				"len expects 1 argument, got %d",
 				len(argTypes),
@@ -6181,24 +6578,93 @@ func (c *Checker) checkLenCall(
 		return UintType
 	}
 
-	t := argTypes[0]
-	if t == nil || t.Kind == TypeInvalid {
+	receiverType := argTypes[0]
+	if receiverType == nil ||
+		receiverType.Kind == TypeInvalid {
 		return UintType
 	}
 
-	if t.Kind == TypeVariadic {
+	if receiverType.Kind == TypeVariadic {
+		c.lenResolutions[call] = LenResolution{
+			Kind: LenResolutionVariadic,
+		}
+
 		return UintType
 	}
 
-	c.diags.Add(
-		args[0].Span(),
-		fmt.Sprintf(
-			"len does not support %s",
-			t.String(),
-		),
+	receiverPointer := &Type{
+		Kind: TypePointer,
+		Elem: receiverType,
+	}
+
+	resolution := c.resolveReceiverOverloadAt(
+		scope,
+		"len",
+		[]*Type{
+			receiverPointer,
+		},
+		func(taskType *Type) bool {
+			return c.lenCandidateSignatureValid(
+				taskType,
+			)
+		},
 	)
 
-	return UintType
+	if resolution.Ambiguous {
+		c.diags.Add(
+			call.Span(),
+			fmt.Sprintf(
+				"ambiguous len overload for receiver %s",
+				receiverType.String(),
+			),
+		)
+		return UintType
+	}
+
+	if !resolution.HadOverload {
+		c.diags.Add(
+			call.Args[0].Span(),
+			fmt.Sprintf(
+				"len does not support %s",
+				receiverType.String(),
+			),
+		)
+		return UintType
+	}
+
+	if !resolution.Matched {
+		c.diags.Add(
+			call.Span(),
+			fmt.Sprintf(
+				"no len overload matches receiver %s",
+				receiverType.String(),
+			),
+		)
+		return UintType
+	}
+
+	if !c.isAddressableExpr(
+		scope,
+		call.Args[0],
+	) {
+		c.diags.Add(
+			call.Args[0].Span(),
+			"len overload requires an addressable receiver",
+		)
+	}
+
+	c.lenResolutions[call] = LenResolution{
+		Kind:             LenResolutionOverload,
+		Candidate:        resolution.Candidate,
+		TaskType:         resolution.TaskType,
+		PackageName:      resolution.PackageName,
+		GenericArguments: resolution.GenericArguments,
+	}
+
+	return c.resultTypeFromCall(
+		resolution.TaskType,
+		call.Span(),
+	)
 }
 
 func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
@@ -6306,16 +6772,32 @@ func (c *Checker) checkIndexExpr(
 			return InvalidType
 		}
 
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionVariadicRead,
+		}
+
 		return receiverType.Elem
 
 	case TypeRawptr:
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionRawptrRead,
+		}
+
 		return U8Type
 
 	case TypeCstring:
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionCstringRead,
+		}
+
 		return U8Type
 	}
 
 	if c.isPrimitiveByteIndexable(receiverType) {
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionPrimitiveByteRead,
+		}
+
 		return U8Type
 	}
 
@@ -6376,6 +6858,14 @@ func (c *Checker) checkIndexExpr(
 				),
 			)
 			return InvalidType
+		}
+
+		c.indexResolutions[e] = IndexResolution{
+			Kind:             IndexResolutionOverloadRead,
+			Candidate:        resolution.Candidate,
+			TaskType:         resolution.TaskType,
+			PackageName:      resolution.PackageName,
+			GenericArguments: resolution.GenericArguments,
 		}
 
 		return c.resultTypeFromCall(
@@ -8304,7 +8794,7 @@ func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, le
 	}
 
 	argTypes := []*Type{left.Type, right.Type}
-	lookups := c.operatorOverloadLookups(scope, name, argTypes)
+	lookups := c.overloadLookups(scope, name, argTypes)
 	if len(lookups) == 0 {
 		return genericConstValue{}, false
 	}
@@ -9998,8 +10488,11 @@ func exportSymbolSignatureOnly(sym *Symbol) *Symbol {
 	if out.Kind == SymbolTask {
 		keepBody := false
 
-		if out.Type != nil && (out.Type.IsPure || out.Type.IsTrustedPure) {
-			keepBody = true
+		if out.Type != nil {
+			keepBody =
+				len(out.Type.GenericParams) > 0 ||
+					out.Type.IsPure ||
+					out.Type.IsTrustedPure
 		}
 
 		if !keepBody {
