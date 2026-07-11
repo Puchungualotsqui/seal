@@ -12,6 +12,20 @@ import (
 	"seal/internal/source"
 )
 
+func checkerTestNamedType(parts ...string) ast.Type {
+	idents := make([]ast.Ident, len(parts))
+
+	for i, part := range parts {
+		idents[i] = ast.Ident{
+			Name: part,
+		}
+	}
+
+	return &ast.NamedType{
+		Parts: idents,
+	}
+}
+
 func parseCheckerFile(t *testing.T, packageName string, input string) (*ast.File, *diag.Reporter) {
 	t.Helper()
 
@@ -5955,4 +5969,600 @@ Main :: task() {
 		reporter,
 		`cannot take the address of nil`,
 	)
+}
+
+func TestExportPackageIncludesStaticAndDynamicInterfaces(t *testing.T) {
+	scope := NewScope(nil)
+
+	scope.Declare(&Symbol{
+		Name: "StaticReadable",
+		Kind: SymbolType,
+		Type: &Type{
+			Kind:           TypeInterface,
+			Name:           "StaticReadable",
+			IsDynInterface: false,
+		},
+	})
+
+	scope.Declare(&Symbol{
+		Name: "DynamicReadable",
+		Kind: SymbolType,
+		Type: &Type{
+			Kind:           TypeInterface,
+			Name:           "DynamicReadable",
+			IsDynInterface: true,
+		},
+	})
+
+	pkg := ExportPackage("api", scope)
+
+	staticSym := pkg.Symbols["StaticReadable"]
+	if staticSym == nil {
+		t.Fatal("static interface was not exported")
+	}
+
+	if staticSym.Kind != SymbolType {
+		t.Fatalf(
+			"static interface symbol kind = %v, want SymbolType",
+			staticSym.Kind,
+		)
+	}
+
+	if staticSym.Type == nil ||
+		staticSym.Type.Kind != TypeInterface {
+		t.Fatalf(
+			"exported static interface type = %#v",
+			staticSym.Type,
+		)
+	}
+
+	if staticSym.Type.IsDynInterface {
+		t.Fatal("static interface became dynamic during export")
+	}
+
+	dynamicSym := pkg.Symbols["DynamicReadable"]
+	if dynamicSym == nil {
+		t.Fatal("dynamic interface was not exported")
+	}
+
+	if dynamicSym.Kind != SymbolType {
+		t.Fatalf(
+			"dynamic interface symbol kind = %v, want SymbolType",
+			dynamicSym.Kind,
+		)
+	}
+
+	if dynamicSym.Type == nil ||
+		dynamicSym.Type.Kind != TypeInterface {
+		t.Fatalf(
+			"exported dynamic interface type = %#v",
+			dynamicSym.Type,
+		)
+	}
+
+	if !dynamicSym.Type.IsDynInterface {
+		t.Fatal("dynamic interface lost its dynamic flag during export")
+	}
+}
+
+func TestImportedStaticAndDynamicInterfacesRemainAvailable(t *testing.T) {
+	staticInterface := &Type{
+		Kind:           TypeInterface,
+		Name:           "Readable",
+		IsDynInterface: false,
+	}
+
+	dynamicInterface := &Type{
+		Kind:           TypeInterface,
+		Name:           "Readable",
+		IsDynInterface: true,
+	}
+
+	packages := map[string]*PackageInfo{
+		"staticapi": {
+			Name: "staticapi",
+			Symbols: map[string]*Symbol{
+				"Readable": {
+					Name: "Readable",
+					Kind: SymbolType,
+					Type: staticInterface,
+				},
+			},
+		},
+		"dynapi": {
+			Name: "dynapi",
+			Symbols: map[string]*Symbol{
+				"Readable": {
+					Name: "Readable",
+					Kind: SymbolType,
+					Type: dynamicInterface,
+				},
+			},
+		},
+	}
+
+	reporter := diag.NewReporter()
+	checker := NewWithPackages(reporter, packages)
+
+	staticImported := checker.typeFromAst(
+		checker.global,
+		checkerTestNamedType("staticapi", "Readable"),
+	)
+
+	if staticImported.Kind != TypeInterface {
+		t.Fatalf(
+			"static imported type kind = %v, want TypeInterface",
+			staticImported.Kind,
+		)
+	}
+
+	if staticImported.Name != "staticapi.Readable" {
+		t.Fatalf(
+			"static imported interface name = %q, want %q",
+			staticImported.Name,
+			"staticapi.Readable",
+		)
+	}
+
+	if staticImported.IsDynInterface {
+		t.Fatal("imported static interface became dynamic")
+	}
+
+	dynamicImported := checker.typeFromAst(
+		checker.global,
+		checkerTestNamedType("dynapi", "Readable"),
+	)
+
+	if dynamicImported.Kind != TypeInterface {
+		t.Fatalf(
+			"dynamic imported type kind = %v, want TypeInterface",
+			dynamicImported.Kind,
+		)
+	}
+
+	if dynamicImported.Name != "dynapi.Readable" {
+		t.Fatalf(
+			"dynamic imported interface name = %q, want %q",
+			dynamicImported.Name,
+			"dynapi.Readable",
+		)
+	}
+
+	if !dynamicImported.IsDynInterface {
+		t.Fatal("imported dynamic interface lost its dynamic flag")
+	}
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestImportedImplResolvesForStaticAndDynamicInterfaces(t *testing.T) {
+	tests := []struct {
+		name  string
+		isDyn bool
+	}{
+		{
+			name:  "static",
+			isDyn: false,
+		},
+		{
+			name:  "dynamic",
+			isDyn: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			iface := &Type{
+				Kind:           TypeInterface,
+				Name:           "Readable",
+				IsDynInterface: test.isDyn,
+			}
+
+			target := &Type{
+				Kind: TypeStruct,
+				Name: "Widget",
+			}
+
+			pkg := &PackageInfo{
+				Name: "api",
+				Symbols: map[string]*Symbol{
+					"Readable": {
+						Name: "Readable",
+						Kind: SymbolType,
+						Type: iface,
+					},
+					"Widget": {
+						Name: "Widget",
+						Kind: SymbolType,
+						Type: target,
+					},
+				},
+				Impls: []*ImplInfo{
+					{
+						Interface: iface,
+						Target:    target,
+						Entries:   map[string]*ImplEntryInfo{},
+						Checked:   true,
+						Usable:    true,
+					},
+				},
+			}
+
+			reporter := diag.NewReporter()
+			checker := NewWithPackages(
+				reporter,
+				map[string]*PackageInfo{
+					"api": pkg,
+				},
+			)
+
+			importedInterface := checker.typeFromAst(
+				checker.global,
+				checkerTestNamedType("api", "Readable"),
+			)
+
+			importedTarget := checker.typeFromAst(
+				checker.global,
+				checkerTestNamedType("api", "Widget"),
+			)
+
+			resolution := checker.resolveImplAt(
+				importedInterface,
+				importedTarget,
+				source.Span{},
+				nil,
+				true,
+			)
+
+			if !resolution.Found() {
+				t.Fatalf(
+					"expected imported %s interface implementation to resolve; diagnostics:\n%s",
+					test.name,
+					reporter.String(),
+				)
+			}
+
+			if resolution.Resolved.Info.PackageName != "api" {
+				t.Fatalf(
+					"resolved implementation package = %q, want %q",
+					resolution.Resolved.Info.PackageName,
+					"api",
+				)
+			}
+
+			if resolution.Resolved.Interface.IsDynInterface != test.isDyn {
+				t.Fatalf(
+					"resolved interface dynamic flag = %v, want %v",
+					resolution.Resolved.Interface.IsDynInterface,
+					test.isDyn,
+				)
+			}
+		})
+	}
+}
+
+func TestCurrentPackageImplOwnership(t *testing.T) {
+	localStruct := &Type{
+		Kind: TypeStruct,
+		Name: "Widget",
+	}
+
+	importedStruct := &Type{
+		Kind: TypeStruct,
+		Name: "api.Widget",
+	}
+
+	localGenericStruct := &Type{
+		Kind:            TypeStruct,
+		Name:            "Box<api.Widget>",
+		GenericBaseName: "Box",
+	}
+
+	importedGenericStruct := &Type{
+		Kind:            TypeStruct,
+		Name:            "api.Box<Widget>",
+		GenericBaseName: "api.Box",
+	}
+
+	localInterface := &Type{
+		Kind: TypeInterface,
+		Name: "Readable",
+	}
+
+	importedInterface := &Type{
+		Kind: TypeInterface,
+		Name: "api.Readable",
+	}
+
+	tests := []struct {
+		name string
+		typ  *Type
+		want bool
+	}{
+		{
+			name: "local struct",
+			typ:  localStruct,
+			want: true,
+		},
+		{
+			name: "imported struct",
+			typ:  importedStruct,
+			want: false,
+		},
+		{
+			name: "local generic base with imported argument",
+			typ:  localGenericStruct,
+			want: true,
+		},
+		{
+			name: "imported generic base with local argument",
+			typ:  importedGenericStruct,
+			want: false,
+		},
+		{
+			name: "pointer to local struct",
+			typ: &Type{
+				Kind: TypePointer,
+				Elem: localStruct,
+			},
+			want: true,
+		},
+		{
+			name: "pointer to imported struct",
+			typ: &Type{
+				Kind: TypePointer,
+				Elem: importedStruct,
+			},
+			want: false,
+		},
+		{
+			name: "builtin",
+			typ:  IntType,
+			want: false,
+		},
+		{
+			name: "generic type parameter",
+			typ: &Type{
+				Kind: TypeTypeParam,
+				Name: "T",
+			},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := currentPackageOwnsImplTarget(test.typ)
+
+			if got != test.want {
+				t.Fatalf(
+					"currentPackageOwnsImplTarget(%s) = %v, want %v",
+					test.typ.String(),
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+
+	if !currentPackageOwnsInterface(localInterface) {
+		t.Fatal("current package should own local interface")
+	}
+
+	if currentPackageOwnsInterface(importedInterface) {
+		t.Fatal("current package must not own imported interface")
+	}
+}
+
+func TestRejectOrphanImplOfImportedInterfaceForBuiltin(t *testing.T) {
+	iface := &Type{
+		Kind: TypeInterface,
+		Name: "Readable",
+	}
+
+	api := &PackageInfo{
+		Name: "api",
+		Symbols: map[string]*Symbol{
+			"Readable": {
+				Name: "Readable",
+				Kind: SymbolType,
+				Type: iface,
+			},
+		},
+	}
+
+	reporter := diag.NewReporter()
+	checker := NewWithPackages(
+		reporter,
+		map[string]*PackageInfo{
+			"api": api,
+		},
+	)
+
+	checker.prepareImplDecl(
+		checker.global,
+		&ast.ImplDecl{
+			Interface: checkerTestNamedType("api", "Readable"),
+			Target:    checkerTestNamedType("int"),
+		},
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal("expected orphan implementation diagnostic")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"orphan impl is not allowed",
+	) {
+		t.Fatalf(
+			"expected orphan implementation diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectOrphanImplOfImportedInterfaceForImportedTarget(t *testing.T) {
+	iface := &Type{
+		Kind: TypeInterface,
+		Name: "Readable",
+	}
+
+	widget := &Type{
+		Kind: TypeStruct,
+		Name: "Widget",
+	}
+
+	packages := map[string]*PackageInfo{
+		"api": {
+			Name: "api",
+			Symbols: map[string]*Symbol{
+				"Readable": {
+					Name: "Readable",
+					Kind: SymbolType,
+					Type: iface,
+				},
+			},
+		},
+		"models": {
+			Name: "models",
+			Symbols: map[string]*Symbol{
+				"Widget": {
+					Name: "Widget",
+					Kind: SymbolType,
+					Type: widget,
+				},
+			},
+		},
+	}
+
+	reporter := diag.NewReporter()
+	checker := NewWithPackages(reporter, packages)
+
+	checker.prepareImplDecl(
+		checker.global,
+		&ast.ImplDecl{
+			Interface: checkerTestNamedType("api", "Readable"),
+			Target:    checkerTestNamedType("models", "Widget"),
+		},
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal("expected orphan implementation diagnostic")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"current package owns neither interface api.Readable nor target type models.Widget",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestAllowImportedInterfaceImplForLocalTarget(t *testing.T) {
+	iface := &Type{
+		Kind: TypeInterface,
+		Name: "Readable",
+	}
+
+	api := &PackageInfo{
+		Name: "api",
+		Symbols: map[string]*Symbol{
+			"Readable": {
+				Name: "Readable",
+				Kind: SymbolType,
+				Type: iface,
+			},
+		},
+	}
+
+	reporter := diag.NewReporter()
+	checker := NewWithPackages(
+		reporter,
+		map[string]*PackageInfo{
+			"api": api,
+		},
+	)
+
+	checker.global.Declare(&Symbol{
+		Name: "LocalWidget",
+		Kind: SymbolType,
+		Type: &Type{
+			Kind: TypeStruct,
+			Name: "LocalWidget",
+		},
+	})
+
+	checker.prepareImplDecl(
+		checker.global,
+		&ast.ImplDecl{
+			Interface: checkerTestNamedType("api", "Readable"),
+			Target:    checkerTestNamedType("LocalWidget"),
+		},
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"imported interface should be implementable for a local target:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestAllowLocalInterfaceImplForImportedTarget(t *testing.T) {
+	widget := &Type{
+		Kind: TypeStruct,
+		Name: "Widget",
+	}
+
+	models := &PackageInfo{
+		Name: "models",
+		Symbols: map[string]*Symbol{
+			"Widget": {
+				Name: "Widget",
+				Kind: SymbolType,
+				Type: widget,
+			},
+		},
+	}
+
+	reporter := diag.NewReporter()
+	checker := NewWithPackages(
+		reporter,
+		map[string]*PackageInfo{
+			"models": models,
+		},
+	)
+
+	checker.global.Declare(&Symbol{
+		Name: "LocalReadable",
+		Kind: SymbolType,
+		Type: &Type{
+			Kind: TypeInterface,
+			Name: "LocalReadable",
+		},
+	})
+
+	checker.prepareImplDecl(
+		checker.global,
+		&ast.ImplDecl{
+			Interface: checkerTestNamedType("LocalReadable"),
+			Target:    checkerTestNamedType("models", "Widget"),
+		},
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"local interface should be implementable for an imported target:\n%s",
+			reporter.String(),
+		)
+	}
 }

@@ -609,23 +609,85 @@ func (c *Checker) operatorOverloadLookups(scope *Scope, name string, argTypes []
 	return out
 }
 
+func nominalBaseName(typ *Type) string {
+	if typ == nil {
+		return ""
+	}
+
+	// GenericBaseName correctly distinguishes:
+	//
+	//     LocalBox<api.Item>  -> LocalBox
+	//     api.Box<LocalItem>  -> api.Box
+	//
+	// Looking only at Name would incorrectly interpret dots appearing inside
+	// generic arguments as package ownership.
+	if typ.GenericBaseName != "" {
+		return typ.GenericBaseName
+	}
+
+	name := typ.Name
+
+	if i := strings.Index(name, "<"); i >= 0 {
+		name = name[:i]
+	}
+
+	return name
+}
+
+func currentPackageOwnsInterface(typ *Type) bool {
+	if typ == nil || typ.Kind != TypeInterface {
+		return false
+	}
+
+	name := nominalBaseName(typ)
+
+	return name != "" &&
+		!strings.Contains(name, ".")
+}
+
+func currentPackageOwnsImplTarget(typ *Type) bool {
+	if typ == nil {
+		return false
+	}
+
+	switch typ.Kind {
+	case TypePointer,
+		TypeArray,
+		TypeVariadic:
+		// A wrapper does not create ownership of the wrapped type.
+		return currentPackageOwnsImplTarget(typ.Elem)
+
+	case TypeStruct,
+		TypeDistinct,
+		TypeEnum,
+		TypeUnion:
+		name := nominalBaseName(typ)
+
+		return name != "" &&
+			!strings.Contains(name, ".")
+
+	default:
+		// Builtins, raw pointers, task types, type parameters, interfaces and
+		// other structural/compiler types are not owned nominal target types.
+		return false
+	}
+}
+
 func packageNameFromType(typ *Type) (string, bool) {
 	if typ == nil {
 		return "", false
 	}
 
 	switch typ.Kind {
-	case TypePointer, TypeArray, TypeVariadic:
+	case TypePointer,
+		TypeArray,
+		TypeVariadic:
 		return packageNameFromType(typ.Elem)
 	}
 
-	name := typ.Name
+	name := nominalBaseName(typ)
 	if name == "" {
 		return "", false
-	}
-
-	if i := strings.Index(name, "<"); i >= 0 {
-		name = name[:i]
 	}
 
 	dot := strings.Index(name, ".")
@@ -2876,16 +2938,17 @@ func (c *Checker) prepareImplDecl(
 		)
 	}
 
-	interfacePkg, interfaceImported := packageNameFromType(iface)
-	targetPkg, targetImported := packageNameFromType(target)
-
-	if interfaceImported && targetImported {
+	if iface.Kind == TypeInterface &&
+		target.Kind != TypeInvalid &&
+		target.Kind != TypeInterface &&
+		!currentPackageOwnsInterface(iface) &&
+		!currentPackageOwnsImplTarget(target) {
 		c.diags.Add(
 			d.Span(),
 			fmt.Sprintf(
-				"orphan impl is not allowed: current package owns neither %s nor %s",
-				interfacePkg,
-				targetPkg,
+				"orphan impl is not allowed: current package owns neither interface %s nor target type %s",
+				iface.String(),
+				target.String(),
 			),
 		)
 	}
