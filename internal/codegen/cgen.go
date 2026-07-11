@@ -284,9 +284,10 @@ type Generator struct {
 	scope     *scope
 	taskScope *scope
 
-	currentTask            *ast.TaskDecl
-	currentGenericTaskName string
-	currentResults         []CType
+	currentTask                 *ast.TaskDecl
+	currentGenericTaskName      string
+	currentResults              []CType
+	currentReturnStructOverride *CType
 
 	tempCounter int
 
@@ -415,6 +416,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitGenericTaskPrototypes()
 
 	g.emitImplVTables()
+	g.emitDynamicInterfaceDispatchers()
 	g.emitStaticInterfaceDispatchers()
 	g.emitTasks(file)
 	g.emitGenericTasks()
@@ -2980,6 +2982,10 @@ func (g *Generator) genericTaskReturnType(info *GenericTaskInstance) CType {
 }
 
 func (g *Generator) currentReturnStructType() CType {
+	if g.currentReturnStructOverride != nil {
+		return *g.currentReturnStructOverride
+	}
+
 	if g.currentGenericTaskName != "" {
 		name := g.genericTaskResultStructName(g.currentGenericTaskName)
 
@@ -3453,7 +3459,7 @@ func (g *Generator) emitDynInterfaceValueType(
 	g.linef("typedef struct %s {", instance.CName)
 	g.indent++
 	g.line("void *data;")
-	g.linef("%s_vtable *vtable;", instance.CName)
+	g.linef("const %s_vtable *vtable;", instance.CName)
 	g.indent--
 	g.linef("} %s;", instance.CName)
 	g.line("")
@@ -3683,7 +3689,10 @@ func (g *Generator) emitDynInterfaceDispatchCall(
 	args []ast.Expr,
 	preparedArgs []string,
 ) string {
-	instance, req, ok := g.lookupInterfaceRequirement(iface, taskName)
+	instance, req, ok := g.lookupInterfaceRequirement(
+		iface,
+		taskName,
+	)
 	if !ok {
 		g.error(
 			argsSpan(args),
@@ -3697,23 +3706,30 @@ func (g *Generator) emitDynInterfaceDispatchCall(
 	}
 
 	if len(args) == 0 {
-		g.error(argsSpan(args), "interface dispatch requires a receiver")
+		g.error(
+			argsSpan(args),
+			"interface dispatch requires a receiver",
+		)
 		return "0"
 	}
 
 	receiver := ""
+
 	if len(preparedArgs) > 0 {
 		receiver = preparedArgs[0]
 	} else {
 		receiver = g.emitExpr(args[0], &iface)
 	}
 
-	var outArgs []string
-	outArgs = append(outArgs, fmt.Sprintf("(%s).data", receiver))
+	outArgs := []string{receiver}
 
 	for i := 1; i < len(args); i++ {
-		if preparedArgs != nil && i < len(preparedArgs) {
-			outArgs = append(outArgs, preparedArgs[i])
+		if preparedArgs != nil &&
+			i < len(preparedArgs) {
+			outArgs = append(
+				outArgs,
+				preparedArgs[i],
+			)
 			continue
 		}
 
@@ -3735,9 +3751,11 @@ func (g *Generator) emitDynInterfaceDispatchCall(
 	}
 
 	return fmt.Sprintf(
-		"(%s).vtable->%s(%s)",
-		receiver,
-		sanitizeCName(taskName),
+		"%s(%s)",
+		dynamicInterfaceDispatcherName(
+			instance.CName,
+			taskName,
+		),
 		strings.Join(outArgs, ", "),
 	)
 }
@@ -3806,31 +3824,42 @@ func (g *Generator) emitStaticInterfaceDispatchCall(
 	)
 }
 
-func (g *Generator) implAliasTaskName(expr ast.Expr) (string, bool) {
+func (g *Generator) implAliasTaskInfo(
+	expr ast.Expr,
+) (string, TaskInfo, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		return g.cTaskName(e.Name.Name), true
+		info, ok := g.tasks[e.Name.Name]
+		if !ok {
+			return "", TaskInfo{}, false
+		}
+
+		return g.cTaskName(e.Name.Name), info, true
 
 	case *ast.SelectorExpr:
 		id, ok := e.Left.(*ast.IdentExpr)
 		if !ok {
-			return "", false
+			return "", TaskInfo{}, false
 		}
 
 		pkg := g.packages[id.Name.Name]
 		if pkg == nil {
-			return "", false
+			return "", TaskInfo{}, false
 		}
 
 		info, ok := pkg.Tasks[e.Name.Name]
 		if !ok {
-			return "", false
+			return "", TaskInfo{}, false
 		}
 
-		return cImportedTaskName(id.Name.Name, e.Name.Name, info), true
+		return cImportedTaskName(
+			id.Name.Name,
+			e.Name.Name,
+			info,
+		), info, true
 	}
 
-	return "", false
+	return "", TaskInfo{}, false
 }
 
 func interfaceWrapperName(iface string, concrete string, task string) string {
@@ -7713,7 +7742,7 @@ func (g *Generator) emitResolvedInterfaceVTable(
 	)
 
 	g.linef(
-		"static %s_vtable %s = {",
+		"static const %s_vtable %s = {",
 		info.Interface.CName,
 		vtableName,
 	)
@@ -7815,7 +7844,12 @@ func (g *Generator) emitResolvedInterfaceWrapper(
 	}
 
 	if entry.Task != nil {
-		g.emitInlineInterfaceWrapperBody(info, entry)
+		g.emitInlineInterfaceWrapperBody(
+			info,
+			req,
+			entry,
+			ret,
+		)
 		g.indent--
 		g.line("}")
 		g.line("")
@@ -7845,7 +7879,9 @@ func (g *Generator) emitAliasInterfaceWrapperBody(
 	entry ast.ImplEntry,
 	ret CType,
 ) {
-	targetName, ok := g.implAliasTaskName(entry.Alias)
+	targetName, targetInfo, ok := g.implAliasTaskInfo(
+		entry.Alias,
+	)
 	if !ok {
 		g.error(
 			entry.Alias.Span(),
@@ -7900,7 +7936,18 @@ func (g *Generator) emitAliasInterfaceWrapperBody(
 	//
 	// Copy the fields explicitly into the interface wrapper's result type.
 	if len(req.Results) > 1 {
-		targetResultType := targetName + "_Result"
+		targetResultType := targetInfo.ReturnType.Name
+
+		if targetResultType == "" {
+			g.error(
+				entry.Alias.Span(),
+				fmt.Sprintf(
+					"cannot determine result type for impl alias %q",
+					req.Name.Name,
+				),
+			)
+			targetResultType = targetName + "_Result"
+		}
 
 		g.linef(
 			"%s __seal_impl_result = %s(%s);",
@@ -7934,29 +7981,41 @@ func (g *Generator) emitAliasInterfaceWrapperBody(
 
 func (g *Generator) emitInlineInterfaceWrapperBody(
 	info *ResolvedImplInstance,
+	req *ast.TaskSignature,
 	entry ast.ImplEntry,
+	ret CType,
 ) {
 	oldTask := g.currentTask
 	oldScope := g.scope
 	oldTaskScope := g.taskScope
 	oldResults := g.currentResults
 	oldSubst := g.genericSubst
+	oldReturnStructOverride := g.currentReturnStructOverride
 
 	g.scope = newScope(oldScope)
 	g.taskScope = g.scope
-	g.currentResults = nil
 	g.genericSubst = info.Subst
-	g.currentTask = entry.Task
 
-	for _, result := range entry.Task.Results {
-		g.currentResults = append(
-			g.currentResults,
-			g.cTypeFromAstWithGenericArgs(
-				result,
-				info.Subst,
-			),
-		)
+	// Use the interface requirement's ABI result types. The checker has
+	// already verified that the inline implementation has the same Seal
+	// signature.
+	g.currentResults = g.interfaceRequirementResultTypes(
+		info.Interface,
+		req,
+	)
+
+	g.currentReturnStructOverride = nil
+
+	if len(g.currentResults) > 1 {
+		wrapperReturnType := ret
+		g.currentReturnStructOverride = &wrapperReturnType
 	}
+
+	// Prevent an interface requirement named Main from being treated as the
+	// generated C entry point.
+	wrapperTask := *entry.Task
+	wrapperTask.Name.Name = "__seal_interface_wrapper"
+	g.currentTask = &wrapperTask
 
 	if len(entry.Task.Params) > 0 {
 		first := entry.Task.Params[0]
@@ -8004,6 +8063,7 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 	g.currentResults = oldResults
 	g.genericSubst = oldSubst
 	g.currentTask = oldTask
+	g.currentReturnStructOverride = oldReturnStructOverride
 }
 
 func (g *Generator) emitDelegatedInterfaceWrapperBody(
@@ -8212,6 +8272,143 @@ func implUsingPathString(path []ast.Ident) string {
 	}
 
 	return strings.Join(parts, ".")
+}
+
+func dynamicInterfaceDispatcherName(iface string, req string) string {
+	return sanitizeCName(iface) +
+		"_" +
+		sanitizeCName(req)
+}
+
+func (g *Generator) emitDynamicInterfaceDispatchers() {
+	keys := make([]string, 0, len(g.interfaceInstances))
+
+	for key := range g.interfaceInstances {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		instance := g.interfaceInstances[key]
+		if instance == nil ||
+			instance.Decl == nil ||
+			!instance.IsDyn {
+			continue
+		}
+
+		for _, req := range instance.Decl.Requirements {
+			g.emitDynamicInterfaceDispatcher(
+				instance,
+				req,
+			)
+		}
+	}
+}
+
+func (g *Generator) emitDynamicInterfaceDispatcher(
+	instance *InterfaceInstance,
+	req *ast.TaskSignature,
+) {
+	if instance == nil || req == nil {
+		return
+	}
+
+	ret := g.interfaceRequirementReturnType(
+		instance,
+		req,
+	)
+
+	name := dynamicInterfaceDispatcherName(
+		instance.CName,
+		req.Name.Name,
+	)
+
+	receiverType := CType{
+		Name:           instance.CName,
+		SealName:       instance.Key,
+		IsInterface:    true,
+		IsDynInterface: true,
+	}
+
+	params := []string{
+		receiverType.Decl("receiver"),
+	}
+
+	for i := 1; i < len(req.Params); i++ {
+		paramType := g.interfaceRequirementParamType(
+			instance,
+			req,
+			i,
+		)
+
+		params = append(
+			params,
+			paramType.Decl(fmt.Sprintf("arg%d", i)),
+		)
+	}
+
+	g.linef(
+		"static %s %s(%s) {",
+		ret.Name,
+		name,
+		strings.Join(params, ", "),
+	)
+	g.indent++
+
+	fieldName := sanitizeCName(req.Name.Name)
+
+	g.linef(
+		"if (receiver.vtable == NULL || receiver.vtable->%s == NULL) {",
+		fieldName,
+	)
+	g.indent++
+
+	g.line(
+		`seal_panic_cstring("dynamic interface dispatch on nil or invalid vtable");`,
+	)
+
+	// seal_panic_cstring aborts, but the fallback keeps ordinary C compilers
+	// satisfied without relying on compiler-specific noreturn annotations.
+	if ret.SealName == "void" {
+		g.line("return;")
+	} else {
+		g.linef(
+			"return (%s){0};",
+			ret.Name,
+		)
+	}
+
+	g.indent--
+	g.line("}")
+
+	callArgs := []string{"receiver.data"}
+
+	for i := 1; i < len(req.Params); i++ {
+		callArgs = append(
+			callArgs,
+			fmt.Sprintf("arg%d", i),
+		)
+	}
+
+	if ret.SealName == "void" {
+		g.linef(
+			"receiver.vtable->%s(%s);",
+			fieldName,
+			strings.Join(callArgs, ", "),
+		)
+		g.line("return;")
+	} else {
+		g.linef(
+			"return receiver.vtable->%s(%s);",
+			fieldName,
+			strings.Join(callArgs, ", "),
+		)
+	}
+
+	g.indent--
+	g.line("}")
+	g.line("")
 }
 
 func (g *Generator) emitStaticInterfaceDispatchers() {

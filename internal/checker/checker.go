@@ -2719,10 +2719,24 @@ func (c *Checker) checkInterfaceDecl(
 	d *ast.InterfaceDecl,
 ) {
 	_ = scope
+	seenRequirements := map[string]source.Span{}
 
 	for _, req := range d.Requirements {
 		if req == nil {
 			continue
+		}
+
+		if previous, exists := seenRequirements[req.Name.Name]; exists {
+			c.diags.Add(
+				req.Name.Span(),
+				fmt.Sprintf(
+					"duplicate interface requirement %q, previous requirement at %s",
+					req.Name.Name,
+					previous.String(),
+				),
+			)
+		} else {
+			seenRequirements[req.Name.Name] = req.Name.Span()
 		}
 
 		if len(req.Params) == 0 {
@@ -2754,6 +2768,16 @@ func (c *Checker) checkInterfaceDecl(
 		}
 
 		for i, param := range req.Params {
+			if param.IsVariadic {
+				c.diags.Add(
+					param.Name.Span(),
+					fmt.Sprintf(
+						"interface requirement %q cannot be variadic yet",
+						req.Name.Name,
+					),
+				)
+			}
+
 			if param.HasDefault {
 				c.diags.Add(
 					param.Name.Span(),

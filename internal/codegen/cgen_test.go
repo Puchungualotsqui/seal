@@ -1650,11 +1650,12 @@ Main :: task() {
 		"typedef struct Enemy_int_vtable",
 		"typedef struct Enemy_int {",
 		"void *data;",
-		"Enemy_int_vtable *vtable;",
+		"const Enemy_int_vtable *vtable;",
 		"Enemy_int_Goblin_Health",
-		"Enemy_int_Goblin_vtable",
+		"static const Enemy_int_vtable Enemy_int_Goblin_vtable",
 		".vtable = &Enemy_int_Goblin_vtable",
-		"(e).vtable->Health((e).data)",
+		"Enemy_int_Health(e)",
+		"return receiver.vtable->Health(receiver.data);",
 	}
 
 	for _, want := range checks {
@@ -3832,13 +3833,15 @@ Main :: task() {
 
 	checks := []string{
 		"typedef struct Positioned_vtable",
+		"const Positioned_vtable *vtable;",
 		"Positioned_Transform_Position(void *data)",
 		"Positioned_Entity_Position(void *data)",
 		"return Positioned_Transform_Position(",
-		"static Positioned_vtable Positioned_Entity_vtable",
+		"static const Positioned_vtable Positioned_Entity_vtable",
 		".Position = Positioned_Entity_Position",
 		".vtable = &Positioned_Entity_vtable",
-		"(positioned).vtable->Position((positioned).data)",
+		"Positioned_Position(positioned)",
+		"return receiver.vtable->Position(receiver.data);",
 	}
 
 	for _, want := range checks {
@@ -4095,10 +4098,11 @@ Main :: task() {
 	checks := []string{
 		"typedef struct Positioned_vtable Positioned_vtable;",
 		"struct Positioned_vtable {",
-		"Positioned_vtable *vtable;",
-		"static Positioned_vtable Positioned_Transform_vtable",
+		"const Positioned_vtable *vtable;",
+		"static const Positioned_vtable Positioned_Transform_vtable",
 		".vtable = &Positioned_Transform_vtable",
-		"(positioned).vtable->X((positioned).data)",
+		"Positioned_X(positioned)",
+		"return receiver.vtable->X(receiver.data);",
 	}
 
 	for _, want := range checks {
@@ -4161,9 +4165,11 @@ Main :: task() {
 
 		"typedef struct DynamicPositioned_vtable DynamicPositioned_vtable;",
 		"struct DynamicPositioned_vtable {",
-		"DynamicPositioned_vtable *vtable;",
+		"const DynamicPositioned_vtable *vtable;",
+		"static const DynamicPositioned_vtable DynamicPositioned_Transform_vtable",
 		".vtable = &DynamicPositioned_Transform_vtable",
-		"(dynamicPositioned).vtable->X((dynamicPositioned).data)",
+		"DynamicPositioned_X(dynamicPositioned)",
+		"return receiver.vtable->X(receiver.data);",
 	}
 
 	for _, want := range checks {
