@@ -164,6 +164,30 @@ type ResolvedImpl struct {
 	Delegated *ResolvedImpl
 }
 
+type ImplResolutionKind int
+
+const (
+	ImplResolutionNotFound ImplResolutionKind = iota
+	ImplResolutionFound
+	ImplResolutionAmbiguous
+)
+
+type ImplResolution struct {
+	Kind ImplResolutionKind
+
+	Resolved *ResolvedImpl
+	Matches  []*ResolvedImpl
+}
+
+func (r ImplResolution) Found() bool {
+	return r.Kind == ImplResolutionFound &&
+		r.Resolved != nil
+}
+
+func (r ImplResolution) Ambiguous() bool {
+	return r.Kind == ImplResolutionAmbiguous
+}
+
 type Type struct {
 	Kind TypeKind
 	Name string
@@ -2117,14 +2141,22 @@ func (c *Checker) checkDelegatedImplInfo(info *ImplInfo) bool {
 		delegatedTarget = delegatedTarget.Elem
 	}
 
-	resolved, ok := c.resolveImplAt(
+	resolution := c.resolveImplAt(
 		info.Interface,
 		delegatedTarget,
 		info.Span,
 		info,
 		true,
 	)
-	if !ok {
+
+	switch resolution.Kind {
+	case ImplResolutionAmbiguous:
+		// resolveImplAt already emitted the correct ambiguity diagnostic.
+		// Do not also claim that the selected type does not implement the
+		// interface.
+		return false
+
+	case ImplResolutionNotFound:
 		c.diags.Add(
 			info.Span,
 			fmt.Sprintf(
@@ -2136,10 +2168,14 @@ func (c *Checker) checkDelegatedImplInfo(info *ImplInfo) bool {
 			),
 		)
 		return false
-	}
 
-	info.DelegatesTo = resolved.Info
-	return true
+	case ImplResolutionFound:
+		info.DelegatesTo = resolution.Resolved.Info
+		return true
+
+	default:
+		return false
+	}
 }
 
 func (c *Checker) resolveUsingPathType(
@@ -2382,55 +2418,6 @@ func (c *Checker) matchImplGenericArgument(
 	return pattern.Key == actual.Key
 }
 
-func (c *Checker) countMatchingImpls(
-	iface *Type,
-	target *Type,
-	exclude *ImplInfo,
-) int {
-	count := 0
-
-	for _, info := range c.impls {
-		if info == nil || info == exclude {
-			continue
-		}
-
-		match := ImplMatch{
-			Types:  map[string]*Type{},
-			Values: map[string]GenericArgumentInfo{},
-		}
-
-		kinds := genericParamKinds(info.GenericParams)
-
-		// Match first. An unrelated delegated implementation must not be
-		// recursively checked while resolving this interface/target pair.
-		if !c.matchImplType(
-			info.Interface,
-			iface,
-			kinds,
-			&match,
-		) {
-			continue
-		}
-
-		if !c.matchImplType(
-			info.Target,
-			target,
-			kinds,
-			&match,
-		) {
-			continue
-		}
-
-		if !c.ensureImplChecked(info) {
-			continue
-		}
-
-		count++
-	}
-
-	return count
-}
-
 func (c *Checker) implPatternMatches(
 	info *ImplInfo,
 	iface *Type,
@@ -2470,7 +2457,7 @@ func (c *Checker) resolveImplAt(
 	span source.Span,
 	exclude *ImplInfo,
 	diagnose bool,
-) (*ResolvedImpl, bool) {
+) ImplResolution {
 	var matches []*ResolvedImpl
 
 	for _, info := range c.impls {
@@ -2485,11 +2472,9 @@ func (c *Checker) resolveImplAt(
 
 		kinds := genericParamKinds(info.GenericParams)
 
-		// Matching must happen before ensureImplChecked. Otherwise resolving
-		// one delegated implementation eagerly checks every other delegated
-		// implementation and reports false cycles for valid chains such as:
-		//
-		//     Entity -> Component -> Transform
+		// Match before checking the implementation. This prevents unrelated
+		// delegated implementations from being recursively checked and
+		// incorrectly diagnosed as cycles.
 		if !c.matchImplType(
 			info.Interface,
 			iface,
@@ -2509,8 +2494,9 @@ func (c *Checker) resolveImplAt(
 		}
 
 		if info.Checking {
-			// This implementation genuinely matches the requested pair, so
-			// encountering it while active represents a real delegation cycle.
+			// Because this implementation matches the requested pair,
+			// encountering it while it is active is a genuine delegation
+			// cycle.
 			c.ensureImplChecked(info)
 			continue
 		}
@@ -2527,11 +2513,20 @@ func (c *Checker) resolveImplAt(
 		})
 	}
 
-	if len(matches) == 0 {
-		return nil, false
-	}
+	switch len(matches) {
+	case 0:
+		return ImplResolution{
+			Kind: ImplResolutionNotFound,
+		}
 
-	if len(matches) > 1 {
+	case 1:
+		return ImplResolution{
+			Kind:     ImplResolutionFound,
+			Resolved: matches[0],
+			Matches:  matches,
+		}
+
+	default:
 		if diagnose {
 			c.diags.Add(
 				span,
@@ -2543,10 +2538,11 @@ func (c *Checker) resolveImplAt(
 			)
 		}
 
-		return nil, false
+		return ImplResolution{
+			Kind:    ImplResolutionAmbiguous,
+			Matches: matches,
+		}
 	}
-
-	return matches[0], true
 }
 
 func implGenericParamKindsForCGen(
@@ -2681,14 +2677,15 @@ func (c *Checker) typeImplementsInterface(
 		return false
 	}
 
-	_, ok := c.resolveImplAt(
+	resolution := c.resolveImplAt(
 		ifaceType,
 		concreteType,
 		source.Span{},
 		nil,
 		false,
 	)
-	return ok
+
+	return resolution.Found()
 }
 
 func (c *Checker) formatTaskSignature(name string, params []*Type, results []*Type) string {
@@ -5193,7 +5190,7 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 
 		concreteType := sourceType.Elem
 
-		resolved, ok := c.resolveImplAt(
+		resolution := c.resolveImplAt(
 			targetType,
 			concreteType,
 			args[0].Span(),
@@ -5201,27 +5198,24 @@ func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, 
 			true,
 		)
 
-		if !ok {
-			matchCount := c.countMatchingImpls(
-				targetType,
-				concreteType,
-				nil,
+		switch resolution.Kind {
+		case ImplResolutionAmbiguous:
+			// resolveImplAt already emitted the ambiguity diagnostic.
+
+		case ImplResolutionNotFound:
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"cannot cast %s to %s: no matching implementation",
+					sourceType.String(),
+					targetType.String(),
+				),
 			)
 
-			// resolveImplAt already emitted the ambiguity diagnostic.
-			if matchCount <= 1 {
-				c.diags.Add(
-					args[0].Span(),
-					fmt.Sprintf(
-						"cannot cast %s to %s: no matching implementation",
-						sourceType.String(),
-						targetType.String(),
-					),
-				)
-			}
+		case ImplResolutionFound:
+			// Cast is valid.
 		}
 
-		_ = resolved
 		return targetType
 
 	default:
@@ -6815,8 +6809,31 @@ func (c *Checker) checkGenericArgConstraintsAgainstParam(scope *Scope, arg ast.G
 				continue
 			}
 
-			if !c.typeImplementsInterface(actual, iface) {
-				c.diags.Add(arg.Span(), fmt.Sprintf("generic argument %s for %q must implement %s", actual.String(), param.Name.Name, iface.String()))
+			resolution := c.resolveImplAt(
+				iface,
+				actual,
+				arg.Span(),
+				nil,
+				true,
+			)
+
+			switch resolution.Kind {
+			case ImplResolutionAmbiguous:
+				// The ambiguity diagnostic has already been emitted.
+
+			case ImplResolutionNotFound:
+				c.diags.Add(
+					arg.Span(),
+					fmt.Sprintf(
+						"generic argument %s for %q must implement %s",
+						actual.String(),
+						param.Name.Name,
+						iface.String(),
+					),
+				)
+
+			case ImplResolutionFound:
+				// Constraint satisfied.
 			}
 
 		case *ast.GenericEnumVariantConstraint:

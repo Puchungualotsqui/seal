@@ -5645,3 +5645,179 @@ BadConversion :: task(value Positioned) Readable {
 		)
 	}
 }
+
+func TestCheckInterfaceCastRejectsDuplicateConcreteImpls(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+ReadFirst :: task(self *Box) int {
+	return self.value
+}
+
+ReadSecond :: task(self *Box) int {
+	return self.value + 1
+}
+
+Readable :: impl Box {
+	Read :: ReadFirst
+}
+
+Readable :: impl Box {
+	Read :: ReadSecond
+}
+
+Main :: task() {
+	box := Box{value = 10}
+	readable := cast<Readable>(&box)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`ambiguous implementation of Readable for Box`,
+	)
+}
+
+func TestCheckInterfaceCastRejectsAmbiguousGenericImpls(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface <T type> {
+	Read :: task(self *self) T
+}
+
+Box :: struct <T type> {
+	value T
+}
+
+Readable<T> :: impl <T type> Box<T> {
+	Read :: task(self *Box<T>) T {
+		return self.value
+	}
+}
+
+Readable<U> :: impl <U type> Box<U> {
+	Read :: task(self *Box<U>) U {
+		return self.value
+	}
+}
+
+Main :: task() {
+	box := Box<int>{value = 10}
+	readable := cast<Readable<int>>(&box)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`ambiguous implementation of Readable<int> for Box<int>`,
+	)
+}
+
+func TestCheckDelegatedImplRejectsAmbiguousSelectedImplementation(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+ReadPositionOne :: task(self *Transform) int {
+	return self.position
+}
+
+ReadPositionTwo :: task(self *Transform) int {
+	return self.position + 1
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPositionOne
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPositionTwo
+}
+
+Entity :: struct {
+	transform Transform
+}
+
+Positioned :: impl Entity using transform
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`ambiguous implementation of Positioned for Transform`,
+	)
+
+	if strings.Contains(
+		reporter.String(),
+		`selected type Transform does not implement the interface`,
+	) {
+		t.Fatalf(
+			"ambiguity must not also be reported as a missing implementation:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckGenericImplConstraintRejectsAmbiguousImplementation(t *testing.T) {
+	reporter := checkSource(t, `
+Readable :: interface {
+	Read :: task(self *self) int
+}
+
+Box :: struct {
+	value int
+}
+
+ReadFirst :: task(self *Box) int {
+	return self.value
+}
+
+ReadSecond :: task(self *Box) int {
+	return self.value + 1
+}
+
+Readable :: impl Box {
+	Read :: ReadFirst
+}
+
+Readable :: impl Box {
+	Read :: ReadSecond
+}
+
+UseReadable :: task <T type[Readable()]>(value T) {
+}
+
+Main :: task() {
+	box := Box{value = 10}
+	UseReadable<Box>(box)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`ambiguous implementation of Readable for Box`,
+	)
+
+	if strings.Contains(
+		reporter.String(),
+		`generic argument Box for "T" must implement Readable`,
+	) {
+		t.Fatalf(
+			"ambiguity must not also be reported as a missing implementation:\n%s",
+			reporter.String(),
+		)
+	}
+}
