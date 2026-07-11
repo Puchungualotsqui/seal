@@ -2,24 +2,60 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-Malloc :: extern("malloc") task(size uint) rawptr
-CFree  :: extern("free") task(ptr rawptr)
+_Malloc :: extern("malloc") task(size uint) rawptr
+
+_Calloc :: extern("calloc") task(
+    count uint,
+    size uint,
+) rawptr
+
+_Free :: extern("free") task(ptr rawptr)
 
 Allocator :: interface {
-    Alloc :: task(a *$T, size uint) rawptr
-    Free  :: task(a *$T, ptr rawptr)
+    Alloc :: task(self *self, size uint) rawptr
 }
 
-CAllocator :: struct {}
-
-Alloc :: task(a *CAllocator, size uint) rawptr {
-    return Malloc(size)
+Deallocator :: interface {
+    Free :: task(self *self, ptr rawptr)
 }
 
-Free :: task(a *CAllocator, ptr rawptr) {
-    CFree(ptr)
+CAllocator :: struct {
 }
 
-CAllocator :: impl {
-    Allocator,
+Allocator :: impl CAllocator {
+    Alloc :: task(
+        self *CAllocator,
+        size uint,
+    ) rawptr {
+        return _Malloc(size)
+    }
+}
+
+Deallocator :: impl CAllocator {
+    Free :: task(
+        self *CAllocator,
+        ptr rawptr,
+    ) {
+        _Free(ptr)
+    }
+}
+
+AllocTypeWith :: task <T type>(
+    allocator Allocator,
+) *T {
+    return cast<*T>(
+        Alloc(allocator, size(T)),
+    )
+}
+
+AllocTypeC :: task <T type>() *T {
+    return cast<*T>(
+        _Malloc(size(T)),
+    )
+}
+
+NewC :: task <T type>() *T {
+    return cast<*T>(
+        _Calloc(1, size(T)),
+    )
 }

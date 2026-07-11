@@ -2,4 +2,4 @@ name = "app"
 version = "0.1.1"
 kind = "executable"
 
-dependencies = ["fmt"]
+dependencies = ["fmt", "mem"]

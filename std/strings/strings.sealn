@@ -1,0 +1,15 @@
+Main :: task() {
+    allocatorValue := mem.CAllocator{}
+
+    allocator := cast<mem.Allocator>(&allocatorValue)
+    deallocator := cast<mem.Deallocator>(&allocatorValue)
+
+    value := mem.New<int>(allocator)
+
+    defer mem.Free(
+        deallocator,
+        cast<rawptr>(value),
+    )
+
+    value[0] = 10
+}

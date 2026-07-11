@@ -1,28 +1,16 @@
+Point :: struct {
+    X int
+    Y int
+}
+
 Main :: task() {
-    a: i8 = 1
-    b: i16 = 2
-    c: i32 = 3
-    d: i64 = 4
+    point := mem.NewC<Point>()
+    point.X = 10
+    point.Y = 20
 
-    e: u8 = 1
-    f: u16 = 2
-    g: u32 = 3
-    h: u64 = 4
+    if point == nil {
+        panic(c"allocation failed")
+    }
 
-    i: int = 5
-    j: uint = 6
-
-    x: f32 = 1.5
-    y: f64 = 2.5
-
-    flag: bool = true
-    ch: char = 'A'
-    s: string = "hello"
-    cs: cstring = c"world"
-
-    p: rawptr = nil
-    v: any = i
-
-    assert(flag)
-    assert(anyIs<int>(v))
+    point.X = 30
 }
