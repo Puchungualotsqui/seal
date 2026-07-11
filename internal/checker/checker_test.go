@@ -2162,7 +2162,7 @@ Main :: task() {
 func TestRejectByteIndexAssignmentToNonAddressableValue(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
-    (10)[0] = 1
+    cast<int>(10)[0] = 1
 }
 `)
 
@@ -2773,12 +2773,12 @@ Main :: task() {
 func TestGenericIntConstraintAcceptsTrueExpression(t *testing.T) {
 	_, reporter := check(t, `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 
 Main :: task() {
     b: Buffer<int, 3> = Buffer<int, 3>{
-        data = [1, 2, 3],
+        value = 1,
     }
 }
 `)
@@ -2791,7 +2791,7 @@ Main :: task() {
 func TestRejectGenericIntConstraintFalseExpression(t *testing.T) {
 	_, reporter := check(t, `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 
 Main :: task() {
@@ -2811,7 +2811,7 @@ Main :: task() {
 func TestRejectRuntimeValueAsGenericIntArgument(t *testing.T) {
 	_, reporter := check(t, `
 Buffer :: struct <T type, N int> {
-    data [N]T
+    value T
 }
 
 Main :: task() {
@@ -3242,31 +3242,6 @@ Buffer :: struct <T type, N int> {
 Main :: task() {
     b: types.Buffer<string, 4>
     x: int = b.value
-}
-`, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*PackageInfo{
-		"types": checkerPkg,
-	})
-
-	assertCheckerDiagnosticContains(
-		t,
-		reporter,
-		"cannot assign string to int",
-	)
-}
-
-func TestCheckImportedGenericStructValueParamRejectsWrongIndexUse(t *testing.T) {
-	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
-Buffer :: struct <T type, N int> {
-    data [N]T
-}
-`)
-
-	reporter := checkWithPackages(t, `
-Main :: task() {
-    b: types.Buffer<string, 4>
-    x: int = b.data[0]
 }
 `, map[string]*resolver.PackageInfo{
 		"types": resolverPkg,

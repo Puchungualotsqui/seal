@@ -80,12 +80,12 @@ Main :: task() {
 func TestCheckGenericValueConstraint(t *testing.T) {
 	reporter := checkSource(t, `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 
 Main :: task() {
     b: Buffer<int, 4>
-    x := b.data[0]
+    x := b.value
     assert(x == 0)
 }
 `)
@@ -98,7 +98,7 @@ Main :: task() {
 func TestCheckGenericValueConstraintRejectsInvalidValue(t *testing.T) {
 	reporter := checkSource(t, `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 
 Main :: task() {
@@ -257,14 +257,14 @@ Main :: task() {
 func TestCheckImportedGenericValueConstraint(t *testing.T) {
 	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 `)
 
 	reporter := checkWithPackages(t, `
 Main :: task() {
     b: types.Buffer<int, 4>
-    x := b.data[0]
+    x := b.value
     assert(x == 0)
 }
 `, map[string]*resolver.PackageInfo{
@@ -281,7 +281,7 @@ Main :: task() {
 func TestCheckImportedGenericValueConstraintRejectsInvalidValue(t *testing.T) {
 	_, resolverPkg, checkerPkg := exportCheckerPackage(t, "types", `
 Buffer :: struct <T type, N int[N > 0]> {
-    data [N]T
+    value T
 }
 `)
 

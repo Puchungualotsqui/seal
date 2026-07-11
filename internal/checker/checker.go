@@ -5980,10 +5980,25 @@ func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr
 	taskDecl, _ := sym.Node.(*ast.TaskDecl)
 
 	var instantiated *Type
-	if taskDecl != nil {
-		instantiated = c.taskTypeFromGenericCall(scope, taskDecl, gen.Args)
-	} else if pkgName, ok := c.packageNameFromGenericExprBase(scope, gen.Base); ok {
-		instantiated = c.taskTypeFromImportedGenericSignature(scope, pkgName, sym.Type, gen.Args, gen.Span())
+
+	if pkgName, ok := c.packageNameFromGenericExprBase(
+		scope,
+		gen.Base,
+	); ok {
+		instantiated = c.taskTypeFromImportedGenericSignature(
+			scope,
+			pkgName,
+			sym.Type,
+			gen.Args,
+			gen.Span(),
+		)
+	} else if taskDecl != nil {
+		instantiated = c.taskTypeFromGenericCall(
+			scope,
+			taskDecl,
+			gen.Args,
+		)
+
 	} else {
 		instantiated = c.taskTypeFromGenericSignature(scope, sym.Type, gen.Args, gen.Span())
 	}
@@ -8475,13 +8490,26 @@ func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 
 		c.checkGenericArgsAgainstParams(scope, e.Args, sym.Type.GenericParams, e.Span())
 
-		taskDecl, _ := sym.Node.(*ast.TaskDecl)
-		if taskDecl != nil {
-			return c.taskTypeFromGenericCall(scope, taskDecl, e.Args)
+		if pkgName, ok := c.packageNameFromGenericExprBase(
+			scope,
+			e.Base,
+		); ok {
+			return c.taskTypeFromImportedGenericSignature(
+				scope,
+				pkgName,
+				sym.Type,
+				e.Args,
+				e.Span(),
+			)
 		}
 
-		if pkgName, ok := c.packageNameFromGenericExprBase(scope, e.Base); ok {
-			return c.taskTypeFromImportedGenericSignature(scope, pkgName, sym.Type, e.Args, e.Span())
+		taskDecl, _ := sym.Node.(*ast.TaskDecl)
+		if taskDecl != nil {
+			return c.taskTypeFromGenericCall(
+				scope,
+				taskDecl,
+				e.Args,
+			)
 		}
 
 		return c.taskTypeFromGenericSignature(scope, sym.Type, e.Args, e.Span())
