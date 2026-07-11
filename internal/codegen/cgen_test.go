@@ -985,15 +985,15 @@ Goblin :: struct {
 }
 
 Enemy<int> :: impl Goblin {
-    
+
     Health :: GoblinHealth
 
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    
-	
+
+
     e := cast<Enemy<int>>(&g)
 
 
@@ -1573,15 +1573,15 @@ Goblin :: struct {
 }
 
 Enemy<int> :: impl Goblin {
-    
+
     Health :: GoblinHealth
 
 }
 
 Main :: task() {
     g := Goblin{hp = 10}
-    
-	
+
+
     e := cast<Enemy<int>>(&g)
 
 
@@ -3616,5 +3616,396 @@ func TestNormalizeGenericTaskArgKeepsExpressionForRequestKey(t *testing.T) {
 
 	if normalized[0].Kind != ast.GenericArgExpr {
 		t.Fatalf("expected task generic argument to remain expression, got kind %v", normalized[0].Kind)
+	}
+}
+
+func TestGenerateDelegationForwardsRequirementArguments(t *testing.T) {
+	out, reporter := generate(t, `
+Offsettable :: interface {
+    Offset :: task(value *self, amount int) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadOffset :: task(transform *Transform, amount int) int {
+    return transform.x + amount
+}
+
+Offsettable :: impl Transform {
+    Offset :: ReadOffset
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Offsettable :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 40},
+    }
+
+    offsettable := cast<Offsettable>(&entity)
+    result := Offset(offsettable, 2)
+
+    assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Offsettable_Transform_Offset(void *data, intptr_t arg1)",
+		"Offsettable_Entity_Offset(void *data, intptr_t arg1)",
+		"return Offsettable_Transform_Offset(",
+		", arg1);",
+		"Offsettable_Offset(offsettable, 2)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateDelegatedVoidRequirement(t *testing.T) {
+	out, reporter := generate(t, `
+Movable :: interface {
+    Move :: task(value *self, amount int)
+}
+
+Transform :: struct {
+    x int
+}
+
+MoveTransform :: task(transform *Transform, amount int) {
+    transform.x += amount
+}
+
+Movable :: impl Transform {
+    Move :: MoveTransform
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Movable :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 10},
+    }
+
+    movable := cast<Movable>(&entity)
+    Move(movable, 5)
+
+    assert(entity.transform.x == 15)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"static void Movable_Transform_Move(void *data, intptr_t arg1)",
+		"static void Movable_Entity_Move(void *data, intptr_t arg1)",
+		"Movable_Transform_Move(",
+		", arg1);",
+		"return;",
+		"Movable_Move(movable, 5)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateDynamicInterfaceDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: dyn interface {
+    Position :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+    return transform.x
+}
+
+Positioned :: impl Transform {
+    Position :: ReadPosition
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Positioned :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 73},
+    }
+
+    positioned := cast<Positioned>(&entity)
+    result := Position(positioned)
+
+    assert(result == 73)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Positioned_vtable",
+		"Positioned_Transform_Position(void *data)",
+		"Positioned_Entity_Position(void *data)",
+		"return Positioned_Transform_Position(",
+		"static Positioned_vtable Positioned_Entity_vtable",
+		".Position = Positioned_Entity_Position",
+		".vtable = &Positioned_Entity_vtable",
+		"(positioned).vtable->Position((positioned).data)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateGenericInterfaceDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Readable :: interface <T type> {
+    Read :: task(value *self) T
+}
+
+Box :: struct <T type> {
+    value T
+}
+
+Readable<T> :: impl <T type> Box<T> {
+    Read :: task(box *Box<T>) T {
+        return box.value
+    }
+}
+
+Holder :: struct <T type> {
+    box Box<T>
+}
+
+Readable<int> :: impl Holder<int> using box
+
+Main :: task() {
+    holder := Holder<int>{
+        box = Box<int>{value = 42},
+    }
+
+    readable := cast<Readable<int>>(&holder)
+    result := Read(readable)
+
+    assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Box_int {",
+		"intptr_t value;",
+		"} Box_int;",
+		"typedef struct Holder_int {",
+		"Box_int box;",
+		"} Holder_int;",
+		"typedef struct Readable_int {",
+		"Readable_int_Box_int_Read(void *data)",
+		"Readable_int_Holder_int_Read(void *data)",
+		"return Readable_int_Box_int_Read(",
+		"->box",
+		".tag = Readable_int_Tag_Holder_int",
+		"Readable_int_Read(readable)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateDelegationWithMultipleRequirements(t *testing.T) {
+	out, reporter := generate(t, `
+Spatial :: interface {
+    X :: task(value *self) int
+    SetX :: task(value *self, x int)
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadX :: task(transform *Transform) int {
+    return transform.x
+}
+
+WriteX :: task(transform *Transform, x int) {
+    transform.x = x
+}
+
+Spatial :: impl Transform {
+    X :: ReadX
+    SetX :: WriteX
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Spatial :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 10},
+    }
+
+    spatial := cast<Spatial>(&entity)
+
+    SetX(spatial, 42)
+    result := X(spatial)
+
+    assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Spatial_Transform_X(void *data)",
+		"Spatial_Transform_SetX(void *data, intptr_t arg1)",
+		"Spatial_Entity_X(void *data)",
+		"Spatial_Entity_SetX(void *data, intptr_t arg1)",
+		"return Spatial_Transform_X(",
+		"Spatial_Transform_SetX(",
+		", arg1);",
+		"Spatial_SetX(spatial, 42)",
+		"Spatial_X(spatial)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateDelegatedMultipleReturnRequirement(t *testing.T) {
+	out, reporter := generate(t, `
+Coordinates :: interface {
+    Read :: task(value *self) int, int
+}
+
+Transform :: struct {
+    x int
+    y int
+}
+
+ReadTransform :: task(transform *Transform) int, int {
+    return transform.x, transform.y
+}
+
+Coordinates :: impl Transform {
+    Read :: ReadTransform
+}
+
+Entity :: struct {
+    transform Transform
+}
+
+Coordinates :: impl Entity using transform
+
+Main :: task() {
+    entity := Entity{
+        transform = Transform{x = 20, y = 22},
+    }
+
+    coordinates := cast<Coordinates>(&entity)
+    x, y := Read(coordinates)
+
+    assert(x + y == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Coordinates_Read_Result {",
+		"intptr_t _0;",
+		"intptr_t _1;",
+		"Coordinates_Read_Result Coordinates_Transform_Read(void *data)",
+		"Coordinates_Read_Result Coordinates_Entity_Read(void *data)",
+		"Coordinates_Read_Result __seal_",
+		"._0 = ",
+		"._1 = ",
+		"Coordinates_Read(coordinates)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(
+		out,
+		"return ReadTransform((Transform *)data);",
+	) {
+		t.Fatalf(
+			"multiple-return alias wrapper cannot directly return a differently named C result struct:\n%s",
+			out,
+		)
 	}
 }

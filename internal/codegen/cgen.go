@@ -976,6 +976,16 @@ func (g *Generator) collectGenericStructInstancesFromDecl(decl ast.Decl) {
 		}
 
 	case *ast.ImplDecl:
+		// Generic implementations are templates. Their interface, target, and
+		// inline entry bodies can contain unresolved parameters such as T.
+		//
+		// Do not register template-shaped instances such as Box<T>. Concrete
+		// instances are discovered from actual uses such as Box<int>,
+		// Holder<int>, or cast<Readable<int>>.
+		if len(d.GenericParams) > 0 {
+			return
+		}
+
 		g.collectGenericStructInstancesFromType(d.Interface)
 		g.collectGenericStructInstancesFromType(d.Target)
 
@@ -1386,8 +1396,18 @@ func (g *Generator) emitGenericStructDepsForType(typ ast.Type, subst map[string]
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		if len(t.Parts) == 1 {
-			if arg, ok := subst[t.Parts[0].Name]; ok {
-				g.emitGenericStructDepsForGenericArg(arg, subst, visiting)
+			name := t.Parts[0].Name
+
+			if arg, ok := subst[name]; ok {
+				if genericArgIsSingleNameForCGen(arg, name) {
+					return
+				}
+
+				g.emitGenericStructDepsForGenericArg(
+					arg,
+					subst,
+					visiting,
+				)
 			}
 		}
 
@@ -2253,8 +2273,18 @@ func (g *Generator) emitImportedGenericStructDepsForType(typ ast.Type, subst map
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		if len(t.Parts) == 1 {
-			if arg, ok := subst[t.Parts[0].Name]; ok {
-				g.emitImportedGenericStructDepsForGenericArg(arg, subst, visiting)
+			name := t.Parts[0].Name
+
+			if arg, ok := subst[name]; ok {
+				if genericArgIsSingleNameForCGen(arg, name) {
+					return
+				}
+
+				g.emitImportedGenericStructDepsForGenericArg(
+					arg,
+					subst,
+					visiting,
+				)
 			}
 		}
 
@@ -3136,6 +3166,12 @@ func (g *Generator) collectInterfaceInstancesFromDecl(decl ast.Decl) {
 		}
 
 	case *ast.ImplDecl:
+		// Generic impl declarations are templates. Concrete interface
+		// instances are collected from actual type uses and casts.
+		if len(d.GenericParams) > 0 {
+			return
+		}
+
 		g.collectInterfaceInstancesFromType(d.Interface)
 		g.collectInterfaceInstancesFromType(d.Target)
 
@@ -7603,18 +7639,24 @@ func (g *Generator) emitAliasInterfaceWrapperBody(
 			),
 		)
 
-		if ret.SealName != "void" {
+		if ret.SealName == "void" {
+			g.line("return;")
+		} else if len(req.Results) > 1 {
+			g.linef(
+				"%s __seal_result = {0};",
+				ret.Name,
+			)
+			g.line("return __seal_result;")
+		} else {
 			g.line("return 0;")
 		}
 
 		return
 	}
 
-	var callArgs []string
-	callArgs = append(
-		callArgs,
+	callArgs := []string{
 		fmt.Sprintf("(%s *)data", info.Target.Name),
-	)
+	}
 
 	for i := 1; i < len(req.Params); i++ {
 		callArgs = append(
@@ -7623,20 +7665,54 @@ func (g *Generator) emitAliasInterfaceWrapperBody(
 		)
 	}
 
+	args := strings.Join(callArgs, ", ")
+
 	if ret.SealName == "void" {
 		g.linef(
 			"%s(%s);",
 			targetName,
-			strings.Join(callArgs, ", "),
+			args,
 		)
 		g.line("return;")
+		return
+	}
+
+	// A task with multiple return values has its own generated C result
+	// struct. Even when the fields are structurally identical, C does not
+	// allow returning that struct as the differently named result struct
+	// used by the interface requirement.
+	//
+	// Copy the fields explicitly into the interface wrapper's result type.
+	if len(req.Results) > 1 {
+		targetResultType := targetName + "_Result"
+
+		g.linef(
+			"%s __seal_impl_result = %s(%s);",
+			targetResultType,
+			targetName,
+			args,
+		)
+		g.linef(
+			"%s __seal_wrapper_result = {0};",
+			ret.Name,
+		)
+
+		for i := range req.Results {
+			g.linef(
+				"__seal_wrapper_result._%d = __seal_impl_result._%d;",
+				i,
+				i,
+			)
+		}
+
+		g.line("return __seal_wrapper_result;")
 		return
 	}
 
 	g.linef(
 		"return %s(%s);",
 		targetName,
-		strings.Join(callArgs, ", "),
+		args,
 	)
 }
 
