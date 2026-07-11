@@ -4122,3 +4122,82 @@ Main :: task() {
 		}
 	}
 }
+
+func TestGenerateChainedInterfaceDelegation(t *testing.T) {
+	t.Skip("chained delegated implementation code generation is not supported yet")
+
+	out, reporter := generate(t, `
+Positioned :: interface {
+	Position :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadPosition :: task(transform *Transform) int {
+	return transform.x
+}
+
+Positioned :: impl Transform {
+	Position :: ReadPosition
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Positioned :: impl Components using transform
+
+Entity :: struct {
+	components Components
+}
+
+Positioned :: impl Entity using components
+
+Main :: task() {
+	entity := Entity{
+		components = Components{
+			transform = Transform{x = 42},
+		},
+	}
+
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+
+	assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics for chained delegated implementation:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"Positioned_Transform_Position(void *data)",
+		"Positioned_Components_Position(void *data)",
+		"Positioned_Entity_Position(void *data)",
+
+		"return Positioned_Transform_Position(",
+		"->transform",
+
+		"return Positioned_Components_Position(",
+		"->components",
+
+		".tag = Positioned_Tag_Entity",
+		"Positioned_Position(positioned)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}

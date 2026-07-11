@@ -4796,3 +4796,57 @@ io.Reader<int> :: impl boxes.Box<int> {
 		`orphan impl is not allowed`,
 	)
 }
+
+func TestCheckChainedDelegatedImpl(t *testing.T) {
+	t.Skip("chained delegated implementations are not supported yet")
+
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Position :: task(self *self) int
+}
+
+Transform :: struct {
+	position int
+}
+
+Positioned :: impl Transform {
+	Position :: task(self *Transform) int {
+		return self.position
+	}
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Positioned :: impl Components using transform
+
+Entity :: struct {
+	components Components
+}
+
+Positioned :: impl Entity using components
+
+Main :: task() {
+	entity := Entity{
+		components = Components{
+			transform = Transform{
+				position = 42,
+			},
+		},
+	}
+
+	positioned := cast<Positioned>(&entity)
+	position := Position(positioned)
+
+	assert(position == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics for chained delegated implementation:\n%s",
+			reporter.String(),
+		)
+	}
+}

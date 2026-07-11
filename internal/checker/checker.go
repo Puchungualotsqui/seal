@@ -2394,10 +2394,6 @@ func (c *Checker) countMatchingImpls(
 			continue
 		}
 
-		if !c.ensureImplChecked(info) {
-			continue
-		}
-
 		match := ImplMatch{
 			Types:  map[string]*Type{},
 			Values: map[string]GenericArgumentInfo{},
@@ -2405,6 +2401,8 @@ func (c *Checker) countMatchingImpls(
 
 		kinds := genericParamKinds(info.GenericParams)
 
+		// Match first. An unrelated delegated implementation must not be
+		// recursively checked while resolving this interface/target pair.
 		if !c.matchImplType(
 			info.Interface,
 			iface,
@@ -2420,6 +2418,10 @@ func (c *Checker) countMatchingImpls(
 			kinds,
 			&match,
 		) {
+			continue
+		}
+
+		if !c.ensureImplChecked(info) {
 			continue
 		}
 
@@ -2476,34 +2478,6 @@ func (c *Checker) resolveImplAt(
 			continue
 		}
 
-		if info.Checking {
-			if c.implPatternMatches(info, iface, target) {
-				// ensureImplChecked emits the cyclic delegated implementation
-				// diagnostic when the matching implementation is already active.
-				c.ensureImplChecked(info)
-			}
-
-			continue
-		}
-
-		if info.Checked && !info.Usable {
-			continue
-		}
-
-		if !info.Checked {
-			// Manual implementations can be checked immediately. Delegated
-			// implementations may recursively resolve another implementation.
-			if len(info.UsingPath) == 0 {
-				if !c.ensureImplChecked(info) {
-					continue
-				}
-			} else {
-				if !c.ensureImplChecked(info) {
-					continue
-				}
-			}
-		}
-
 		match := ImplMatch{
 			Types:  map[string]*Type{},
 			Values: map[string]GenericArgumentInfo{},
@@ -2511,6 +2485,11 @@ func (c *Checker) resolveImplAt(
 
 		kinds := genericParamKinds(info.GenericParams)
 
+		// Matching must happen before ensureImplChecked. Otherwise resolving
+		// one delegated implementation eagerly checks every other delegated
+		// implementation and reports false cycles for valid chains such as:
+		//
+		//     Entity -> Component -> Transform
 		if !c.matchImplType(
 			info.Interface,
 			iface,
@@ -2526,6 +2505,17 @@ func (c *Checker) resolveImplAt(
 			kinds,
 			&match,
 		) {
+			continue
+		}
+
+		if info.Checking {
+			// This implementation genuinely matches the requested pair, so
+			// encountering it while active represents a real delegation cycle.
+			c.ensureImplChecked(info)
+			continue
+		}
+
+		if !c.ensureImplChecked(info) {
 			continue
 		}
 
@@ -2557,6 +2547,53 @@ func (c *Checker) resolveImplAt(
 	}
 
 	return matches[0], true
+}
+
+func implGenericParamKindsForCGen(
+	params []ast.GenericParam,
+) map[string]ast.GenericParamCategory {
+	out := map[string]ast.GenericParamCategory{}
+
+	for _, param := range params {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		out[param.Name.Name] = param.Category
+	}
+
+	return out
+}
+
+func isImplTypeGenericCategoryForCGen(
+	category ast.GenericParamCategory,
+) bool {
+	switch category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		return true
+
+	default:
+		return false
+	}
+}
+
+func implTemplateSubstCompleteForCGen(
+	params []ast.GenericParam,
+	subst map[string]ast.GenericArg,
+) bool {
+	for _, param := range params {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		if _, ok := subst[param.Name.Name]; !ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c *Checker) implMayParticipate(info *ImplInfo) bool {

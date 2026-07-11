@@ -1691,6 +1691,7 @@ func (g *Generator) cTypeFromAstWithGenericArgs(typ ast.Type, subst map[string]a
 		return CType{
 			Name:     elem.Name + " *",
 			SealName: "*" + elem.SealName,
+			Elem:     &elem,
 		}
 
 	case *ast.ArrayType:
@@ -6429,6 +6430,7 @@ func (g *Generator) inferExprType(expr ast.Expr, expected *CType) CType {
 			return CType{
 				Name:     inner.Name + " *",
 				SealName: "*" + inner.SealName,
+				Elem:     &inner,
 			}
 
 		case token.Star:
@@ -7123,6 +7125,10 @@ func dereferenceImplTargetType(t CType) (CType, bool) {
 		return t, true
 	}
 
+	if t.Elem != nil && !isInvalidCType(*t.Elem) {
+		return *t.Elem, true
+	}
+
 	name := strings.TrimSpace(t.Name)
 	name = strings.TrimSpace(strings.TrimSuffix(name, "*"))
 
@@ -7219,9 +7225,24 @@ func (g *Generator) resolveImplTemplateForInterface(
 
 	subst := map[string]ast.GenericArg{}
 
+	paramKinds := implGenericParamKindsForCGen(
+		template.GenericParams,
+	)
+
 	if !g.matchInterfaceTemplate(
 		template.Interface,
 		instance,
+		subst,
+		paramKinds,
+	) {
+		return nil
+	}
+
+	// Every impl-generic parameter must be inferable from the concrete
+	// interface instance. Otherwise the target would remain something like
+	// Holder<T> rather than becoming Holder<int>.
+	if !implTemplateSubstCompleteForCGen(
+		template.GenericParams,
 		subst,
 	) {
 		return nil
@@ -7252,10 +7273,58 @@ func (g *Generator) resolveImplTemplateForInterface(
 	}
 }
 
+func implGenericParamKindsForCGen(
+	params []ast.GenericParam,
+) map[string]ast.GenericParamCategory {
+	out := map[string]ast.GenericParamCategory{}
+
+	for _, param := range params {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		out[param.Name.Name] = param.Category
+	}
+
+	return out
+}
+
+func implTemplateSubstCompleteForCGen(
+	params []ast.GenericParam,
+	subst map[string]ast.GenericArg,
+) bool {
+	for _, param := range params {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		if _, ok := subst[param.Name.Name]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isImplTypeGenericCategoryForCGen(
+	category ast.GenericParamCategory,
+) bool {
+	switch category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		return true
+
+	default:
+		return false
+	}
+}
+
 func (g *Generator) matchInterfaceTemplate(
 	pattern ast.Type,
 	instance *InterfaceInstance,
 	subst map[string]ast.GenericArg,
+	paramKinds map[string]ast.GenericParamCategory,
 ) bool {
 	if pattern == nil || instance == nil {
 		return false
@@ -7300,6 +7369,7 @@ func (g *Generator) matchInterfaceTemplate(
 				p.Args[i],
 				instance.Args[i],
 				subst,
+				paramKinds,
 			) {
 				return false
 			}
@@ -7315,6 +7385,7 @@ func (g *Generator) matchImplGenericArg(
 	pattern ast.GenericArg,
 	actual ast.GenericArg,
 	subst map[string]ast.GenericArg,
+	paramKinds map[string]ast.GenericParamCategory,
 ) bool {
 	switch pattern.Kind {
 	case ast.GenericArgType:
@@ -7322,17 +7393,20 @@ func (g *Generator) matchImplGenericArg(
 			pattern.Type,
 			typeAstFromGenericArgForCGen(actual),
 			subst,
+			paramKinds,
 		)
 
 	case ast.GenericArgExpr:
 		if id, ok := pattern.Expr.(*ast.IdentExpr); ok {
-			if existing, found := subst[id.Name.Name]; found {
-				return genericRequestArgKey(existing) ==
-					genericRequestArgKey(actual)
-			}
+			if _, generic := paramKinds[id.Name.Name]; generic {
+				if existing, found := subst[id.Name.Name]; found {
+					return genericRequestArgKey(existing) ==
+						genericRequestArgKey(actual)
+				}
 
-			subst[id.Name.Name] = actual
-			return true
+				subst[id.Name.Name] = actual
+				return true
+			}
 		}
 
 		return genericRequestArgKey(pattern) ==
@@ -7346,6 +7420,7 @@ func (g *Generator) matchImplType(
 	pattern ast.Type,
 	actual ast.Type,
 	subst map[string]ast.GenericArg,
+	paramKinds map[string]ast.GenericParamCategory,
 ) bool {
 	if pattern == nil || actual == nil {
 		return pattern == actual
@@ -7353,21 +7428,26 @@ func (g *Generator) matchImplType(
 
 	switch p := pattern.(type) {
 	case *ast.NamedType:
-		if len(p.Parts) == 1 &&
-			g.isImplGenericParamName(p.Parts[0].Name) {
-			arg := ast.GenericArg{
-				Kind: ast.GenericArgType,
-				Type: actual,
-				Loc:  actual.Span(),
-			}
+		if len(p.Parts) == 1 {
+			name := p.Parts[0].Name
+			category, generic := paramKinds[name]
 
-			if existing, ok := subst[p.Parts[0].Name]; ok {
-				return genericRequestArgKey(existing) ==
-					genericRequestArgKey(arg)
-			}
+			if generic &&
+				isImplTypeGenericCategoryForCGen(category) {
+				arg := ast.GenericArg{
+					Kind: ast.GenericArgType,
+					Type: actual,
+					Loc:  actual.Span(),
+				}
 
-			subst[p.Parts[0].Name] = arg
-			return true
+				if existing, ok := subst[name]; ok {
+					return genericRequestArgKey(existing) ==
+						genericRequestArgKey(arg)
+				}
+
+				subst[name] = arg
+				return true
+			}
 		}
 
 		a, ok := actual.(*ast.NamedType)
@@ -7385,7 +7465,13 @@ func (g *Generator) matchImplType(
 
 	case *ast.PointerType:
 		a, ok := actual.(*ast.PointerType)
-		return ok && g.matchImplType(p.Elem, a.Elem, subst)
+
+		return ok && g.matchImplType(
+			p.Elem,
+			a.Elem,
+			subst,
+			paramKinds,
+		)
 
 	case *ast.ArrayType:
 		a, ok := actual.(*ast.ArrayType)
@@ -7393,11 +7479,25 @@ func (g *Generator) matchImplType(
 			return false
 		}
 
-		return g.matchImplType(p.Elem, a.Elem, subst)
+		return g.matchImplType(
+			p.Elem,
+			a.Elem,
+			subst,
+			paramKinds,
+		)
 
 	case *ast.GenericType:
 		a, ok := actual.(*ast.GenericType)
-		if !ok || !g.matchImplType(p.Base, a.Base, subst) {
+		if !ok {
+			return false
+		}
+
+		if !g.matchImplType(
+			p.Base,
+			a.Base,
+			subst,
+			paramKinds,
+		) {
 			return false
 		}
 
@@ -7406,7 +7506,12 @@ func (g *Generator) matchImplType(
 		}
 
 		for i := range p.Args {
-			if !g.matchImplGenericArg(p.Args[i], a.Args[i], subst) {
+			if !g.matchImplGenericArg(
+				p.Args[i],
+				a.Args[i],
+				subst,
+				paramKinds,
+			) {
 				return false
 			}
 		}
@@ -7417,16 +7522,46 @@ func (g *Generator) matchImplType(
 	return false
 }
 
-func (g *Generator) isImplGenericParamName(name string) bool {
-	for _, template := range g.implTemplates {
-		for _, param := range template.GenericParams {
-			if param.Name.Name == name {
-				return true
-			}
-		}
+func (g *Generator) emitResolvedInterfaceWrapperPrototype(
+	info *ResolvedImplInstance,
+	req *ast.TaskSignature,
+) {
+	if info == nil || info.Interface == nil || req == nil {
+		return
 	}
 
-	return false
+	ret := g.interfaceRequirementReturnType(
+		info.Interface,
+		req,
+	)
+
+	wrapperName := interfaceWrapperName(
+		info.Interface.CName,
+		info.Target.SealName,
+		req.Name.Name,
+	)
+
+	params := []string{"void *data"}
+
+	for i := 1; i < len(req.Params); i++ {
+		paramType := g.interfaceRequirementParamType(
+			info.Interface,
+			req,
+			i,
+		)
+
+		params = append(
+			params,
+			paramType.Decl(fmt.Sprintf("arg%d", i)),
+		)
+	}
+
+	g.linef(
+		"static %s %s(%s);",
+		ret.Name,
+		wrapperName,
+		strings.Join(params, ", "),
+	)
 }
 
 func (g *Generator) resolvedImplsForInterface(
@@ -7471,6 +7606,31 @@ func (g *Generator) emitImplVTables() {
 	}
 
 	sort.Strings(keys)
+
+	// Emit every wrapper declaration first. Delegated wrappers may call
+	// another wrapper whose definition sorts later in the output.
+	emittedPrototype := false
+
+	for _, key := range keys {
+		info := g.resolvedImpls[key]
+		if info == nil ||
+			info.Interface == nil ||
+			info.Interface.Decl == nil {
+			continue
+		}
+
+		for _, req := range info.Interface.Decl.Requirements {
+			g.emitResolvedInterfaceWrapperPrototype(
+				info,
+				req,
+			)
+			emittedPrototype = true
+		}
+	}
+
+	if emittedPrototype {
+		g.line("")
+	}
 
 	for _, key := range keys {
 		info := g.resolvedImpls[key]
@@ -8258,6 +8418,7 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 		return CType{
 			Name:     elem.Name + " *",
 			SealName: "*" + elem.SealName,
+			Elem:     &elem,
 		}
 
 	case *ast.ArrayType:
