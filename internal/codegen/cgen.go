@@ -385,13 +385,22 @@ func (g *Generator) Generate(file *ast.File) string {
 
 	g.emitDistincts(file)
 	g.emitEnums(file)
+
+	// Interface value representations must exist before any ordinary,
+	// imported, or specialized struct that stores an interface by value.
+	g.emitInterfaceValueTypes()
+
 	g.emitImportedStructs()
 	g.emitStructs(file)
 	g.emitGenericStructs()
 	g.emitImportedGenericStructs()
 	g.emitUnions(file)
+
+	// Interface result structures and dynamic vtables can depend on concrete
+	// struct types, so emit them after all concrete struct definitions.
 	g.emitInterfaceResultStructs()
-	g.emitInterfaces()
+	g.emitDynamicInterfaceVTableTypes()
+
 	g.emitTaskVariadicRuntimeTypes()
 	g.emitConstants(file)
 
@@ -3099,7 +3108,7 @@ func sanitizeCName(name string) string {
 	return b.String()
 }
 
-func (g *Generator) emitInterfaces() {
+func (g *Generator) emitInterfaceValueTypes() {
 	keys := make([]string, 0, len(g.interfaceInstances))
 
 	for key := range g.interfaceInstances {
@@ -3110,12 +3119,34 @@ func (g *Generator) emitInterfaces() {
 
 	for _, key := range keys {
 		instance := g.interfaceInstances[key]
+		if instance == nil {
+			continue
+		}
 
 		if instance.IsDyn {
-			g.emitDynInterface(instance)
+			g.emitDynInterfaceValueType(instance)
 		} else {
 			g.emitStaticInterface(instance)
 		}
+	}
+}
+
+func (g *Generator) emitDynamicInterfaceVTableTypes() {
+	keys := make([]string, 0, len(g.interfaceInstances))
+
+	for key := range g.interfaceInstances {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		instance := g.interfaceInstances[key]
+		if instance == nil || !instance.IsDyn {
+			continue
+		}
+
+		g.emitDynInterfaceVTableType(instance)
 	}
 }
 
@@ -3403,8 +3434,41 @@ func (g *Generator) collectInterfaceInstancesFromExpr(expr ast.Expr) {
 	}
 }
 
-func (g *Generator) emitDynInterface(instance *InterfaceInstance) {
-	g.linef("typedef struct %s_vtable {", instance.CName)
+func (g *Generator) emitDynInterfaceValueType(
+	instance *InterfaceInstance,
+) {
+	if instance == nil {
+		return
+	}
+
+	// The interface object needs the vtable pointer type before the complete
+	// vtable structure is emitted.
+	g.linef(
+		"typedef struct %s_vtable %s_vtable;",
+		instance.CName,
+		instance.CName,
+	)
+	g.line("")
+
+	g.linef("typedef struct %s {", instance.CName)
+	g.indent++
+	g.line("void *data;")
+	g.linef("%s_vtable *vtable;", instance.CName)
+	g.indent--
+	g.linef("} %s;", instance.CName)
+	g.line("")
+}
+
+func (g *Generator) emitDynInterfaceVTableType(
+	instance *InterfaceInstance,
+) {
+	if instance == nil || instance.Decl == nil {
+		return
+	}
+
+	// The typedef was already introduced by emitDynInterfaceValueType.
+	// Complete the previously forward-declared structure here.
+	g.linef("struct %s_vtable {", instance.CName)
 	g.indent++
 
 	for _, req := range instance.Decl.Requirements {
@@ -3434,15 +3498,7 @@ func (g *Generator) emitDynInterface(instance *InterfaceInstance) {
 	}
 
 	g.indent--
-	g.linef("} %s_vtable;", instance.CName)
-	g.line("")
-
-	g.linef("typedef struct %s {", instance.CName)
-	g.indent++
-	g.line("void *data;")
-	g.linef("%s_vtable *vtable;", instance.CName)
-	g.indent--
-	g.linef("} %s;", instance.CName)
+	g.line("};")
 	g.line("")
 }
 

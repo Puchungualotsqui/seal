@@ -5323,3 +5323,325 @@ Main :: task() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
 	}
 }
+
+func TestCheckInterfaceValueAssignment(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	first := cast<Positioned>(&transform)
+	second: Positioned = first
+
+	assert(X(second) == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckInterfacePassedAsTaskParameter(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+ReadPosition :: task(value Positioned) int {
+	return X(value)
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+	result := ReadPosition(positioned)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckInterfaceReturnedFromTask(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+IdentityPositioned :: task(value Positioned) Positioned {
+	return value
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+	returned := IdentityPositioned(positioned)
+
+	assert(X(returned) == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckInterfaceStoredInStruct(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+PositionHolder :: struct {
+	value Positioned
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+
+	holder := PositionHolder{
+		value = positioned,
+	}
+
+	assert(X(holder.value) == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckInterfacePassedThroughMultipleTasks(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+Forward :: task(value Positioned) Positioned {
+	copy := value
+	return copy
+}
+
+ReadForwarded :: task(value Positioned) int {
+	forwarded := Forward(value)
+	return X(forwarded)
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+	result := ReadForwarded(positioned)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+}
+
+func TestCheckRejectsAssignmentBetweenDifferentInterfaceTypes(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Value :: task(value *self) int
+}
+
+Readable :: interface {
+	Value :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadValue :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	Value :: ReadValue
+}
+
+Readable :: impl Transform {
+	Value :: ReadValue
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+
+	readable: Readable = positioned
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	out := reporter.String()
+
+	if !strings.Contains(out, "cannot assign Positioned to interface Readable") {
+		t.Fatalf(
+			"expected incompatible interface assignment diagnostic, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestCheckRejectsPassingDifferentInterfaceType(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Value :: task(value *self) int
+}
+
+Readable :: interface {
+	Value :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadValue :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	Value :: ReadValue
+}
+
+UseReadable :: task(value Readable) int {
+	return Value(value)
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+
+	result := UseReadable(positioned)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	out := reporter.String()
+
+	if !strings.Contains(out, "cannot assign Positioned to interface Readable") {
+		t.Fatalf(
+			"expected incompatible interface parameter diagnostic, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestCheckRejectsReturningDifferentInterfaceType(t *testing.T) {
+	reporter := checkSource(t, `
+Positioned :: interface {
+	Value :: task(value *self) int
+}
+
+Readable :: interface {
+	Value :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadValue :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	Value :: ReadValue
+}
+
+BadConversion :: task(value Positioned) Readable {
+	return value
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	out := reporter.String()
+
+	if !strings.Contains(out, "cannot assign Positioned to interface Readable") {
+		t.Fatalf(
+			"expected incompatible interface return diagnostic, got:\n%s",
+			out,
+		)
+	}
+}

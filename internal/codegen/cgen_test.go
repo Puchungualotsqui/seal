@@ -4093,7 +4093,8 @@ Main :: task() {
 	}
 
 	checks := []string{
-		"typedef struct Positioned_vtable {",
+		"typedef struct Positioned_vtable Positioned_vtable;",
+		"struct Positioned_vtable {",
 		"Positioned_vtable *vtable;",
 		"static Positioned_vtable Positioned_Transform_vtable",
 		".vtable = &Positioned_Transform_vtable",
@@ -4158,7 +4159,8 @@ Main :: task() {
 		"#define StaticPositioned_Tag_Transform",
 		"switch (receiver.tag)",
 
-		"typedef struct DynamicPositioned_vtable {",
+		"typedef struct DynamicPositioned_vtable DynamicPositioned_vtable;",
+		"struct DynamicPositioned_vtable {",
 		"DynamicPositioned_vtable *vtable;",
 		".vtable = &DynamicPositioned_Transform_vtable",
 		"(dynamicPositioned).vtable->X((dynamicPositioned).data)",
@@ -4441,6 +4443,208 @@ Main :: task() {
 
 	if reporter.HasErrors() {
 		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateInterfaceAssignmentPassingAndReturn(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+IdentityPositioned :: task(value Positioned) Positioned {
+	copy := value
+	return copy
+}
+
+ReadPosition :: task(value Positioned) int {
+	return X(value)
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+
+	first := cast<Positioned>(&transform)
+	second: Positioned = first
+	third := IdentityPositioned(second)
+
+	result := ReadPosition(third)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct Positioned {",
+		"uintptr_t tag;",
+		"void *data;",
+		"} Positioned;",
+
+		"Positioned IdentityPositioned(Positioned value);",
+		"intptr_t ReadPosition(Positioned value);",
+
+		"Positioned first =",
+		"Positioned second = first;",
+		"Positioned third = IdentityPositioned(second);",
+		"intptr_t result = ReadPosition(third);",
+
+		"Positioned copy = value;",
+		"Positioned_X(value)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateInterfaceStoredAndPassedFromStruct(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+PositionHolder :: struct {
+	value Positioned
+}
+
+ReadHolder :: task(holder PositionHolder) int {
+	return X(holder.value)
+}
+
+Main :: task() {
+	transform := Transform{x = 42}
+	positioned := cast<Positioned>(&transform)
+
+	holder := PositionHolder{
+		value = positioned,
+	}
+
+	result := ReadHolder(holder)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"typedef struct PositionHolder {",
+		"Positioned value;",
+		"} PositionHolder;",
+
+		"intptr_t ReadHolder(PositionHolder holder);",
+		"PositionHolder holder = (PositionHolder){.value = positioned};",
+		"Positioned_X((holder).value)",
+		"intptr_t result = ReadHolder(holder);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateMultipleInterfaceParameters(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	X :: task(value *self) int
+}
+
+Transform :: struct {
+	x int
+}
+
+ReadX :: task(value *Transform) int {
+	return value.x
+}
+
+Positioned :: impl Transform {
+	X :: ReadX
+}
+
+SumPositions :: task(left Positioned, right Positioned) int {
+	return X(left) + X(right)
+}
+
+Main :: task() {
+	leftTransform := Transform{x = 20}
+	rightTransform := Transform{x = 22}
+
+	left := cast<Positioned>(&leftTransform)
+	right := cast<Positioned>(&rightTransform)
+
+	result := SumPositions(left, right)
+
+	assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"intptr_t SumPositions(Positioned left, Positioned right);",
+		"Positioned_X(left)",
+		"Positioned_X(right)",
+		"SumPositions(left, right)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
 	}
 
 	compileGeneratedC(t, out)
