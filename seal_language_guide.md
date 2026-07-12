@@ -136,13 +136,45 @@ Main :: task() {
 }
 ```
 
-The build system can be pointed at any file or directory inside the package. Internally, the build entry is equivalent to:
+The build system can be pointed at any file or directory inside the package:
+
+```bash
+sealc build ./
+```
+
+The path is optional and defaults to the current directory:
+
+```bash
+sealc build
+```
+
+To generate C without invoking the host C compiler:
+
+```bash
+sealc build ./ --emit-c
+```
+
+To choose an output path:
+
+```bash
+sealc build ./ -o hello
+```
+
+To temporarily override the compiler selected in `seal.toml`:
+
+```bash
+sealc build ./ -compiler gcc
+```
+
+The compiler override applies only to the current invocation and does not modify project configuration.
+
+Internally, a normal build is equivalent to:
 
 ```go
 BuildWorkspace(path, BuildOptions{})
 ```
 
-To generate C without invoking the host C compiler, the build API uses:
+Emit-only mode uses:
 
 ```go
 BuildOptions{
@@ -150,7 +182,13 @@ BuildOptions{
 }
 ```
 
-The exact command-line spelling depends on the current `sealc` command frontend.
+A temporary compiler selection uses:
+
+```go
+BuildOptions{
+    Compiler: "gcc",
+}
+```
 
 ---
 
@@ -281,38 +319,181 @@ dependencies = [
 
 Both forms may also appear under `[package]`.
 
-### 5.2 Build keys
+### 5.2 Build and compiler configuration
 
-Build keys may be top-level or placed under `[build]`.
+Seal separates common build configuration from compiler-specific profiles.
+
+The selected compiler is normally declared under `[build]`:
 
 ```toml
 [build]
-compiler = "clang"
-standard = "c11"
-c_flags = ["-Wall", "-Wextra"]
-link_flags = ["-static"]
-include_dirs = ["include"]
-library_dirs = ["lib"]
-libraries = ["m"]
-defines = ["SEAL_DEBUG=1"]
+compiler = "gcc"
 ```
 
-| Key | Type | Default | Meaning |
-|---|---:|---:|---|
-| `compiler` | string | `""` | Compiler preset or executable name |
-| `compiler_path` | string | `""` | Explicit compiler executable path |
-| `compiler_args` | string array | empty | Arguments inserted immediately after compiler executable |
-| `c_flags` | string array | empty | Additional compile flags |
-| `link_flags` | string array | empty | Additional linker flags |
-| `include_dirs` | string array | empty | Converted to `-I...` |
-| `library_dirs` | string array | empty | Converted to `-L...` |
-| `libraries` | string array | empty | Converted to `-l...` |
-| `defines` | string array | empty | Converted to `-D...` |
-| `target` | string | `""` | Target triple; automatically handled for Zig CC |
-| `standard` | string | `"c11"` | C language standard |
-| `linkage` | string | `"static"` | Requested linkage mode |
+Common settings may still be placed under `[build]`:
 
-Supported compiler presets include:
+```toml
+[build]
+compiler = "gcc"
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+```
+
+Multiline string arrays are supported for all array-valued configuration keys:
+
+```toml
+[build]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+
+include_dirs = [
+    "include",
+    "third_party/include",
+]
+```
+
+#### Common build keys
+
+| Key             |         Type |    Default | Meaning                                                                   |
+| --------------- | -----------: | ---------: | ------------------------------------------------------------------------- |
+| `compiler`      |       string |       `""` | Selected compiler or compiler profile                                     |
+| `compiler_path` |       string |       `""` | Explicit compiler executable path                                         |
+| `compiler_args` | string array |      empty | Arguments inserted immediately after the compiler executable              |
+| `c_flags`       | string array |      empty | Additional compilation flags                                              |
+| `link_flags`    | string array |      empty | Additional linker flags                                                   |
+| `include_dirs`  | string array |      empty | Converted to `-I...`                                                      |
+| `library_dirs`  | string array |      empty | Converted to `-L...`                                                      |
+| `libraries`     | string array |      empty | Converted to `-l...`                                                      |
+| `defines`       | string array |      empty | Converted to `-D...`                                                      |
+| `target`        |       string |       `""` | Compilation target; handled automatically for supported compiler profiles |
+| `standard`      |       string |    `"c11"` | C language standard                                                       |
+| `linkage`       |       string | `"static"` | Requested linkage mode                                                    |
+
+These common fields provide the base configuration before compiler profiles are applied.
+
+#### Compiler profiles
+
+Compiler-specific settings use sections of the form:
+
+```toml
+[compiler.<name>]
+```
+
+A default compiler profile may be declared as:
+
+```toml
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+```
+
+Named profiles can override individual settings:
+
+```toml
+[compiler.gcc]
+path = "gcc"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+
+[compiler.clang]
+path = "clang"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wconversion",
+]
+
+[compiler.zigcc]
+path = "zig"
+args = ["cc"]
+target = "x86_64-windows-gnu"
+```
+
+Supported compiler-profile fields are:
+
+| Key             |         Type | Meaning                                           |
+| --------------- | -----------: | ------------------------------------------------- |
+| `path`          |       string | Compiler executable path or command               |
+| `compiler_path` |       string | Alias of `path`                                   |
+| `args`          | string array | Arguments placed immediately after the executable |
+| `compiler_args` | string array | Alias of `args`                                   |
+| `c_flags`       | string array | Compilation flags                                 |
+| `link_flags`    | string array | Linker flags                                      |
+| `include_dirs`  | string array | Include directories                               |
+| `library_dirs`  | string array | Library search directories                        |
+| `libraries`     | string array | Libraries to link                                 |
+| `defines`       | string array | Preprocessor definitions                          |
+| `target`        |       string | Compiler target                                   |
+| `standard`      |       string | C standard                                        |
+| `linkage`       |       string | Requested linkage mode                            |
+
+`compiler.default` cannot select an executable path. It supplies fallback settings shared by compiler profiles.
+
+#### Configuration precedence
+
+Compiler configuration is resolved in this order:
+
+```text
+built-in defaults
+    ↓
+[build] common settings
+    ↓
+[compiler.default]
+    ↓
+[compiler.<selected compiler>]
+    ↓
+temporary command-line compiler selection
+```
+
+A named compiler profile replaces any field it explicitly defines. Fields it omits continue to inherit from the preceding configuration layer.
+
+For array fields, a profile replaces the inherited array rather than appending to it.
+
+For example:
+
+```toml
+[compiler.default]
+c_flags = [
+    "-Wall",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+```
+
+selecting `gcc` produces:
+
+```text
+-Wall -Wextra
+```
+
+rather than duplicating `-Wall`.
+
+An explicitly empty array clears an inherited array:
+
+```toml
+[compiler.clang]
+c_flags = []
+```
+
+#### Compiler names
+
+Recognized compiler names include:
 
 ```text
 cc
@@ -325,11 +506,50 @@ msvc
 cl
 ```
 
-For Zig CC:
+Aliases are normalized internally:
+
+```text
+zig-cc → zigcc
+zig cc → zigcc
+cl     → msvc
+```
+
+Custom compiler names are accepted:
+
+```toml
+[build]
+compiler = "x86_64-w64-mingw32-gcc"
+```
+
+When no matching named profile exists, the selected compiler still inherits `[compiler.default]`.
+
+Example:
+
+```toml
+[build]
+compiler = "tcc"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+]
+```
+
+This invokes `tcc` with the default profile settings.
+
+#### Zig CC example
 
 ```toml
 [build]
 compiler = "zigcc"
+
+[compiler.default]
+standard = "c11"
+
+[compiler.zigcc]
+path = "zig"
+args = ["cc"]
 target = "x86_64-windows-gnu"
 ```
 
@@ -339,41 +559,60 @@ The resulting command begins with:
 zig cc -target x86_64-windows-gnu
 ```
 
-`compiler_path` overrides the preset executable:
+#### Temporary command-line override
+
+The compiler selected in `seal.toml` may be temporarily overridden for one build:
+
+```bash
+sealc build ./ -compiler gcc
+```
+
+Equivalent accepted forms include:
+
+```bash
+sealc build -compiler gcc ./
+sealc build ./ --compiler clang
+sealc build ./ --compiler=zigcc
+sealc build ./ -compiler=gcc
+```
+
+The override selects another compiler and its matching profile. It does not modify `seal.toml`.
+
+For example:
 
 ```toml
 [build]
-compiler = "zigcc"
-compiler_path = "C:/tools/zig/zig.exe"
-compiler_args = ["cc"]
+compiler = "clang"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
 ```
 
-Custom compiler names are also accepted:
+A normal build uses Clang:
 
-```toml
-[build]
-compiler = "x86_64-w64-mingw32-gcc"
+```bash
+sealc build ./
 ```
 
-### 5.3 Checker configuration
+A temporary build can use GCC:
 
-```toml
-[checker]
-generic_constraint_max_depth = 32
+```bash
+sealc build ./ -compiler gcc
 ```
 
-| Key | Type | Default | Meaning |
-|---|---:|---:|---|
-| `generic_constraint_max_depth` | integer | `0` | Maximum nested compile-time generic-constraint task evaluation depth |
+The GCC build receives the `compiler.gcc` profile while the package configuration remains unchanged.
 
-A value less than or equal to zero disables the depth guard:
-
-```toml
-[checker]
-generic_constraint_max_depth = -1
-```
-
-A positive value also enables recursion detection during generic constraint evaluation.
 
 ### 5.4 General check-policy keys
 
@@ -2387,17 +2626,59 @@ native/
 
 ### 37.5 Include and link configuration
 
-`seal.toml` can add:
+Common include and link settings may be placed under `[build]`:
 
 ```toml
 [build]
-include_dirs = ["include"]
-library_dirs = ["lib"]
-libraries = ["m"]
-defines = ["FEATURE_X=1"]
-c_flags = ["-Wall"]
-link_flags = ["-static"]
+include_dirs = [
+    "include",
+]
+
+library_dirs = [
+    "lib",
+]
+
+libraries = [
+    "m",
+]
+
+defines = [
+    "FEATURE_X=1",
+]
+
+c_flags = [
+    "-Wall",
+]
+
+link_flags = [
+    "-static",
+]
 ```
+
+These fields may also be supplied through compiler profiles:
+
+```toml
+[compiler.default]
+include_dirs = [
+    "include",
+]
+
+defines = [
+    "FEATURE_X=1",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+link_flags = [
+    "-static",
+]
+```
+
+Compiler-profile fields override matching common fields when their profile is selected.
 
 ---
 
@@ -2425,9 +2706,58 @@ The executable output defaults to:
 
 On Windows, `.exe` is added when the output has no extension.
 
-### 38.1 Emit-only mode
+### 38.1 Build command
 
-Emit-only mode generates package C files without invoking a C compiler.
+The normal command is:
+
+```bash
+sealc build <path>
+```
+
+The path is optional:
+
+```bash
+sealc build
+```
+
+which builds the package containing the current directory.
+
+The current build options include:
+
+```text
+--emit-c
+-o <output>
+--output <output>
+-compiler <name>
+--compiler <name>
+```
+
+Examples:
+
+```bash
+sealc build ./
+sealc build ./ --emit-c
+sealc build ./ -o my_program
+sealc build ./ -compiler gcc
+sealc build ./ --compiler=clang
+```
+
+Compiler options may appear before or after the package path:
+
+```bash
+sealc build -compiler gcc ./
+sealc build ./ -compiler gcc
+```
+
+Unknown build options are rejected.
+
+### 38.2 Emit-only mode
+
+Emit-only mode generates package C files without invoking a C compiler:
+
+```bash
+sealc build ./ --emit-c
+```
 
 Conceptually:
 
@@ -2437,20 +2767,110 @@ BuildWorkspace(path, BuildOptions{
 })
 ```
 
-### 38.2 Executable compilation
+### 38.3 Temporary compiler override
+
+The selected compiler can be overridden for one build:
+
+```bash
+sealc build ./ -compiler gcc
+```
+
+Conceptually:
+
+```go
+BuildWorkspace(path, BuildOptions{
+    Compiler: "gcc",
+})
+```
+
+The override changes the compiler profile selected for that invocation. It does not alter `seal.toml`.
+
+When the selected compiler has a named profile, that profile is applied:
+
+```toml
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+```
+
+When no named profile exists, the compiler still receives the common build settings and `[compiler.default]`.
+
+### 38.4 Executable compilation
 
 For an executable root package, the build command combines:
 
-- generated C files for all dependency packages;
-- native C files from all packages;
-- configured compiler arguments;
-- configured include paths;
-- defines;
-- libraries and linker flags.
+* generated C files for all dependency packages;
+* native C files from all packages;
+* compiler executable arguments;
+* configured C standard;
+* configured target arguments;
+* include paths;
+* preprocessor definitions;
+* compilation flags;
+* library search paths;
+* libraries;
+* linker flags;
+* the requested output path.
+
+The conceptual command order is:
+
+```text
+compiler
+compiler_args
+generated and native C files
+standard and target settings
+include directories
+defines
+c_flags
+library directories
+libraries
+link_flags
+-o output
+```
+
+The exact spelling may vary by compiler.
 
 Library packages do not independently produce final executables.
 
-### 38.3 Package symbol names in C
+### 38.5 Compiler command selection
+
+Compiler selection follows this process:
+
+```text
+command-line override, when present
+otherwise [build].compiler
+otherwise cc
+```
+
+The selected configuration is then resolved through:
+
+```text
+[build]
+    ↓
+[compiler.default]
+    ↓
+[compiler.<selected compiler>]
+```
+
+An explicit compiler path takes precedence over the compiler preset executable.
+
+Examples:
+
+```toml
+[compiler.gcc]
+path = "/usr/bin/gcc"
+```
+
+```toml
+[compiler.zigcc]
+path = "C:/tools/zig/zig.exe"
+args = ["cc"]
+```
+
+### 38.6 Package symbol names in C
 
 Imported names are prefixed to avoid collisions:
 
@@ -2699,35 +3119,51 @@ dependencies = [
 
 [build]
 compiler = "cc"
+
+[compiler.default]
 standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+
+[compiler.clang]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wconversion",
+]
 
 [checker]
 generic_constraint_max_depth = 32
 ```
 
-`app/main.seal`:
+The package normally builds using `cc`:
 
-```seal
-Identity :: task <T type>(value T) T {
-    return value
-}
-
-Apply :: task <T type, F task[(T) T]>(value T) T {
-    return F(value)
-}
-
-Main :: task() {
-    box := types.MakeBox<int>(10)
-    assert(box.value == 10)
-
-    player := types.Player{health = 42}
-    readable := cast<types.ReadableHealth>(&player)
-    assert(Health(readable) == 42)
-
-    result := Apply<int, Identity<int>>(5)
-    assert(result == 5)
-}
+```bash
+sealc build ./app
 ```
+
+A compiler may be selected temporarily:
+
+```bash
+sealc build ./app -compiler gcc
+```
+
+or:
+
+```bash
+sealc build ./app --compiler clang
+```
+
+These commands select the corresponding compiler profile without changing `app/seal.toml`.
 
 This example demonstrates:
 
@@ -2993,6 +3429,79 @@ dependencies = ["mem", "types"]
 ptr := mem.Alloc(64)
 box := types.MakeBox<int>(10)
 ```
+
+### Common build configuration
+
+```toml
+[build]
+compiler = "gcc"
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+```
+
+### Default compiler profile
+
+```toml
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+```
+
+### Named compiler profile
+
+```toml
+[compiler.gcc]
+path = "gcc"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+```
+
+### Zig CC profile
+
+```toml
+[compiler.zigcc]
+path = "zig"
+args = ["cc"]
+target = "x86_64-windows-gnu"
+```
+
+### Build project
+
+```bash
+sealc build ./
+```
+
+### Emit generated C only
+
+```bash
+sealc build ./ --emit-c
+```
+
+### Choose output file
+
+```bash
+sealc build ./ -o program
+```
+
+### Temporarily select compiler
+
+```bash
+sealc build ./ -compiler gcc
+```
+
+```bash
+sealc build ./ --compiler=clang
+```
+
 
 ---
 
