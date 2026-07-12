@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"seal/internal/ast"
 	"seal/internal/builtin"
@@ -464,6 +465,8 @@ const (
 	IndexResolutionRawptrRead
 	IndexResolutionRawptrWrite
 
+	// UTF-8 character indexing. Both return char.
+	IndexResolutionStringRead
 	IndexResolutionCstringRead
 
 	IndexResolutionOverloadRead
@@ -537,7 +540,13 @@ type LenResolutionKind int
 
 const (
 	LenResolutionInvalid LenResolutionKind = iota
+
 	LenResolutionVariadic
+
+	// UTF-8 Unicode scalar count.
+	LenResolutionString
+	LenResolutionCstring
+
 	LenResolutionOverload
 )
 
@@ -2838,18 +2847,7 @@ func (c *Checker) isOverloadReceiverParameter(
 		return false
 	}
 
-	switch t.Elem.Kind {
-	case TypeStruct:
-		return true
-
-	case TypeString:
-		// Temporary compatibility until string becomes a standard-library
-		// struct.
-		return true
-
-	default:
-		return false
-	}
+	return t.Elem.Kind == TypeStruct
 }
 
 func (c *Checker) checkBracketOverloadCandidate(
@@ -2943,7 +2941,7 @@ func (c *Checker) checkBracketOverloadCandidate(
 		c.diags.Add(
 			candidate.Span,
 			fmt.Sprintf(
-				"first parameter of bracket operator %s candidate %q must be a pointer to a struct or string",
+				"first parameter of bracket operator %s candidate %q must be a pointer to a struct",
 				overloadName,
 				candidate.Name,
 			),
@@ -3072,7 +3070,7 @@ func (c *Checker) checkLenOverloadCandidate(
 		c.diags.Add(
 			candidate.Span,
 			fmt.Sprintf(
-				`first parameter of len overload candidate %q must be a pointer to a struct or string`,
+				`first parameter of len overload candidate %q must be a pointer to a struct`,
 				candidate.Name,
 			),
 		)
@@ -6608,6 +6606,20 @@ func (c *Checker) checkIndexAssignment(
 	case TypeInvalid:
 		return
 
+	case TypeString:
+		c.diags.Add(
+			index.Span(),
+			"cannot assign to immutable string index",
+		)
+		return
+
+	case TypeCstring:
+		c.diags.Add(
+			index.Span(),
+			"cannot assign to immutable cstring index",
+		)
+		return
+
 	case TypeVariadic:
 		if receiverType.Elem != nil {
 			c.checkAssignable(
@@ -6620,7 +6632,6 @@ func (c *Checker) checkIndexAssignment(
 		c.indexResolutions[index] = IndexResolution{
 			Kind: IndexResolutionVariadicWrite,
 		}
-
 		return
 
 	case TypeRawptr:
@@ -6633,14 +6644,6 @@ func (c *Checker) checkIndexAssignment(
 		c.indexResolutions[index] = IndexResolution{
 			Kind: IndexResolutionRawptrWrite,
 		}
-
-		return
-
-	case TypeCstring:
-		c.diags.Add(
-			index.Span(),
-			"cannot assign to cstring index",
-		)
 		return
 	}
 
@@ -6664,12 +6667,11 @@ func (c *Checker) checkIndexAssignment(
 		c.indexResolutions[index] = IndexResolution{
 			Kind: IndexResolutionPrimitiveByteWrite,
 		}
-
 		return
 	}
 
 	switch receiverType.Kind {
-	case TypeStruct, TypeString:
+	case TypeStruct:
 		if !c.isMutableAddressableExpr(
 			scope,
 			index.Left,
@@ -6737,7 +6739,6 @@ func (c *Checker) checkIndexAssignment(
 			PackageName:      resolution.PackageName,
 			GenericArguments: resolution.GenericArguments,
 		}
-
 		return
 
 	case TypeEnum:
@@ -6864,6 +6865,119 @@ func (c *Checker) checkVarDeclStmt(
 	})
 }
 
+func isUnicodeScalar(value rune) bool {
+	if value < 0 || value > utf8.MaxRune {
+		return false
+	}
+
+	// UTF-16 surrogate values are not Unicode scalar values.
+	return value < 0xD800 || value > 0xDFFF
+}
+
+func (c *Checker) checkStringLiteral(
+	e *ast.StringLitExpr,
+) {
+	value, err := strconv.Unquote(e.Value)
+	if err != nil {
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid string literal: %v",
+				err,
+			),
+		)
+		return
+	}
+
+	if !utf8.ValidString(value) {
+		c.diags.Add(
+			e.Span(),
+			"string literal must contain valid UTF-8",
+		)
+	}
+}
+
+func (c *Checker) checkCStringLiteral(
+	e *ast.CStringLitExpr,
+) {
+	if len(e.Value) < 2 ||
+		e.Value[0] != 'c' {
+		c.diags.Add(
+			e.Span(),
+			"invalid cstring literal",
+		)
+		return
+	}
+
+	// Remove the leading c and let strconv process the quoted part.
+	value, err := strconv.Unquote(e.Value[1:])
+	if err != nil {
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid cstring literal: %v",
+				err,
+			),
+		)
+		return
+	}
+
+	if !utf8.ValidString(value) {
+		c.diags.Add(
+			e.Span(),
+			"cstring literal must contain valid UTF-8",
+		)
+	}
+
+	if strings.IndexByte(value, 0) >= 0 {
+		c.diags.Add(
+			e.Span(),
+			"cstring literal cannot contain an embedded null byte",
+		)
+	}
+}
+
+func (c *Checker) checkCharLiteral(
+	e *ast.CharLitExpr,
+) {
+	value, err := strconv.Unquote(e.Value)
+	if err != nil {
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid char literal: %v",
+				err,
+			),
+		)
+		return
+	}
+
+	if !utf8.ValidString(value) {
+		c.diags.Add(
+			e.Span(),
+			"char literal must contain valid UTF-8",
+		)
+		return
+	}
+
+	runes := []rune(value)
+
+	if len(runes) != 1 {
+		c.diags.Add(
+			e.Span(),
+			"char literal must contain exactly one Unicode scalar value",
+		)
+		return
+	}
+
+	if !isUnicodeScalar(runes[0]) {
+		c.diags.Add(
+			e.Span(),
+			"char literal is not a valid Unicode scalar value",
+		)
+	}
+}
+
 func (c *Checker) checkExpr(
 	scope *Scope,
 	expr ast.Expr,
@@ -6916,31 +7030,15 @@ func (c *Checker) checkExpr(
 		return UntypedFloatType
 
 	case *ast.StringLitExpr:
+		c.checkStringLiteral(e)
 		return StringType
 
 	case *ast.CStringLitExpr:
+		c.checkCStringLiteral(e)
 		return CstringType
 
 	case *ast.CharLitExpr:
-		value, err := strconv.Unquote(e.Value)
-		if err != nil {
-			c.diags.Add(
-				e.Span(),
-				fmt.Sprintf(
-					"invalid char literal: %v",
-					err,
-				),
-			)
-			return CharType
-		}
-
-		if len([]rune(value)) != 1 {
-			c.diags.Add(
-				e.Span(),
-				"char literal must contain exactly one Unicode scalar value",
-			)
-		}
-
+		c.checkCharLiteral(e)
 		return CharType
 
 	case *ast.BoolLitExpr:
@@ -7260,57 +7358,79 @@ func (c *Checker) checkOperatorOverload(scope *Scope, name string, argTypes []*T
 	return c.resultTypeFromCall(best.Candidate.Type, span), true
 }
 
-func (c *Checker) builtinEqualityCompatible(a *Type, b *Type) bool {
+func (c *Checker) builtinEqualityCompatible(
+	a *Type,
+	b *Type,
+) bool {
 	if a == nil || b == nil {
 		return false
 	}
 
-	if a.Kind == TypeInvalid || b.Kind == TypeInvalid {
+	if a.Kind == TypeInvalid ||
+		b.Kind == TypeInvalid {
 		return true
 	}
 
-	if c.isNumeric(a) && c.isNumeric(b) {
+	if c.isNumeric(a) &&
+		c.isNumeric(b) {
 		_, ok := c.numericResultType(a, b)
 		return ok
 	}
 
-	if c.sameType(a, BoolType) && c.sameType(b, BoolType) {
+	if c.sameType(a, BoolType) &&
+		c.sameType(b, BoolType) {
 		return true
 	}
 
-	if c.sameType(a, StringType) && c.sameType(b, StringType) {
+	// Both comparisons are content comparisons, not pointer comparisons.
+	if c.sameType(a, StringType) &&
+		c.sameType(b, StringType) {
 		return true
 	}
 
-	if a.Kind == TypeEnum && b.Kind == TypeEnum {
+	if c.sameType(a, CstringType) &&
+		c.sameType(b, CstringType) {
+		return true
+	}
+
+	if a.Kind == TypeEnum &&
+		b.Kind == TypeEnum {
 		return c.sameType(a, b)
 	}
 
-	if a.Kind == TypeEnum && b.Kind == TypeEnumLiteral {
+	if a.Kind == TypeEnum &&
+		b.Kind == TypeEnumLiteral {
 		return c.enumHasVariant(a, b.Name)
 	}
 
-	if b.Kind == TypeEnum && a.Kind == TypeEnumLiteral {
+	if b.Kind == TypeEnum &&
+		a.Kind == TypeEnumLiteral {
 		return c.enumHasVariant(b, a.Name)
 	}
 
-	if a.Kind == TypePointer && b.Kind == TypeNil {
+	if a.Kind == TypePointer &&
+		b.Kind == TypeNil {
 		return true
 	}
 
-	if b.Kind == TypePointer && a.Kind == TypeNil {
+	if b.Kind == TypePointer &&
+		a.Kind == TypeNil {
 		return true
 	}
 
-	if a.Kind == TypeRawptr && b.Kind == TypeNil {
+	if a.Kind == TypeRawptr &&
+		b.Kind == TypeNil {
 		return true
 	}
 
-	if b.Kind == TypeRawptr && a.Kind == TypeNil {
+	if b.Kind == TypeRawptr &&
+		a.Kind == TypeNil {
 		return true
 	}
 
-	if a.Kind == TypeDistinct && b.Kind == TypeDistinct && c.sameType(a, b) {
+	if a.Kind == TypeDistinct &&
+		b.Kind == TypeDistinct &&
+		c.sameType(a, b) {
 		return true
 	}
 
@@ -8224,119 +8344,362 @@ func (c *Checker) checkTaskTypeCallArguments(taskType *Type, argTypes []*Type, a
 	}
 }
 
-func (c *Checker) checkGenericIntrinsicCall(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, args []ast.Expr, span source.Span) *Type {
+func (c *Checker) isCharCastIntegerType(
+	t *Type,
+) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.Kind {
+	case TypeUntypedInt,
+		TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
+		TypeChar:
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (c *Checker) checkStringLikeConstructorCast(
+	name string,
+	targetType *Type,
+	args []ast.Expr,
+	argTypes []*Type,
+	span source.Span,
+) *Type {
+	if len(argTypes) != 2 {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"cast<%s> expects exactly 2 arguments: rawptr and uint byte length; got %d",
+				name,
+				len(argTypes),
+			),
+		)
+		return targetType
+	}
+
+	c.checkAssignable(
+		RawptrType,
+		argTypes[0],
+		args[0].Span(),
+	)
+
+	c.checkAssignable(
+		UintType,
+		argTypes[1],
+		args[1].Span(),
+	)
+
+	return targetType
+}
+
+func (c *Checker) checkCastIntrinsicCall(
+	scope *Scope,
+	targetType *Type,
+	args []ast.Expr,
+	argTypes []*Type,
+	span source.Span,
+) *Type {
+	switch targetType.Kind {
+	case TypeString:
+		return c.checkStringLikeConstructorCast(
+			"string",
+			StringType,
+			args,
+			argTypes,
+			span,
+		)
+
+	case TypeCstring:
+		return c.checkStringLikeConstructorCast(
+			"cstring",
+			CstringType,
+			args,
+			argTypes,
+			span,
+		)
+	}
+
+	if len(argTypes) != 1 {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"cast<%s> expects exactly 1 value argument, got %d",
+				targetType.String(),
+				len(argTypes),
+			),
+		)
+		return targetType
+	}
+
+	sourceType := argTypes[0]
+	if sourceType == nil ||
+		sourceType.Kind == TypeInvalid {
+		return targetType
+	}
+
+	// Strings expose only their UTF-8 data pointer.
+	if sourceType.Kind == TypeString {
+		if targetType.Kind == TypeRawptr {
+			return RawptrType
+		}
+
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"string may only be cast to rawptr, not %s",
+				targetType.String(),
+			),
+		)
+		return targetType
+	}
+
+	// Cstrings expose only their underlying C byte pointer.
+	if sourceType.Kind == TypeCstring {
+		if targetType.Kind == TypeRawptr {
+			return RawptrType
+		}
+
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"cstring may only be cast to rawptr, not %s",
+				targetType.String(),
+			),
+		)
+		return targetType
+	}
+
+	// A char is a Unicode scalar. It may only be converted to or from an
+	// integer representation.
+	if sourceType.Kind == TypeChar {
+		if c.isCharCastIntegerType(targetType) {
+			return targetType
+		}
+
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"char may only be cast to an integer type, not %s",
+				targetType.String(),
+			),
+		)
+		return targetType
+	}
+
+	if targetType.Kind == TypeChar {
+		if c.isCharCastIntegerType(sourceType) {
+			return CharType
+		}
+
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"char can only be constructed from an integer type, got %s",
+				sourceType.String(),
+			),
+		)
+		return CharType
+	}
+
+	if sourceType.Kind == TypeNil &&
+		targetType.Kind != TypeInterface {
+		if targetType.Kind != TypeInvalid &&
+			!c.typeAcceptsNil(targetType) {
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"cannot cast nil to %s",
+					targetType.String(),
+				),
+			)
+		}
+
+		return targetType
+	}
+
+	if targetType.Kind != TypeInterface {
+		return targetType
+	}
+
+	if sourceType.Kind != TypePointer {
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"interface cast to %s requires a pointer to an implementing value, got %s",
+				targetType.String(),
+				sourceType.String(),
+			),
+		)
+		return targetType
+	}
+
+	concreteType := sourceType.Elem
+
+	resolution := c.resolveImplAt(
+		targetType,
+		concreteType,
+		args[0].Span(),
+		nil,
+		true,
+	)
+
+	switch resolution.Kind {
+	case ImplResolutionAmbiguous:
+		// resolveImplAt already emitted the ambiguity diagnostic.
+
+	case ImplResolutionNotFound:
+		c.diags.Add(
+			args[0].Span(),
+			fmt.Sprintf(
+				"cannot cast %s to %s: no matching implementation",
+				sourceType.String(),
+				targetType.String(),
+			),
+		)
+
+	case ImplResolutionFound:
+		// Cast is valid.
+	}
+
+	return targetType
+}
+
+func (c *Checker) checkGenericIntrinsicCall(
+	scope *Scope,
+	gen *ast.GenericExpr,
+	argTypes []*Type,
+	args []ast.Expr,
+	span source.Span,
+) *Type {
 	id, ok := gen.Base.(*ast.IdentExpr)
 	if !ok {
-		c.diags.Add(gen.Base.Span(), "only intrinsic generic calls are supported here")
+		c.diags.Add(
+			gen.Base.Span(),
+			"only intrinsic generic calls are supported here",
+		)
 		return InvalidType
 	}
 
 	name := id.Name.Name
 
 	if c.isShadowedPrimitive(scope, name) {
-		c.diags.Add(id.Span(), fmt.Sprintf("%q is not an intrinsic generic task in this scope", name))
+		c.diags.Add(
+			id.Span(),
+			fmt.Sprintf(
+				"%q is not an intrinsic generic task in this scope",
+				name,
+			),
+		)
 		return InvalidType
 	}
 
 	task, ok := builtin.LookupTask(name)
 	if !ok || !task.Generic {
-		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
+		c.diags.Add(
+			id.Span(),
+			fmt.Sprintf(
+				"unknown generic intrinsic %q",
+				name,
+			),
+		)
 		return InvalidType
 	}
 
 	if len(gen.Args) != 1 {
-		c.diags.Add(gen.Span(), fmt.Sprintf("%s expects exactly 1 type argument", name))
+		c.diags.Add(
+			gen.Span(),
+			fmt.Sprintf(
+				"%s expects exactly 1 type argument",
+				name,
+			),
+		)
 		return InvalidType
 	}
 
-	if len(argTypes) != 1 {
-		c.diags.Add(span, fmt.Sprintf("%s expects exactly 1 value argument, got %d", name, len(argTypes)))
-		return InvalidType
-	}
-
-	targetType := c.typeFromGenericArg(scope, gen.Args[0])
+	targetType := c.typeFromGenericArg(
+		scope,
+		gen.Args[0],
+	)
 
 	switch task.Kind {
 	case builtin.TaskAnyAs:
-		if !c.sameType(argTypes[0], AnyType) {
-			c.diags.Add(args[0].Span(), fmt.Sprintf("anyAs expects any, got %s", argTypes[0].String()))
+		if len(argTypes) != 1 {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"anyAs expects exactly 1 value argument, got %d",
+					len(argTypes),
+				),
+			)
+			return targetType
 		}
+
+		if !c.sameType(argTypes[0], AnyType) {
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"anyAs expects any, got %s",
+					argTypes[0].String(),
+				),
+			)
+		}
+
 		return targetType
 
 	case builtin.TaskAnyIs:
-		if !c.sameType(argTypes[0], AnyType) {
-			c.diags.Add(args[0].Span(), fmt.Sprintf("anyIs expects any, got %s", argTypes[0].String()))
+		if len(argTypes) != 1 {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"anyIs expects exactly 1 value argument, got %d",
+					len(argTypes),
+				),
+			)
+			return BoolType
 		}
+
+		if !c.sameType(argTypes[0], AnyType) {
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"anyIs expects any, got %s",
+					argTypes[0].String(),
+				),
+			)
+		}
+
 		return BoolType
 
 	case builtin.TaskCast:
-		sourceType := argTypes[0]
-
-		if sourceType != nil &&
-			sourceType.Kind == TypeNil &&
-			targetType.Kind != TypeInterface {
-			if targetType.Kind != TypeInvalid &&
-				!c.typeAcceptsNil(targetType) {
-				c.diags.Add(
-					args[0].Span(),
-					fmt.Sprintf(
-						"cannot cast nil to %s",
-						targetType.String(),
-					),
-				)
-			}
-
-			return targetType
-		}
-
-		if targetType.Kind != TypeInterface {
-			return targetType
-		}
-
-		if sourceType == nil || sourceType.Kind != TypePointer {
-			c.diags.Add(
-				args[0].Span(),
-				fmt.Sprintf(
-					"interface cast to %s requires a pointer to an implementing value, got %s",
-					targetType.String(),
-					sourceType.String(),
-				),
-			)
-			return targetType
-		}
-
-		concreteType := sourceType.Elem
-
-		resolution := c.resolveImplAt(
+		return c.checkCastIntrinsicCall(
+			scope,
 			targetType,
-			concreteType,
-			args[0].Span(),
-			nil,
-			true,
+			args,
+			argTypes,
+			span,
 		)
 
-		switch resolution.Kind {
-		case ImplResolutionAmbiguous:
-			// resolveImplAt already emitted the ambiguity diagnostic.
-
-		case ImplResolutionNotFound:
-			c.diags.Add(
-				args[0].Span(),
-				fmt.Sprintf(
-					"cannot cast %s to %s: no matching implementation",
-					sourceType.String(),
-					targetType.String(),
-				),
-			)
-
-		case ImplResolutionFound:
-			// Cast is valid.
-		}
-
-		return targetType
-
 	default:
-		c.diags.Add(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", name))
+		c.diags.Add(
+			id.Span(),
+			fmt.Sprintf(
+				"unknown generic intrinsic %q",
+				name,
+			),
+		)
 		return InvalidType
 	}
 }
@@ -8391,11 +8754,23 @@ func (c *Checker) checkLenCall(
 		return UintType
 	}
 
-	if receiverType.Kind == TypeVariadic {
+	switch receiverType.Kind {
+	case TypeString:
+		c.lenResolutions[call] = LenResolution{
+			Kind: LenResolutionString,
+		}
+		return UintType
+
+	case TypeCstring:
+		c.lenResolutions[call] = LenResolution{
+			Kind: LenResolutionCstring,
+		}
+		return UintType
+
+	case TypeVariadic:
 		c.lenResolutions[call] = LenResolution{
 			Kind: LenResolutionVariadic,
 		}
-
 		return UintType
 	}
 
@@ -8504,34 +8879,56 @@ func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []so
 	return c.checkTaskTypeCall(result.Candidate.Type, argTypes, argSpans, span)
 }
 
-func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
+func (c *Checker) checkSelectorExpr(
+	scope *Scope,
+	e *ast.SelectorExpr,
+) *Type {
 	if id, ok := e.Left.(*ast.IdentExpr); ok {
 		sym := scope.Lookup(id.Name.Name)
-		if sym != nil && sym.Kind == SymbolPackage {
-			return c.checkPackageSelectorExpr(sym, e)
+		if sym != nil &&
+			sym.Kind == SymbolPackage {
+			return c.checkPackageSelectorExpr(
+				sym,
+				e,
+			)
 		}
 	}
 
-	leftType := c.checkExpr(scope, e.Left)
+	leftType := c.checkExpr(
+		scope,
+		e.Left,
+	)
 
-	if leftType.Kind == TypeString {
+	switch leftType.Kind {
+	case TypeString:
 		c.diags.Add(
 			e.Name.Span(),
 			fmt.Sprintf(
-				"string has no field %q; use size(s) for its byte size or define a [] overload for indexing",
+				"string has no accessible field %q",
+				e.Name.Name,
+			),
+		)
+		return InvalidType
+
+	case TypeCstring:
+		c.diags.Add(
+			e.Name.Span(),
+			fmt.Sprintf(
+				"cstring has no accessible field %q",
 				e.Name.Name,
 			),
 		)
 		return InvalidType
 	}
 
-	if leftType.Kind == TypeCstring {
-		c.diags.Add(e.Name.Span(), fmt.Sprintf("cstring has no field %q", e.Name.Name))
-		return InvalidType
-	}
-
 	if leftType.Kind == TypeInterface {
-		c.diags.Add(e.Span(), fmt.Sprintf("interface method syntax is invalid; use %s(value, ...) instead", e.Name.Name))
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"interface method syntax is invalid; use %s(value, ...) instead",
+				e.Name.Name,
+			),
+		)
 		return InvalidType
 	}
 
@@ -8539,8 +8936,16 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 		leftType = leftType.Elem
 	}
 
-	if leftType.Kind != TypeStruct && leftType.Kind != TypeTypeParam {
-		c.diags.Add(e.Span(), fmt.Sprintf("cannot access field %q on non-struct type %s", e.Name.Name, leftType.String()))
+	if leftType.Kind != TypeStruct &&
+		leftType.Kind != TypeTypeParam {
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"cannot access field %q on non-struct type %s",
+				e.Name.Name,
+				leftType.String(),
+			),
+		)
 		return InvalidType
 	}
 
@@ -8550,7 +8955,15 @@ func (c *Checker) checkSelectorExpr(scope *Scope, e *ast.SelectorExpr) *Type {
 		}
 	}
 
-	c.diags.Add(e.Name.Span(), fmt.Sprintf("type %s has no field %q", leftType.String(), e.Name.Name))
+	c.diags.Add(
+		e.Name.Span(),
+		fmt.Sprintf(
+			"type %s has no field %q",
+			leftType.String(),
+			e.Name.Name,
+		),
+	)
+
 	return InvalidType
 }
 
@@ -8580,6 +8993,18 @@ func (c *Checker) checkIndexExpr(
 	case TypeInvalid:
 		return InvalidType
 
+	case TypeString:
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionStringRead,
+		}
+		return CharType
+
+	case TypeCstring:
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionCstringRead,
+		}
+		return CharType
+
 	case TypeVariadic:
 		if receiverType.Elem == nil {
 			return InvalidType
@@ -8588,21 +9013,12 @@ func (c *Checker) checkIndexExpr(
 		c.indexResolutions[e] = IndexResolution{
 			Kind: IndexResolutionVariadicRead,
 		}
-
 		return receiverType.Elem
 
 	case TypeRawptr:
 		c.indexResolutions[e] = IndexResolution{
 			Kind: IndexResolutionRawptrRead,
 		}
-
-		return U8Type
-
-	case TypeCstring:
-		c.indexResolutions[e] = IndexResolution{
-			Kind: IndexResolutionCstringRead,
-		}
-
 		return U8Type
 	}
 
@@ -8610,12 +9026,11 @@ func (c *Checker) checkIndexExpr(
 		c.indexResolutions[e] = IndexResolution{
 			Kind: IndexResolutionPrimitiveByteRead,
 		}
-
 		return U8Type
 	}
 
 	switch receiverType.Kind {
-	case TypeStruct, TypeString:
+	case TypeStruct:
 		if !c.isAddressableExpr(
 			scope,
 			e.Left,
@@ -10822,58 +11237,139 @@ func genericConstSelectField(value genericConstValue, name string) (genericConst
 	return field, ok
 }
 
-func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[string]genericConstValue) (genericConstValue, bool) {
+func (c *Checker) evalGenericConstCall(
+	scope *Scope,
+	e *ast.CallExpr,
+	env map[string]genericConstValue,
+) (genericConstValue, bool) {
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		if id, ok := gen.Base.(*ast.IdentExpr); ok && id.Name.Name == "cast" && len(e.Args) == 1 {
-			return c.evalGenericConstExprWithEnv(scope, e.Args[0], env)
+		if id, ok := gen.Base.(*ast.IdentExpr); ok &&
+			id.Name.Name == "cast" &&
+			len(e.Args) == 1 {
+			return c.evalGenericConstExprWithEnv(
+				scope,
+				e.Args[0],
+				env,
+			)
 		}
 
 		return genericConstValue{}, false
 	}
 
-	if id, ok := e.Callee.(*ast.IdentExpr); ok && id.Name.Name == "size" && len(e.Args) == 1 {
-		value, ok := c.evalGenericConstExprWithEnv(scope, e.Args[0], env)
-		if !ok || value.Kind != genericConstString {
-			return genericConstValue{}, false
-		}
+	if id, ok := e.Callee.(*ast.IdentExpr); ok &&
+		len(e.Args) == 1 {
+		switch id.Name.Name {
+		case "size":
+			value, ok := c.evalGenericConstExprWithEnv(
+				scope,
+				e.Args[0],
+				env,
+			)
+			if !ok ||
+				value.Kind != genericConstString {
+				return genericConstValue{}, false
+			}
 
-		return genericConstValue{Kind: genericConstInt, Type: UintType, IntValue: int64(len(value.StringValue))}, true
+			return genericConstValue{
+				Kind:     genericConstInt,
+				Type:     UintType,
+				IntValue: int64(len(value.StringValue)),
+			}, true
+
+		case "len":
+			value, ok := c.evalGenericConstExprWithEnv(
+				scope,
+				e.Args[0],
+				env,
+			)
+			if !ok ||
+				value.Kind != genericConstString {
+				return genericConstValue{}, false
+			}
+
+			return genericConstValue{
+				Kind: genericConstInt,
+				Type: UintType,
+				IntValue: int64(
+					utf8.RuneCountInString(
+						value.StringValue,
+					),
+				),
+			}, true
+		}
 	}
 
-	sym, evalScope, evalName := c.taskSymbolAndScopeFromConstCallCallee(scope, e.Callee)
+	sym, evalScope, evalName :=
+		c.taskSymbolAndScopeFromConstCallCallee(
+			scope,
+			e.Callee,
+		)
+
 	if sym == nil {
 		return genericConstValue{}, false
 	}
 
-	c.ensureTaskSymbolPrepared(evalScope, sym)
+	c.ensureTaskSymbolPrepared(
+		evalScope,
+		sym,
+	)
 
-	if sym.Type == nil || sym.Type.Kind != TypeTask {
+	if sym.Type == nil ||
+		sym.Type.Kind != TypeTask {
 		return genericConstValue{}, false
 	}
 
-	if !sym.Type.IsPure && !sym.Type.IsTrustedPure {
-		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q must be pure", sym.Name))
+	if !sym.Type.IsPure &&
+		!sym.Type.IsTrustedPure {
+		c.diags.Add(
+			e.Callee.Span(),
+			fmt.Sprintf(
+				"generic constraint call %q must be pure",
+				sym.Name,
+			),
+		)
 		return genericConstValue{}, false
 	}
 
 	if len(sym.Type.Results) != 1 {
-		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q must return exactly 1 value", sym.Name))
+		c.diags.Add(
+			e.Callee.Span(),
+			fmt.Sprintf(
+				"generic constraint call %q must return exactly 1 value",
+				sym.Name,
+			),
+		)
 		return genericConstValue{}, false
 	}
 
 	var argValues []genericConstValue
+
 	for _, arg := range e.Args {
-		value, ok := c.evalGenericConstExprWithEnv(scope, arg, env)
+		value, ok := c.evalGenericConstExprWithEnv(
+			scope,
+			arg,
+			env,
+		)
 		if !ok {
 			return genericConstValue{}, false
 		}
 
-		argValues = append(argValues, value)
+		argValues = append(
+			argValues,
+			value,
+		)
 	}
 
 	taskDecl, ok := sym.Node.(*ast.TaskDecl)
-	if !ok || taskDecl.Body == nil {
-		c.diags.Add(e.Callee.Span(), fmt.Sprintf("generic constraint call %q cannot be evaluated because its body is unavailable", sym.Name))
+	if !ok ||
+		taskDecl.Body == nil {
+		c.diags.Add(
+			e.Callee.Span(),
+			fmt.Sprintf(
+				"generic constraint call %q cannot be evaluated because its body is unavailable",
+				sym.Name,
+			),
+		)
 		return genericConstValue{}, false
 	}
 
@@ -10881,8 +11377,17 @@ func (c *Checker) evalGenericConstCall(scope *Scope, e *ast.CallExpr, env map[st
 		evalName = sym.Name
 	}
 
-	value, ok := c.evalPureTaskConstBody(evalScope, evalName, e.Callee.Span(), taskDecl, argValues)
-	if ok && sym.Type != nil && len(sym.Type.Results) == 1 {
+	value, ok := c.evalPureTaskConstBody(
+		evalScope,
+		evalName,
+		e.Callee.Span(),
+		taskDecl,
+		argValues,
+	)
+
+	if ok &&
+		sym.Type != nil &&
+		len(sym.Type.Results) == 1 {
 		value.Type = sym.Type.Results[0]
 	}
 
