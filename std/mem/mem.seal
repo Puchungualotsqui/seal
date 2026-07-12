@@ -2,24 +2,55 @@ c :: @c_import {
     include "stdlib.h"
 }
 
-_Malloc :: extern("malloc") task(size uint) rawptr
+_Malloc :: extern("malloc") task(
+    size uint,
+) rawptr
 
 _Calloc :: extern("calloc") task(
     count uint,
     size uint,
 ) rawptr
 
-_Free :: extern("free") task(ptr rawptr)
+_Free :: extern("free") task(
+    ptr rawptr,
+)
 
 Allocator :: interface {
-    Alloc :: task(self *self, size uint) rawptr
+    Alloc :: task(
+        self *self,
+        size uint,
+    ) rawptr
+}
+
+ZeroAllocator :: interface {
+    AllocZeroed :: task(
+        self *self,
+        count uint,
+        size uint,
+    ) rawptr
 }
 
 Deallocator :: interface {
-    Free :: task(self *self, ptr rawptr)
+    Free :: task(
+        self *self,
+        ptr rawptr,
+    )
+}
+
+ResetAllocator :: interface {
+    Reset :: task(
+        self *self,
+    )
 }
 
 CAllocator :: struct {
+    _unused u8
+}
+
+NewCAllocator :: task() CAllocator {
+    return CAllocator{
+        _unused = 0,
+    }
 }
 
 Allocator :: impl CAllocator {
@@ -28,6 +59,16 @@ Allocator :: impl CAllocator {
         size uint,
     ) rawptr {
         return _Malloc(size)
+    }
+}
+
+ZeroAllocator :: impl CAllocator {
+    AllocZeroed :: task(
+        self *CAllocator,
+        count uint,
+        size uint,
+    ) rawptr {
+        return _Calloc(count, size)
     }
 }
 
@@ -40,11 +81,84 @@ Deallocator :: impl CAllocator {
     }
 }
 
+AllocWith :: task(
+    allocator Allocator,
+    size uint,
+) rawptr {
+    return Alloc(
+        allocator,
+        size,
+    )
+}
+
 AllocTypeWith :: task <T type>(
     allocator Allocator,
 ) *T {
-    return cast<*T>(
-        Alloc(allocator, size(T)),
+    ptr := Alloc(
+        allocator,
+        size(T),
+    )
+
+    return cast<*T>(ptr)
+}
+
+AllocZeroedWith :: task(
+    allocator ZeroAllocator,
+    count uint,
+    elementSize uint,
+) rawptr {
+    return AllocZeroed(
+        allocator,
+        count,
+        elementSize,
+    )
+}
+
+NewWith :: task <T type>(
+    allocator ZeroAllocator,
+) *T {
+    ptr := AllocZeroed(
+        allocator,
+        1,
+        size(T),
+    )
+
+    return cast<*T>(ptr)
+}
+
+FreeWith :: task(
+    deallocator Deallocator,
+    ptr rawptr,
+) {
+    Free(
+        deallocator,
+        ptr,
+    )
+}
+
+FreeTypeWith :: task <T type>(
+    deallocator Deallocator,
+    ptr *T,
+) {
+    Free(
+        deallocator,
+        cast<rawptr>(ptr),
+    )
+}
+
+AllocC :: task(
+    size uint,
+) rawptr {
+    return _Malloc(size)
+}
+
+CallocC :: task(
+    count uint,
+    size uint,
+) rawptr {
+    return _Calloc(
+        count,
+        size,
     )
 }
 
@@ -56,6 +170,23 @@ AllocTypeC :: task <T type>() *T {
 
 NewC :: task <T type>() *T {
     return cast<*T>(
-        _Calloc(1, size(T)),
+        _Calloc(
+            1,
+            size(T),
+        ),
+    )
+}
+
+FreeC :: task(
+    ptr rawptr,
+) {
+    _Free(ptr)
+}
+
+FreeTypeC :: task <T type>(
+    ptr *T,
+) {
+    _Free(
+        cast<rawptr>(ptr),
     )
 }

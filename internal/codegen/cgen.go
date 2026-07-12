@@ -923,11 +923,18 @@ func (g *Generator) semanticTaskSelection(
 				true
 		}
 
+		localizedInfo :=
+			g.taskInfoInPackageContext(
+				packageName,
+				taskName,
+				info,
+			)
+
 		return cImportedTaskName(
 			packageName,
 			taskName,
-			info,
-		), info, true
+			localizedInfo,
+		), localizedInfo, true
 	}
 
 	info, ok := g.tasks[taskName]
@@ -4965,10 +4972,16 @@ func (g *Generator) emitImportedResultStructs() {
 		return
 	}
 
-	names := make([]string, 0, len(g.packages))
+	names := make(
+		[]string,
+		0,
+		len(g.packages),
+	)
+
 	for name := range g.packages {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
 
 	emitted := false
@@ -4980,37 +4993,78 @@ func (g *Generator) emitImportedResultStructs() {
 			continue
 		}
 
-		taskNames := make([]string, 0, len(pkg.Tasks))
+		taskNames := make(
+			[]string,
+			0,
+			len(pkg.Tasks),
+		)
+
 		for taskName := range pkg.Tasks {
-			taskNames = append(taskNames, taskName)
+			taskNames = append(
+				taskNames,
+				taskName,
+			)
 		}
+
 		sort.Strings(taskNames)
 
 		for _, taskName := range taskNames {
-			info := pkg.Tasks[taskName]
+			rawInfo := pkg.Tasks[taskName]
+
+			// Generic result structures are emitted by
+			// emitImportedGenericResultStructs.
+			if len(rawInfo.GenericParams) != 0 {
+				continue
+			}
+
+			info := g.taskInfoInPackageContext(
+				pkgName,
+				taskName,
+				rawInfo,
+			)
+
 			if len(info.ReturnTypes) <= 1 {
 				continue
 			}
 
 			name := info.ReturnType.Name
+
 			if name == "" {
-				name = packageTaskResultStructName(pkgName, taskName)
+				name = packageTaskResultStructName(
+					pkgName,
+					taskName,
+				)
 			}
 
 			if seen[name] {
 				continue
 			}
+
 			seen[name] = true
 
-			g.linef("typedef struct %s {", name)
+			g.linef(
+				"typedef struct %s {",
+				name,
+			)
 			g.indent++
 
 			for i, resultType := range info.ReturnTypes {
-				g.linef("%s;", resultType.Decl(fmt.Sprintf("_%d", i)))
+				g.linef(
+					"%s;",
+					resultType.Decl(
+						fmt.Sprintf(
+							"_%d",
+							i,
+						),
+					),
+				)
 			}
 
 			g.indent--
-			g.linef("} %s;", name)
+			g.linef(
+				"} %s;",
+				name,
+			)
 			g.line("")
 
 			emitted = true
@@ -5187,31 +5241,139 @@ func (g *Generator) emitImportedTaskPrototypes() {
 	g.line("")
 }
 
-func (g *Generator) packageTaskSignature(packageName string, taskName string, info TaskInfo) string {
-	name := cImportedTaskName(packageName, taskName, info)
+func (g *Generator) packageTaskSignature(
+	packageName string,
+	taskName string,
+	info TaskInfo,
+) string {
+	info = g.taskInfoInPackageContext(
+		packageName,
+		taskName,
+		info,
+	)
+
+	name := cImportedTaskName(
+		packageName,
+		taskName,
+		info,
+	)
+
 	ret := info.ReturnType.Name
 
 	if len(info.ParamTypes) == 0 {
-		return fmt.Sprintf("%s %s(void)", ret, name)
+		return fmt.Sprintf(
+			"%s %s(void)",
+			ret,
+			name,
+		)
 	}
 
 	var params []string
 
 	for i, paramType := range info.ParamTypes {
-		if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+		if i < len(info.ParamIsVariadic) &&
+			info.ParamIsVariadic[i] {
 			if info.IsExtern {
 				params = append(params, "...")
 				break
 			}
 
-			params = append(params, g.variadicCType(paramType).Decl(fmt.Sprintf("arg%d", i)))
+			params = append(
+				params,
+				g.variadicCType(paramType).Decl(
+					fmt.Sprintf("arg%d", i),
+				),
+			)
 			break
 		}
 
-		params = append(params, paramType.Decl(fmt.Sprintf("arg%d", i)))
+		params = append(
+			params,
+			paramType.Decl(
+				fmt.Sprintf("arg%d", i),
+			),
+		)
 	}
 
-	return fmt.Sprintf("%s %s(%s)", ret, name, strings.Join(params, ", "))
+	return fmt.Sprintf(
+		"%s %s(%s)",
+		ret,
+		name,
+		strings.Join(params, ", "),
+	)
+}
+
+func (g *Generator) taskInfoInPackageContext(
+	packageName string,
+	taskName string,
+	info TaskInfo,
+) TaskInfo {
+	if packageName == "" ||
+		packageName == g.packageName {
+		return info
+	}
+
+	out := info
+
+	// TaskInfo stores CTypes as seen by the package that declared the task.
+	// Rebuild them from the source AST so local package types such as
+	// CAllocator become mem_CAllocator in the importing translation unit.
+	if len(info.ParamTypeAsts) > 0 {
+		out.ParamTypes = make(
+			[]CType,
+			0,
+			len(info.ParamTypeAsts),
+		)
+
+		for _, paramType := range info.ParamTypeAsts {
+			out.ParamTypes = append(
+				out.ParamTypes,
+				g.cTypeFromAstInTypeContext(
+					packageName,
+					paramType,
+				),
+			)
+		}
+	}
+
+	if len(info.ResultTypeAsts) > 0 {
+		out.ReturnTypes = make(
+			[]CType,
+			0,
+			len(info.ResultTypeAsts),
+		)
+
+		for _, resultType := range info.ResultTypeAsts {
+			out.ReturnTypes = append(
+				out.ReturnTypes,
+				g.cTypeFromAstInTypeContext(
+					packageName,
+					resultType,
+				),
+			)
+		}
+
+		switch len(out.ReturnTypes) {
+		case 1:
+			out.ReturnType = out.ReturnTypes[0]
+
+		default:
+			name := packageTaskResultStructName(
+				packageName,
+				taskName,
+			)
+
+			out.ReturnType = CType{
+				Name:     name,
+				SealName: name,
+			}
+		}
+	} else if len(info.ReturnTypes) == 0 {
+		out.ReturnType = CVoid
+		out.ReturnTypes = nil
+	}
+
+	return out
 }
 
 func (g *Generator) emitTaskPrototypes(file *ast.File) {
@@ -7153,6 +7315,12 @@ func (g *Generator) implAliasTaskInfo(
 				return "", TaskInfo{}, false
 			}
 
+			info = g.taskInfoInPackageContext(
+				packageName,
+				e.Name.Name,
+				info,
+			)
+
 			return cImportedTaskName(
 				packageName,
 				e.Name.Name,
@@ -7182,6 +7350,12 @@ func (g *Generator) implAliasTaskInfo(
 		if !ok {
 			return "", TaskInfo{}, false
 		}
+
+		info = g.taskInfoInPackageContext(
+			id.Name.Name,
+			e.Name.Name,
+			info,
+		)
 
 		return cImportedTaskName(
 			id.Name.Name,
@@ -7813,6 +7987,12 @@ func (g *Generator) taskInfoFromGenericArg(
 		if !ok {
 			return TaskInfo{}, false
 		}
+
+		info = g.taskInfoInPackageContext(
+			id.Name.Name,
+			e.Name.Name,
+			info,
+		)
 
 		return info, true
 
@@ -9252,6 +9432,12 @@ func (g *Generator) importedTaskInfoFromTypeContext(
 		return "", TaskInfo{}, false
 	}
 
+	info = g.taskInfoInPackageContext(
+		packageName,
+		name,
+		info,
+	)
+
 	return packageName, info, true
 }
 
@@ -9967,55 +10153,134 @@ func (g *Generator) emitUnions(file *ast.File) {
 	}
 }
 
-func (g *Generator) emitPackageTaskCall(packageName string, taskName string, args []ast.Expr, preparedArgs []string) string {
+func (g *Generator) emitPackageTaskCall(
+	packageName string,
+	taskName string,
+	args []ast.Expr,
+	preparedArgs []string,
+) string {
 	pkg := g.packages[packageName]
 	if pkg == nil {
-		g.error(argsSpan(args), fmt.Sprintf("unknown package %q", packageName))
+		g.error(
+			argsSpan(args),
+			fmt.Sprintf(
+				"unknown package %q",
+				packageName,
+			),
+		)
 		return "0"
 	}
 
 	info, hasTask := pkg.Tasks[taskName]
 	if !hasTask {
-		g.error(argsSpan(args), fmt.Sprintf("package %s has no task %q", packageName, taskName))
+		g.error(
+			argsSpan(args),
+			fmt.Sprintf(
+				"package %s has no task %q",
+				packageName,
+				taskName,
+			),
+		)
 		return "0"
 	}
 
-	name := cImportedTaskName(packageName, taskName, info)
+	info = g.taskInfoInPackageContext(
+		packageName,
+		taskName,
+		info,
+	)
+
+	name := cImportedTaskName(
+		packageName,
+		taskName,
+		info,
+	)
 
 	if info.IsVariadic && !info.IsExtern {
-		return g.emitSealVariadicTaskCall(name, info, args, preparedArgs)
+		return g.emitSealVariadicTaskCall(
+			name,
+			info,
+			args,
+			preparedArgs,
+		)
 	}
 
 	var outArgs []string
 
 	for i, arg := range args {
-		if preparedArgs != nil && i < len(preparedArgs) {
-			outArgs = append(outArgs, preparedArgs[i])
+		if preparedArgs != nil &&
+			i < len(preparedArgs) {
+			outArgs = append(
+				outArgs,
+				preparedArgs[i],
+			)
 			continue
 		}
 
 		expected := (*CType)(nil)
+
 		if i < len(info.ParamTypes) {
-			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+			if i < len(info.ParamIsVariadic) &&
+				info.ParamIsVariadic[i] {
 				expected = nil
 			} else {
 				expected = &info.ParamTypes[i]
 			}
 		}
 
-		outArgs = append(outArgs, g.emitExpr(arg, expected))
+		outArgs = append(
+			outArgs,
+			g.emitExpr(arg, expected),
+		)
 	}
 
 	if !info.IsVariadic {
 		for i := len(args); i < len(info.ParamTypes); i++ {
-			if i < len(info.ParamHasDefault) && info.ParamHasDefault[i] {
-				expected := info.ParamTypes[i]
-				outArgs = append(outArgs, g.emitExpr(info.ParamDefaults[i], &expected))
+			if i >= len(info.ParamHasDefault) ||
+				!info.ParamHasDefault[i] {
+				continue
 			}
+
+			if i >= len(info.ParamDefaults) ||
+				info.ParamDefaults[i] == nil {
+				g.error(
+					argsSpan(args),
+					fmt.Sprintf(
+						"imported task %s.%s is missing default argument %d",
+						packageName,
+						taskName,
+						i+1,
+					),
+				)
+				continue
+			}
+
+			expected := info.ParamTypes[i]
+			value := ""
+
+			// The default expression belongs to the declaring package.
+			g.withTypeContext(
+				packageName,
+				func() {
+					value = g.emitExpr(
+						info.ParamDefaults[i],
+						&expected,
+					)
+				},
+			)
+
+			outArgs = append(
+				outArgs,
+				value,
+			)
 		}
 	}
 
-	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+	return fmt.Sprintf(
+		"%s(%s)",
+		name,
+		strings.Join(outArgs, ", "),
+	)
 }
 
 func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
@@ -10504,11 +10769,23 @@ func (g *Generator) callReturnTypes(
 		call.Callee.(*ast.SelectorExpr); ok {
 		if id, ok :=
 			selector.Left.(*ast.IdentExpr); ok {
+			packageName := id.Name.Name
+
 			if pkg :=
-				g.packages[id.Name.Name]; pkg != nil {
+				g.packages[packageName]; pkg != nil {
 				if info, ok :=
 					pkg.Tasks[selector.Name.Name]; ok {
-					return info.ReturnTypes
+					info =
+						g.taskInfoInPackageContext(
+							packageName,
+							selector.Name.Name,
+							info,
+						)
+
+					return append(
+						[]CType(nil),
+						info.ReturnTypes...,
+					)
 				}
 			}
 		}
@@ -10806,10 +11083,19 @@ func (g *Generator) inferCallExprType(
 		e.Callee.(*ast.SelectorExpr); ok {
 		if id, ok :=
 			selector.Left.(*ast.IdentExpr); ok {
+			packageName := id.Name.Name
+
 			if pkg :=
-				g.packages[id.Name.Name]; pkg != nil {
+				g.packages[packageName]; pkg != nil {
 				if info, ok :=
 					pkg.Tasks[selector.Name.Name]; ok {
+					info =
+						g.taskInfoInPackageContext(
+							packageName,
+							selector.Name.Name,
+							info,
+						)
+
 					return info.ReturnType
 				}
 			}
@@ -11015,10 +11301,19 @@ func (g *Generator) inferExprType(
 	case *ast.SelectorExpr:
 		if id, ok :=
 			e.Left.(*ast.IdentExpr); ok {
+			packageName := id.Name.Name
+
 			if pkg :=
-				g.packages[id.Name.Name]; pkg != nil {
+				g.packages[packageName]; pkg != nil {
 				if info, ok :=
 					pkg.Tasks[e.Name.Name]; ok {
+					info =
+						g.taskInfoInPackageContext(
+							packageName,
+							e.Name.Name,
+							info,
+						)
+
 					return info.ReturnType
 				}
 			}

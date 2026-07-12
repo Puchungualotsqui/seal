@@ -3,14 +3,141 @@ Point :: struct {
     Y int
 }
 
-Main :: task() {
+TestDirectAllocation :: task() {
     point := mem.NewC<Point>()
+
+    if point == nil {
+        panic(c"direct allocation failed")
+    }
+
+    assert(point.X == 0)
+    assert(point.Y == 0)
+
     point.X = 10
     point.Y = 20
 
+    assert(point.X == 10)
+    assert(point.Y == 20)
+
+    mem.FreeTypeC<Point>(point)
+}
+
+TestAllocatorInterface :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    point := mem.AllocTypeWith<Point>(
+        allocator,
+    )
+
     if point == nil {
-        panic(c"allocation failed")
+        panic(c"allocator interface allocation failed")
     }
 
     point.X = 30
+    point.Y = 40
+
+    assert(point.X == 30)
+    assert(point.Y == 40)
+
+    mem.FreeTypeWith<Point>(
+        deallocator,
+        point,
+    )
+}
+
+TestZeroAllocatorInterface :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.ZeroAllocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    point := mem.NewWith<Point>(
+        allocator,
+    )
+
+    if point == nil {
+        panic(c"zero allocator interface allocation failed")
+    }
+
+    assert(point.X == 0)
+    assert(point.Y == 0)
+
+    point.X = 50
+    point.Y = 60
+
+    assert(point.X == 50)
+    assert(point.Y == 60)
+
+    mem.FreeTypeWith<Point>(
+        deallocator,
+        point,
+    )
+}
+
+TestRawAllocation :: task() {
+    ptr := mem.AllocC(16)
+
+    if ptr == nil {
+        panic(c"raw allocation failed")
+    }
+
+    ptr[0] = 10
+    ptr[15] = 20
+
+    assert(ptr[0] == 10)
+    assert(ptr[15] == 20)
+
+    mem.FreeC(ptr)
+}
+
+TestDefer :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    point := mem.AllocTypeWith<Point>(
+        allocator,
+    )
+
+    if point == nil {
+        panic(c"deferred allocation failed")
+    }
+
+    defer mem.FreeTypeWith<Point>(
+        deallocator,
+        point,
+    )
+
+    point.X = 70
+    point.Y = 80
+
+    assert(point.X == 70)
+    assert(point.Y == 80)
+}
+
+Main :: task() {
+    TestDirectAllocation()
+    TestAllocatorInterface()
+    TestZeroAllocatorInterface()
+    TestRawAllocation()
+    TestDefer()
 }
