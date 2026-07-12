@@ -7823,3 +7823,966 @@ Readable :: impl Box {
 		)
 	}
 }
+
+func checkerGenericExprFromCallStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.GenericExpr {
+	t.Helper()
+
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.ExprStmt",
+			stmt,
+		)
+	}
+
+	call, ok := exprStmt.Expr.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"expression type = %T, want *ast.CallExpr",
+			exprStmt.Expr,
+		)
+	}
+
+	generic, ok := call.Callee.(*ast.GenericExpr)
+	if !ok {
+		t.Fatalf(
+			"call callee type = %T, want *ast.GenericExpr",
+			call.Callee,
+		)
+	}
+
+	return generic
+}
+
+func checkerGenericExprFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.GenericExpr {
+	t.Helper()
+
+	call := checkerCallFromVarStmt(
+		t,
+		stmt,
+	)
+
+	generic, ok := call.Callee.(*ast.GenericExpr)
+	if !ok {
+		t.Fatalf(
+			"call callee type = %T, want *ast.GenericExpr",
+			call.Callee,
+		)
+	}
+
+	return generic
+}
+
+func assertGenericOverloadResolution(
+	t *testing.T,
+	c *Checker,
+	expr *ast.GenericExpr,
+	wantCandidate string,
+	wantPackage string,
+) GenericOverloadCallResolution {
+	t.Helper()
+
+	if c == nil {
+		t.Fatal("checker is nil")
+	}
+
+	resolution, ok := c.genericOverloadCalls[expr]
+	if !ok {
+		t.Fatal(
+			"generic overload call has no checker resolution",
+		)
+	}
+
+	if resolution.Candidate == nil {
+		t.Fatal(
+			"generic overload resolution has no candidate",
+		)
+	}
+
+	if resolution.Candidate.Name != wantCandidate {
+		t.Fatalf(
+			"generic overload candidate = %q, want %q",
+			resolution.Candidate.Name,
+			wantCandidate,
+		)
+	}
+
+	if resolution.PackageName != wantPackage {
+		t.Fatalf(
+			"generic overload package = %q, want %q",
+			resolution.PackageName,
+			wantPackage,
+		)
+	}
+
+	if resolution.TaskType == nil ||
+		resolution.TaskType.Kind != TypeTask {
+		t.Fatalf(
+			"generic overload specialized task type = %#v",
+			resolution.TaskType,
+		)
+	}
+
+	return resolution
+}
+
+func TestGenericOverloadDistinguishesGenericCategories(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+Noop :: task() {
+}
+
+FooType :: task <T type>() int {
+    return 1
+}
+
+FooInt :: task <N int>() int {
+    return 2
+}
+
+FooBool :: task <Flag bool>() int {
+    return 3
+}
+
+FooString :: task <Name string>() int {
+    return 4
+}
+
+FooTask :: task <F task[() ]>() int {
+    return 5
+}
+
+Foo :: overload {
+    FooType
+    FooInt
+    FooBool
+    FooString
+    FooTask
+}
+
+Main :: task() {
+    byType := Foo<int>()
+    byInt := Foo<16>()
+    byBool := Foo<true>()
+    byString := Foo<"seal">()
+    byTask := Foo<Noop>()
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	tests := []struct {
+		index         int
+		wantCandidate string
+		wantTaskName  string
+		wantCategory  ast.GenericParamCategory
+	}{
+		{
+			index:         0,
+			wantCandidate: "FooType",
+			wantTaskName:  "FooType<int>",
+			wantCategory:  ast.GenericParamType,
+		},
+		{
+			index:         1,
+			wantCandidate: "FooInt",
+			wantTaskName:  "FooInt<16>",
+			wantCategory:  ast.GenericParamInt,
+		},
+		{
+			index:         2,
+			wantCandidate: "FooBool",
+			wantTaskName:  "FooBool<true>",
+			wantCategory:  ast.GenericParamBool,
+		},
+		{
+			index:         3,
+			wantCandidate: "FooString",
+			wantTaskName:  `FooString<"seal">`,
+			wantCategory:  ast.GenericParamString,
+		},
+		{
+			index:         4,
+			wantCandidate: "FooTask",
+			wantTaskName:  "FooTask<Noop>",
+			wantCategory:  ast.GenericParamTask,
+		},
+	}
+
+	for _, test := range tests {
+		generic := checkerGenericExprFromVarStmt(
+			t,
+			checkerTaskStmt(
+				t,
+				run.File,
+				"Main",
+				test.index,
+			),
+		)
+
+		resolution := assertGenericOverloadResolution(
+			t,
+			run.Checker,
+			generic,
+			test.wantCandidate,
+			"",
+		)
+
+		if resolution.TaskType.Name != test.wantTaskName {
+			t.Fatalf(
+				"specialized task name = %q, want %q",
+				resolution.TaskType.Name,
+				test.wantTaskName,
+			)
+		}
+
+		if len(resolution.GenericArguments) != 1 {
+			t.Fatalf(
+				"generic argument count = %d, want 1",
+				len(resolution.GenericArguments),
+			)
+		}
+
+		if resolution.GenericArguments[0].Category !=
+			test.wantCategory {
+			t.Fatalf(
+				"generic argument category = %v, want %v",
+				resolution.GenericArguments[0].Category,
+				test.wantCategory,
+			)
+		}
+	}
+}
+
+func TestGenericOverloadDistinguishesTypeAndIntWithRuntimeArguments(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+ProcessType :: task <T type>(value T) int {
+    return 1
+}
+
+ProcessInt :: task <N int>(value int) int {
+    return 2
+}
+
+Process :: overload {
+    ProcessType
+    ProcessInt
+}
+
+Main :: task() {
+    byType := Process<int>(10)
+    byValue := Process<16>(10)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	typeExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			0,
+		),
+	)
+
+	typeResolution := assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		typeExpr,
+		"ProcessType",
+		"",
+	)
+
+	if typeResolution.TaskType.Name !=
+		"ProcessType<int>" {
+		t.Fatalf(
+			"type specialization = %q, want ProcessType<int>",
+			typeResolution.TaskType.Name,
+		)
+	}
+
+	if len(typeResolution.TaskType.Params) != 1 ||
+		!run.Checker.sameType(
+			typeResolution.TaskType.Params[0],
+			IntType,
+		) {
+		t.Fatalf(
+			"unexpected type-specialized parameters: %#v",
+			typeResolution.TaskType.Params,
+		)
+	}
+
+	valueExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	valueResolution := assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		valueExpr,
+		"ProcessInt",
+		"",
+	)
+
+	if valueResolution.TaskType.Name !=
+		"ProcessInt<16>" {
+		t.Fatalf(
+			"value specialization = %q, want ProcessInt<16>",
+			valueResolution.TaskType.Name,
+		)
+	}
+}
+
+func TestOverloadAllowsGenericAndOrdinaryCandidates(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+ProcessOrdinary :: task(value bool) int {
+    return 1
+}
+
+ProcessType :: task <T type>(value T) int {
+    return 2
+}
+
+ProcessInt :: task <N int>(value int) int {
+    return 3
+}
+
+Process :: overload {
+    ProcessType
+    ProcessInt
+    ProcessOrdinary
+}
+
+Main :: task() {
+    ordinary := Process(true)
+    byType := Process<int>(10)
+    byValue := Process<8>(10)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	typeExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		typeExpr,
+		"ProcessType",
+		"",
+	)
+
+	valueExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			2,
+		),
+	)
+
+	assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		valueExpr,
+		"ProcessInt",
+		"",
+	)
+}
+
+func TestOrdinaryOverloadCallSkipsGenericCandidates(
+	t *testing.T,
+) {
+	_, reporter := check(t, `
+Generic :: task <T type>(value T) int {
+    return 1
+}
+
+Ordinary :: task(value bool) int {
+    return 2
+}
+
+Process :: overload {
+    Generic
+    Ordinary
+}
+
+Main :: task() {
+    result := Process(true)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestOrdinaryOverloadCallCannotUseGenericCandidate(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Generic :: task <T type>(value T) int {
+    return 1
+}
+
+Process :: overload {
+    Generic
+}
+
+Main :: task() {
+    result := Process(10)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`no overload of "Process" matches argument types`,
+	)
+}
+
+func TestGenericOverloadCallSkipsOrdinaryCandidates(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Ordinary :: task(value int) int {
+    return value
+}
+
+Process :: overload {
+    Ordinary
+}
+
+Main :: task() {
+    result := Process<int>(10)
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`no generic overload of "Process" matches generic arguments <int>`,
+	)
+}
+
+func TestGenericOverloadUsesRuntimeParametersAfterCategorySelection(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+UseInt :: task <T type>(value int) int {
+    return value
+}
+
+UseString :: task <T type>(value string) string {
+    return value
+}
+
+Use :: overload {
+    UseInt
+    UseString
+}
+
+Main :: task() {
+    number := Use<bool>(10)
+    text := Use<bool>("hello")
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	numberExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			0,
+		),
+	)
+
+	assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		numberExpr,
+		"UseInt",
+		"",
+	)
+
+	textExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		textExpr,
+		"UseString",
+		"",
+	)
+}
+
+func TestRejectNoMatchingGenericOverloadRuntimeArguments(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+UseInt :: task <T type>(value int) int {
+    return value
+}
+
+Use :: overload {
+    UseInt
+}
+
+Main :: task() {
+    result := Use<bool>("wrong")
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`no generic overload of "Use" matches generic arguments <bool> and argument types (string)`,
+	)
+}
+
+func TestRejectDuplicateGenericOverloadSignatureIgnoringNames(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+First :: task <T type>(value T) int {
+    return 1
+}
+
+Second :: task <U type>(value U) int {
+    return 2
+}
+
+Use :: overload {
+    First
+    Second
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`duplicate overload signature for "Use"`,
+	)
+}
+
+func TestRejectDuplicateComptimeOverloadSignatureIgnoringNames(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+First :: task <N int>(value int) int {
+    return value
+}
+
+Second :: task <Size int>(value int) int {
+    return value
+}
+
+Use :: overload {
+    First
+    Second
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`duplicate overload signature for "Use"`,
+	)
+}
+
+func TestGenericOverloadConstraintsDoNotCreateDistinctSignatures(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Size16 :: task <Size int[Size == 16]>() int {
+    return 16
+}
+
+Size32 :: task <Size int[Size == 32]>() int {
+    return 32
+}
+
+Buffer :: overload {
+    Size16
+    Size32
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`duplicate overload signature for "Buffer"`,
+	)
+}
+
+func TestGenericTypeConstraintsDoNotCreateDistinctOverloadSignatures(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Actor :: struct {
+    health int
+    mana int
+}
+
+ByHealth :: task <T type[health int]>(value T) int {
+    return value.health
+}
+
+ByMana :: task <U type[mana int]>(value U) int {
+    return value.mana
+}
+
+Use :: overload {
+    ByHealth
+    ByMana
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`duplicate overload signature for "Use"`,
+	)
+}
+
+func TestGenericOverloadCategoriesCreateDistinctSignatures(
+	t *testing.T,
+) {
+	_, reporter := check(t, `
+ByType :: task <T type>(value int) int {
+    return value
+}
+
+ByInt :: task <N int>(value int) int {
+    return value
+}
+
+ByBool :: task <Flag bool>(value int) int {
+    return value
+}
+
+ByString :: task <Name string>(value int) int {
+    return value
+}
+
+Use :: overload {
+    ByType
+    ByInt
+    ByBool
+    ByString
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestGenericOverloadConstraintCheckedAfterSelection(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+Positive :: task <N int[N > 0]>() int {
+    return N
+}
+
+ByType :: task <T type>() int {
+    return 0
+}
+
+Use :: overload {
+    Positive
+    ByType
+}
+
+Main :: task() {
+    result := Use<0>()
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`generic constraint failed: 0 > 0`,
+	)
+
+	if strings.Contains(
+		reporter.String(),
+		`no generic overload of "Use"`,
+	) {
+		t.Fatalf(
+			"constraint failure must occur after candidate selection:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestGenericOverloadRejectsRuntimeComptimeArgument(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+ByValue :: task <N int>() int {
+    return N
+}
+
+ByType :: task <T type>() int {
+    return 0
+}
+
+Use :: overload {
+    ByValue
+    ByType
+}
+
+Main :: task() {
+    number := 10
+    result := Use<number>()
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`no generic overload of "Use" matches generic arguments <number>`,
+	)
+}
+
+func TestRejectAmbiguousGenericOverloadCall(
+	t *testing.T,
+) {
+	reporter := checkSource(t, `
+First :: task <T type>(value any) int {
+    return 1
+}
+
+Second :: task <T type>(value any) int {
+    return 2
+}
+
+Use :: overload {
+    First
+    Second
+}
+
+Main :: task() {
+    result := Use<int>(10)
+}
+`)
+
+	// The duplicate-signature check should normally reject this overload
+	// before the call is considered. Keep this assertion so ambiguity cannot
+	// silently become the only diagnostic if duplicate checking regresses.
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`duplicate overload signature for "Use"`,
+	)
+}
+
+func TestImportedGenericOverloadResolution(
+	t *testing.T,
+) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(
+		t,
+		"operations",
+		`
+ProcessType :: task <T type>(value T) int {
+    return 1
+}
+
+ProcessInt :: task <N int>(value int) int {
+    return 2
+}
+
+ProcessBool :: task(value bool) int {
+    return 3
+}
+
+Process :: overload {
+    ProcessType
+    ProcessInt
+    ProcessBool
+}
+`,
+	)
+
+	run := runCheckerTestWithPackages(
+		t,
+		`
+Main :: task() {
+    ordinary := operations.Process(true)
+    byType := operations.Process<int>(10)
+    byValue := operations.Process<16>(10)
+}
+`,
+		map[string]*resolver.PackageInfo{
+			"operations": resolverPkg,
+		},
+		map[string]*PackageInfo{
+			"operations": checkerPkg,
+		},
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	typeExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	typeResolution := assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		typeExpr,
+		"ProcessType",
+		"operations",
+	)
+
+	if typeResolution.TaskType.Name !=
+		"operations.ProcessType<int>" {
+		t.Fatalf(
+			"imported type specialization name = %q",
+			typeResolution.TaskType.Name,
+		)
+	}
+
+	valueExpr := checkerGenericExprFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			2,
+		),
+	)
+
+	valueResolution := assertGenericOverloadResolution(
+		t,
+		run.Checker,
+		valueExpr,
+		"ProcessInt",
+		"operations",
+	)
+
+	if valueResolution.TaskType.Name !=
+		"operations.ProcessInt<16>" {
+		t.Fatalf(
+			"imported value specialization name = %q",
+			valueResolution.TaskType.Name,
+		)
+	}
+}
+
+func TestImportedGenericOverloadChecksRuntimeArgumentType(
+	t *testing.T,
+) {
+	_, resolverPkg, checkerPkg := exportCheckerPackage(
+		t,
+		"operations",
+		`
+ProcessInt :: task <N int>(value int) int {
+    return value
+}
+
+Process :: overload {
+    ProcessInt
+}
+`,
+	)
+
+	reporter := checkWithPackages(
+		t,
+		`
+Main :: task() {
+    result := operations.Process<16>("wrong")
+}
+`,
+		map[string]*resolver.PackageInfo{
+			"operations": resolverPkg,
+		},
+		map[string]*PackageInfo{
+			"operations": checkerPkg,
+		},
+	)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		`no generic overload of "Process" matches generic arguments <16> and argument types (string)`,
+	)
+}

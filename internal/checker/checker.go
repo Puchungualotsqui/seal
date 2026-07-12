@@ -470,9 +470,20 @@ const (
 	IndexResolutionOverloadWrite
 )
 
+type GenericOverloadCallResolution struct {
+	Candidate *Symbol
+	TaskType  *Type
+
+	PackageName string
+
+	GenericArguments []GenericArgumentInfo
+}
+
 type SemanticInfo struct {
 	IndexResolutions map[*ast.IndexExpr]IndexResolution
 	LenResolutions   map[*ast.CallExpr]LenResolution
+
+	GenericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
 }
 
 func (c *Checker) SemanticInfo() SemanticInfo {
@@ -485,6 +496,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 			map[*ast.CallExpr]LenResolution,
 			len(c.lenResolutions),
 		),
+		GenericOverloadCalls: make(
+			map[*ast.GenericExpr]GenericOverloadCallResolution,
+			len(c.genericOverloadCalls),
+		),
 	}
 
 	for expr, resolution := range c.indexResolutions {
@@ -493,6 +508,16 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 
 	for call, resolution := range c.lenResolutions {
 		info.LenResolutions[call] = resolution
+	}
+
+	for expr, resolution := range c.genericOverloadCalls {
+		cloned := resolution
+		cloned.GenericArguments = append(
+			[]GenericArgumentInfo(nil),
+			resolution.GenericArguments...,
+		)
+
+		info.GenericOverloadCalls[expr] = cloned
 	}
 
 	return info
@@ -593,6 +618,8 @@ type Checker struct {
 	indexResolutions map[*ast.IndexExpr]IndexResolution
 	lenResolutions   map[*ast.CallExpr]LenResolution
 
+	genericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
+
 	options Options
 
 	genericConstraintEvalStack []string
@@ -612,17 +639,18 @@ func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Ch
 
 func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*PackageInfo, options Options) *Checker {
 	c := &Checker{
-		diags:              diags,
-		packages:           packages,
-		specializedTypes:   map[string]*Type{},
-		preparingTasks:     map[*ast.TaskDecl]bool{},
-		preparingOverloads: map[*ast.OverloadDecl]bool{},
-		preparedOverloads:  map[*ast.OverloadDecl]bool{},
-		indexResolutions:   map[*ast.IndexExpr]IndexResolution{},
-		lenResolutions:     map[*ast.CallExpr]LenResolution{},
-		options:            options,
-		packageScopes:      map[string]*Scope{},
-		implByDecl:         map[*ast.ImplDecl]*ImplInfo{},
+		diags:                diags,
+		packages:             packages,
+		specializedTypes:     map[string]*Type{},
+		preparingTasks:       map[*ast.TaskDecl]bool{},
+		preparingOverloads:   map[*ast.OverloadDecl]bool{},
+		preparedOverloads:    map[*ast.OverloadDecl]bool{},
+		indexResolutions:     map[*ast.IndexExpr]IndexResolution{},
+		lenResolutions:       map[*ast.CallExpr]LenResolution{},
+		genericOverloadCalls: map[*ast.GenericExpr]GenericOverloadCallResolution{},
+		options:              options,
+		packageScopes:        map[string]*Scope{},
+		implByDecl:           map[*ast.ImplDecl]*ImplInfo{},
 	}
 
 	c.global = NewScope(nil)
@@ -901,6 +929,38 @@ type overloadResolution struct {
 	Ambiguous bool
 }
 
+type genericOverloadResolution struct {
+	Candidate *Symbol
+	TaskType  *Type
+
+	GenericArguments []overloadGenericArgument
+
+	Score int
+
+	Matched   bool
+	Ambiguous bool
+}
+
+type overloadGenericArgumentClass int
+
+const (
+	overloadGenericArgumentInvalid overloadGenericArgumentClass = iota
+	overloadGenericArgumentType
+	overloadGenericArgumentTask
+	overloadGenericArgumentValue
+)
+
+type overloadGenericArgument struct {
+	Class overloadGenericArgumentClass
+
+	Type *Type
+	Expr ast.Expr
+
+	Key string
+
+	IsCompileTime bool
+}
+
 type receiverOverloadResolution struct {
 	Candidate *Symbol
 	TaskType  *Type
@@ -970,17 +1030,38 @@ func (c *Checker) checkCallArgumentTypes(
 	return types, spans
 }
 
-func (c *Checker) resolveOverload(info *OverloadInfo, argTypes []*Type) overloadResolution {
+func (c *Checker) resolveOverload(
+	info *OverloadInfo,
+	argTypes []*Type,
+) overloadResolution {
 	best := overloadResolution{
 		Score: 1 << 30,
 	}
 
 	for _, candidate := range info.Candidates {
-		if candidate.Type == nil || candidate.Type.Kind != TypeTask {
+		if candidate.Type == nil ||
+			candidate.Type.Kind != TypeTask {
 			continue
 		}
 
-		score, ok := c.callScore(candidate.Type, argTypes)
+		// Generic overload candidates require an explicit generic call:
+		//
+		//     Process<int>(value)
+		//
+		// They must not participate in:
+		//
+		//     Process(value)
+		//
+		// Otherwise a zero-runtime-parameter generic candidate such as
+		// Foo<T type>() would incorrectly match Foo().
+		if len(candidate.Type.GenericParams) > 0 {
+			continue
+		}
+
+		score, ok := c.callScore(
+			candidate.Type,
+			argTypes,
+		)
 		if !ok {
 			continue
 		}
@@ -1000,6 +1081,708 @@ func (c *Checker) resolveOverload(info *OverloadInfo, argTypes []*Type) overload
 	}
 
 	return best
+}
+
+func (c *Checker) genericBaseSymbol(
+	scope *Scope,
+	base ast.Expr,
+) (*Symbol, string, bool) {
+	if scope == nil {
+		scope = c.global
+	}
+
+	switch b := base.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(b.Name.Name)
+		if sym == nil {
+			c.diags.Add(
+				b.Span(),
+				fmt.Sprintf(
+					"undefined generic symbol %q",
+					b.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		return sym, "", true
+
+	case *ast.SelectorExpr:
+		id, ok := b.Left.(*ast.IdentExpr)
+		if !ok {
+			c.diags.Add(
+				b.Span(),
+				"generic symbol must be a task, overload, type, or package-qualified member",
+			)
+			return nil, "", false
+		}
+
+		pkgSym := scope.Lookup(id.Name.Name)
+		if pkgSym == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"undefined package %q",
+					id.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		if pkgSym.Kind != SymbolPackage {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"%q is not a package",
+					id.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		if pkgSym.Package == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"package %q has no symbol table",
+					id.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		member := pkgSym.Package.Symbols[b.Name.Name]
+		if member == nil {
+			c.diags.Add(
+				b.Name.Span(),
+				fmt.Sprintf(
+					"package %s has no symbol %q",
+					id.Name.Name,
+					b.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		return c.importedPackageMemberSymbol(
+			id.Name.Name,
+			member,
+		), id.Name.Name, true
+
+	default:
+		c.diags.Add(
+			base.Span(),
+			"expected generic task or overload name",
+		)
+		return nil, "", false
+	}
+}
+
+func (c *Checker) overloadGenericArgumentFromSymbol(
+	scope *Scope,
+	arg ast.GenericArg,
+	sym *Symbol,
+) overloadGenericArgument {
+	if sym == nil {
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentInvalid,
+			Key:   genericArgDisplay(arg),
+		}
+	}
+
+	switch sym.Kind {
+	case SymbolType:
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentType,
+			Type:  sym.Type,
+			Key:   genericArgDisplay(arg),
+		}
+
+	case SymbolTask:
+		c.ensureTaskSymbolPrepared(scope, sym)
+
+		if sym.Type == nil ||
+			sym.Type.Kind != TypeTask {
+			return overloadGenericArgument{
+				Class: overloadGenericArgumentInvalid,
+				Key:   genericArgDisplay(arg),
+			}
+		}
+
+		if len(sym.Type.GenericParams) > 0 {
+			c.diags.Add(
+				arg.Span(),
+				fmt.Sprintf(
+					"generic task argument %q requires specialization",
+					sym.Name,
+				),
+			)
+
+			return overloadGenericArgument{
+				Class: overloadGenericArgumentInvalid,
+				Key:   genericArgDisplay(arg),
+			}
+		}
+
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentTask,
+			Type:  sym.Type,
+			Key:   genericArgDisplay(arg),
+		}
+
+	case SymbolConst:
+		return overloadGenericArgument{
+			Class:         overloadGenericArgumentValue,
+			Type:          sym.Type,
+			Expr:          arg.Expr,
+			Key:           genericArgDisplay(arg),
+			IsCompileTime: true,
+		}
+
+	case SymbolVar,
+		SymbolParam:
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentValue,
+			Type:  sym.Type,
+			Expr:  arg.Expr,
+			Key:   genericArgDisplay(arg),
+
+			// Runtime variables cannot satisfy a comptime generic parameter.
+			IsCompileTime: false,
+		}
+
+	default:
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentInvalid,
+			Key:   genericArgDisplay(arg),
+		}
+	}
+}
+
+func (c *Checker) resolveOverloadGenericArgument(
+	scope *Scope,
+	arg ast.GenericArg,
+) overloadGenericArgument {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		typ := c.typeFromGenericArg(
+			scope,
+			arg,
+		)
+
+		return overloadGenericArgument{
+			Class: overloadGenericArgumentType,
+			Type:  typ,
+			Key:   genericArgDisplay(arg),
+		}
+
+	case ast.GenericArgExpr:
+		if arg.Expr == nil {
+			return overloadGenericArgument{
+				Class: overloadGenericArgumentInvalid,
+				Key:   genericArgDisplay(arg),
+			}
+		}
+
+		switch e := arg.Expr.(type) {
+		case *ast.IdentExpr:
+			sym := scope.Lookup(e.Name.Name)
+			if sym == nil {
+				c.diags.Add(
+					e.Span(),
+					fmt.Sprintf(
+						"undefined generic argument %q",
+						e.Name.Name,
+					),
+				)
+
+				return overloadGenericArgument{
+					Class: overloadGenericArgumentInvalid,
+					Key:   genericArgDisplay(arg),
+				}
+			}
+
+			return c.overloadGenericArgumentFromSymbol(
+				scope,
+				arg,
+				sym,
+			)
+
+		case *ast.SelectorExpr:
+			if id, ok := e.Left.(*ast.IdentExpr); ok {
+				pkgSym := scope.Lookup(id.Name.Name)
+
+				if pkgSym != nil &&
+					pkgSym.Kind == SymbolPackage {
+					sym, _, ok := c.genericBaseSymbol(
+						scope,
+						e,
+					)
+					if !ok {
+						return overloadGenericArgument{
+							Class: overloadGenericArgumentInvalid,
+							Key:   genericArgDisplay(arg),
+						}
+					}
+
+					return c.overloadGenericArgumentFromSymbol(
+						scope,
+						arg,
+						sym,
+					)
+				}
+			}
+
+		case *ast.GenericExpr:
+			sym, _, ok := c.genericBaseSymbol(
+				scope,
+				e.Base,
+			)
+			if !ok {
+				return overloadGenericArgument{
+					Class: overloadGenericArgumentInvalid,
+					Key:   genericArgDisplay(arg),
+				}
+			}
+
+			switch sym.Kind {
+			case SymbolType:
+				typeAst := typeAstFromExpr(e)
+				if typeAst == nil {
+					c.diags.Add(
+						e.Span(),
+						"expected generic type argument",
+					)
+
+					return overloadGenericArgument{
+						Class: overloadGenericArgumentInvalid,
+						Key:   genericArgDisplay(arg),
+					}
+				}
+
+				return overloadGenericArgument{
+					Class: overloadGenericArgumentType,
+					Type: c.typeFromAst(
+						scope,
+						typeAst,
+					),
+					Key: genericArgDisplay(arg),
+				}
+
+			case SymbolTask:
+				return overloadGenericArgument{
+					Class: overloadGenericArgumentTask,
+					Type: c.taskFromGenericArg(
+						scope,
+						arg,
+					),
+					Key: genericArgDisplay(arg),
+				}
+
+			case SymbolOverload:
+				c.diags.Add(
+					e.Span(),
+					"an overload cannot currently be passed as a task generic argument",
+				)
+
+				return overloadGenericArgument{
+					Class: overloadGenericArgumentInvalid,
+					Key:   genericArgDisplay(arg),
+				}
+			}
+		}
+
+		valueType := c.checkExpr(
+			scope,
+			arg.Expr,
+		)
+
+		isCompileTime := c.isCompileTimeGenericExpr(
+			scope,
+			arg.Expr,
+		)
+
+		if _, ok := c.evalGenericConstExpr(
+			scope,
+			arg.Expr,
+		); ok {
+			isCompileTime = true
+		}
+
+		return overloadGenericArgument{
+			Class:         overloadGenericArgumentValue,
+			Type:          valueType,
+			Expr:          arg.Expr,
+			Key:           genericArgDisplay(arg),
+			IsCompileTime: isCompileTime,
+		}
+	}
+
+	return overloadGenericArgument{
+		Class: overloadGenericArgumentInvalid,
+		Key:   genericArgDisplay(arg),
+	}
+}
+
+func (c *Checker) resolveOverloadGenericArguments(
+	scope *Scope,
+	args []ast.GenericArg,
+) []overloadGenericArgument {
+	out := make(
+		[]overloadGenericArgument,
+		0,
+		len(args),
+	)
+
+	for _, arg := range args {
+		out = append(
+			out,
+			c.resolveOverloadGenericArgument(
+				scope,
+				arg,
+			),
+		)
+	}
+
+	return out
+}
+
+func (c *Checker) overloadGenericArgumentScore(
+	scope *Scope,
+	resolved overloadGenericArgument,
+	param ast.GenericParam,
+	subst map[string]ast.GenericArg,
+) (int, bool) {
+	if resolved.Class ==
+		overloadGenericArgumentInvalid ||
+		resolved.Type == nil ||
+		resolved.Type.Kind == TypeInvalid {
+		return 0, false
+	}
+
+	switch param.Category {
+	case ast.GenericParamType:
+		if resolved.Class !=
+			overloadGenericArgumentType {
+			return 0, false
+		}
+
+		switch resolved.Type.Kind {
+		case TypeEnum,
+			TypeUnion,
+			TypeInterface,
+			TypeTask,
+			TypePackage:
+			return 0, false
+		}
+
+		return 0, true
+
+	case ast.GenericParamEnum:
+		return 0,
+			resolved.Class ==
+				overloadGenericArgumentType &&
+				resolved.Type.Kind ==
+					TypeEnum
+
+	case ast.GenericParamUnion:
+		return 0,
+			resolved.Class ==
+				overloadGenericArgumentType &&
+				resolved.Type.Kind ==
+					TypeUnion
+
+	case ast.GenericParamTask:
+		// The task signature constraint is validated after selecting the
+		// candidate. It does not participate in overload identity.
+		return 0,
+			resolved.Class ==
+				overloadGenericArgumentTask &&
+				resolved.Type.Kind ==
+					TypeTask
+
+	case ast.GenericParamInt:
+		if resolved.Class !=
+			overloadGenericArgumentValue ||
+			!resolved.IsCompileTime {
+			return 0, false
+		}
+
+		return c.conversionScore(
+			IntType,
+			resolved.Type,
+		)
+
+	case ast.GenericParamBool:
+		if resolved.Class !=
+			overloadGenericArgumentValue ||
+			!resolved.IsCompileTime {
+			return 0, false
+		}
+
+		return c.conversionScore(
+			BoolType,
+			resolved.Type,
+		)
+
+	case ast.GenericParamString:
+		if resolved.Class !=
+			overloadGenericArgumentValue ||
+			!resolved.IsCompileTime {
+			return 0, false
+		}
+
+		return c.conversionScore(
+			StringType,
+			resolved.Type,
+		)
+
+	case ast.GenericParamValue:
+		if resolved.Class !=
+			overloadGenericArgumentValue ||
+			!resolved.IsCompileTime ||
+			param.Type == nil {
+			return 0, false
+		}
+
+		expected := c.typeFromAstWithGenericArgs(
+			scope,
+			param.Type,
+			subst,
+		)
+
+		if expected == nil ||
+			expected.Kind == TypeInvalid {
+			return 0, false
+		}
+
+		return c.conversionScore(
+			expected,
+			resolved.Type,
+		)
+	}
+
+	return 0, false
+}
+
+func (c *Checker) genericOverloadArgumentsScore(
+	scope *Scope,
+	resolved []overloadGenericArgument,
+	args []ast.GenericArg,
+	params []ast.GenericParam,
+) (int, bool) {
+	if len(resolved) != len(params) ||
+		len(args) != len(params) {
+		return 0, false
+	}
+
+	subst := genericArgSubst(
+		params,
+		args,
+	)
+
+	score := 0
+
+	for i := range params {
+		itemScore, ok :=
+			c.overloadGenericArgumentScore(
+				scope,
+				resolved[i],
+				params[i],
+				subst,
+			)
+		if !ok {
+			return 0, false
+		}
+
+		score += itemScore
+	}
+
+	return score, true
+}
+
+func (c *Checker) instantiateGenericOverloadCandidate(
+	scope *Scope,
+	packageName string,
+	candidate *Symbol,
+	args []ast.GenericArg,
+) *Type {
+	if candidate == nil ||
+		candidate.Type == nil ||
+		candidate.Type.Kind != TypeTask {
+		return InvalidType
+	}
+
+	if len(args) !=
+		len(candidate.Type.GenericParams) {
+		return InvalidType
+	}
+
+	if packageName != "" {
+		return c.taskTypeFromImportedGenericSignature(
+			scope,
+			packageName,
+			candidate.Type,
+			args,
+			candidate.Span,
+		)
+	}
+
+	if taskDecl, ok :=
+		candidate.Node.(*ast.TaskDecl); ok {
+		return c.taskTypeFromGenericCall(
+			scope,
+			taskDecl,
+			args,
+		)
+	}
+
+	return c.taskTypeFromGenericSignature(
+		scope,
+		candidate.Type,
+		args,
+		candidate.Span,
+	)
+}
+
+func (c *Checker) resolveGenericOverload(
+	scope *Scope,
+	info *OverloadInfo,
+	packageName string,
+	genericArgs []ast.GenericArg,
+	resolvedGenericArgs []overloadGenericArgument,
+	runtimeArgTypes []*Type,
+) genericOverloadResolution {
+	best := genericOverloadResolution{
+		Score: 1 << 30,
+	}
+
+	if info == nil {
+		return best
+	}
+
+	for _, candidate := range info.Candidates {
+		if candidate == nil ||
+			candidate.Type == nil ||
+			candidate.Type.Kind != TypeTask {
+			continue
+		}
+
+		// A generic call considers only generic candidates.
+		if len(candidate.Type.GenericParams) == 0 {
+			continue
+		}
+
+		genericScore, ok :=
+			c.genericOverloadArgumentsScore(
+				scope,
+				resolvedGenericArgs,
+				genericArgs,
+				candidate.Type.GenericParams,
+			)
+		if !ok {
+			continue
+		}
+
+		instantiated :=
+			c.instantiateGenericOverloadCandidate(
+				scope,
+				packageName,
+				candidate,
+				genericArgs,
+			)
+
+		if instantiated == nil ||
+			instantiated.Kind != TypeTask {
+			continue
+		}
+
+		runtimeScore, ok := c.callScore(
+			instantiated,
+			runtimeArgTypes,
+		)
+		if !ok {
+			continue
+		}
+
+		score := genericScore + runtimeScore
+
+		if !best.Matched || score < best.Score {
+			best = genericOverloadResolution{
+				Candidate:        candidate,
+				TaskType:         instantiated,
+				GenericArguments: resolvedGenericArgs,
+				Score:            score,
+				Matched:          true,
+			}
+			continue
+		}
+
+		if score == best.Score {
+			best.Ambiguous = true
+		}
+	}
+
+	return best
+}
+
+func overloadGenericArgumentInfos(
+	params []ast.GenericParam,
+	args []ast.GenericArg,
+	resolved []overloadGenericArgument,
+) []GenericArgumentInfo {
+	count := len(params)
+
+	if len(args) < count {
+		count = len(args)
+	}
+
+	if len(resolved) < count {
+		count = len(resolved)
+	}
+
+	out := make(
+		[]GenericArgumentInfo,
+		0,
+		count,
+	)
+
+	for i := 0; i < count; i++ {
+		info := GenericArgumentInfo{
+			Category: params[i].Category,
+			Type:     resolved[i].Type,
+			Key:      resolved[i].Key,
+		}
+
+		if isValueGenericCategory(
+			params[i].Category,
+		) {
+			info.Expr = args[i].Expr
+		}
+
+		out = append(out, info)
+	}
+
+	return out
+}
+
+func formatGenericArguments(
+	args []ast.GenericArg,
+) string {
+	parts := make(
+		[]string,
+		0,
+		len(args),
+	)
+
+	for _, arg := range args {
+		parts = append(
+			parts,
+			genericArgDisplay(arg),
+		)
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
@@ -2464,13 +3247,508 @@ func (c *Checker) checkDuplicateOverloadSignatures(info *OverloadInfo) {
 	}
 }
 
-func sameParamSignature(c *Checker, a *Type, b *Type) bool {
+type overloadGenericParamRef struct {
+	Index    int
+	Category ast.GenericParamCategory
+}
+
+func overloadGenericParamRefs(
+	params []ast.GenericParam,
+) map[string]overloadGenericParamRef {
+	refs := map[string]overloadGenericParamRef{}
+
+	for i, param := range params {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		refs[param.Name.Name] = overloadGenericParamRef{
+			Index:    i,
+			Category: param.Category,
+		}
+	}
+
+	return refs
+}
+
+func overloadGenericParamRefKey(
+	ref overloadGenericParamRef,
+) string {
+	return fmt.Sprintf(
+		"$%d:%d",
+		ref.Index,
+		int(ref.Category),
+	)
+}
+
+func overloadTypePlaceholderRef(
+	typ *Type,
+	refs map[string]overloadGenericParamRef,
+) (overloadGenericParamRef, bool) {
+	if typ == nil || typ.Name == "" {
+		return overloadGenericParamRef{}, false
+	}
+
+	ref, ok := refs[typ.Name]
+	if !ok {
+		return overloadGenericParamRef{}, false
+	}
+
+	switch ref.Category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		return ref, typ.Kind == TypeTypeParam
+
+	case ast.GenericParamTask:
+		return ref, typ.Kind == TypeTask
+
+	case ast.GenericParamInt,
+		ast.GenericParamBool,
+		ast.GenericParamString,
+		ast.GenericParamValue:
+		return ref, typ.Kind == TypeValueParam
+	}
+
+	return overloadGenericParamRef{}, false
+}
+
+func sameGenericOverloadParameterSignature(
+	a []ast.GenericParam,
+	b []ast.GenericParam,
+) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	aRefs := overloadGenericParamRefs(a)
+	bRefs := overloadGenericParamRefs(b)
+
+	for i := range a {
+		if a[i].Category != b[i].Category {
+			return false
+		}
+
+		// Constraints deliberately do not participate in overload identity.
+		//
+		// Therefore these are duplicates:
+		//
+		//     Buffer16 :: task<Size int[Size == 16]>()
+		//     Buffer32 :: task<Size int[Size == 32]>()
+		//
+		// GenericParamValue is different: its declared value type is part of
+		// the parameter itself, rather than an additional constraint.
+		if a[i].Category != ast.GenericParamValue {
+			continue
+		}
+
+		aKey := overloadTypeAstSignatureKey(
+			a[i].Type,
+			aRefs,
+		)
+		bKey := overloadTypeAstSignatureKey(
+			b[i].Type,
+			bRefs,
+		)
+
+		if aKey != bKey {
+			return false
+		}
+	}
+
+	return true
+}
+
+func overloadTypeAstSignatureKey(
+	typ ast.Type,
+	refs map[string]overloadGenericParamRef,
+) string {
+	if typ == nil {
+		return "<nil>"
+	}
+
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) == 1 {
+			if ref, ok := refs[t.Parts[0].Name]; ok {
+				return overloadGenericParamRefKey(ref)
+			}
+		}
+
+		var parts []string
+
+		for _, part := range t.Parts {
+			parts = append(parts, part.Name)
+		}
+
+		return "named:" + strings.Join(parts, ".")
+
+	case *ast.InterfaceSelfType:
+		return "self"
+
+	case *ast.PointerType:
+		return "*" + overloadTypeAstSignatureKey(
+			t.Elem,
+			refs,
+		)
+
+	case *ast.GenericType:
+		var args []string
+
+		for _, arg := range t.Args {
+			args = append(
+				args,
+				overloadGenericArgAstSignatureKey(
+					arg,
+					refs,
+				),
+			)
+		}
+
+		return overloadTypeAstSignatureKey(
+			t.Base,
+			refs,
+		) + "<" + strings.Join(args, ",") + ">"
+	}
+
+	return "<type>"
+}
+
+func overloadGenericArgAstSignatureKey(
+	arg ast.GenericArg,
+	refs map[string]overloadGenericParamRef,
+) string {
+	switch arg.Kind {
+	case ast.GenericArgType:
+		return "type:" + overloadTypeAstSignatureKey(
+			arg.Type,
+			refs,
+		)
+
+	case ast.GenericArgExpr:
+		return "expr:" + overloadExprSignatureKey(
+			arg.Expr,
+			refs,
+		)
+	}
+
+	return "<arg>"
+}
+
+func overloadExprSignatureKey(
+	expr ast.Expr,
+	refs map[string]overloadGenericParamRef,
+) string {
+	if expr == nil {
+		return "<nil>"
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if ref, ok := refs[e.Name.Name]; ok {
+			return overloadGenericParamRefKey(ref)
+		}
+
+		return "id:" + e.Name.Name
+
+	case *ast.SelectorExpr:
+		return "select:" +
+			overloadExprSignatureKey(e.Left, refs) +
+			"." +
+			e.Name.Name
+
+	case *ast.IntLitExpr:
+		return "int:" + e.Value
+
+	case *ast.FloatLitExpr:
+		return "float:" + e.Value
+
+	case *ast.StringLitExpr:
+		return "string:" + e.Value
+
+	case *ast.CStringLitExpr:
+		return "cstring:" + e.Value
+
+	case *ast.CharLitExpr:
+		return "char:" + e.Value
+
+	case *ast.BoolLitExpr:
+		if e.Value {
+			return "bool:true"
+		}
+
+		return "bool:false"
+
+	case *ast.NilLitExpr:
+		return "nil"
+
+	case *ast.UnaryExpr:
+		return "unary:" +
+			e.Op.String() +
+			overloadExprSignatureKey(e.Expr, refs)
+
+	case *ast.BinaryExpr:
+		return "binary:" +
+			overloadExprSignatureKey(e.Left, refs) +
+			e.Op.String() +
+			overloadExprSignatureKey(e.Right, refs)
+
+	case *ast.CallExpr:
+		var args []string
+
+		for _, arg := range e.Args {
+			args = append(
+				args,
+				overloadExprSignatureKey(arg, refs),
+			)
+		}
+
+		return "call:" +
+			overloadExprSignatureKey(e.Callee, refs) +
+			"(" +
+			strings.Join(args, ",") +
+			")"
+
+	case *ast.GenericExpr:
+		var args []string
+
+		for _, arg := range e.Args {
+			args = append(
+				args,
+				overloadGenericArgAstSignatureKey(
+					arg,
+					refs,
+				),
+			)
+		}
+
+		return "generic:" +
+			overloadExprSignatureKey(e.Base, refs) +
+			"<" +
+			strings.Join(args, ",") +
+			">"
+
+	case *ast.IndexExpr:
+		return "index:" +
+			overloadExprSignatureKey(e.Left, refs) +
+			"[" +
+			overloadExprSignatureKey(e.Index, refs) +
+			"]"
+
+	case *ast.CompoundLiteralExpr:
+		return "literal:" +
+			overloadTypeAstSignatureKey(e.Type, refs)
+	}
+
+	return exprDisplay(expr)
+}
+
+func overloadGenericArgumentInfoSignatureKey(
+	arg GenericArgumentInfo,
+	refs map[string]overloadGenericParamRef,
+) string {
+	if arg.Expr != nil {
+		return overloadExprSignatureKey(
+			arg.Expr,
+			refs,
+		)
+	}
+
+	if arg.Type != nil {
+		if ref, ok := overloadTypePlaceholderRef(
+			arg.Type,
+			refs,
+		); ok {
+			return overloadGenericParamRefKey(ref)
+		}
+
+		return arg.Type.String()
+	}
+
+	return arg.Key
+}
+
+func sameOverloadSignatureType(
+	c *Checker,
+	a *Type,
+	b *Type,
+	aRefs map[string]overloadGenericParamRef,
+	bRefs map[string]overloadGenericParamRef,
+) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	aRef, aIsRef := overloadTypePlaceholderRef(a, aRefs)
+	bRef, bIsRef := overloadTypePlaceholderRef(b, bRefs)
+
+	if aIsRef || bIsRef {
+		return aIsRef &&
+			bIsRef &&
+			aRef.Index == bRef.Index &&
+			aRef.Category == bRef.Category
+	}
+
+	if a.Kind != b.Kind {
+		return false
+	}
+
+	switch a.Kind {
+	case TypePointer,
+		TypeVariadic:
+		return sameOverloadSignatureType(
+			c,
+			a.Elem,
+			b.Elem,
+			aRefs,
+			bRefs,
+		)
+
+	case TypeStruct,
+		TypeInterface:
+		if a.GenericBaseName != "" ||
+			b.GenericBaseName != "" {
+			if a.GenericBaseName == "" ||
+				b.GenericBaseName == "" ||
+				a.GenericBaseName != b.GenericBaseName ||
+				len(a.GenericArguments) !=
+					len(b.GenericArguments) {
+				return false
+			}
+
+			for i := range a.GenericArguments {
+				left := a.GenericArguments[i]
+				right := b.GenericArguments[i]
+
+				if left.Category != right.Category {
+					return false
+				}
+
+				switch {
+				case isTypeGenericCategory(left.Category):
+					if !sameOverloadSignatureType(
+						c,
+						left.Type,
+						right.Type,
+						aRefs,
+						bRefs,
+					) {
+						return false
+					}
+
+				case left.Category == ast.GenericParamTask:
+					if !sameOverloadSignatureType(
+						c,
+						left.Type,
+						right.Type,
+						aRefs,
+						bRefs,
+					) {
+						return false
+					}
+
+				default:
+					leftKey :=
+						overloadGenericArgumentInfoSignatureKey(
+							left,
+							aRefs,
+						)
+					rightKey :=
+						overloadGenericArgumentInfoSignatureKey(
+							right,
+							bRefs,
+						)
+
+					if leftKey != rightKey {
+						return false
+					}
+				}
+			}
+
+			return true
+		}
+
+		return a.Name == b.Name
+
+	case TypeTask:
+		if len(a.Params) != len(b.Params) ||
+			len(a.Results) != len(b.Results) {
+			return false
+		}
+
+		for i := range a.Params {
+			if !sameOverloadSignatureType(
+				c,
+				a.Params[i],
+				b.Params[i],
+				aRefs,
+				bRefs,
+			) {
+				return false
+			}
+		}
+
+		for i := range a.Results {
+			if !sameOverloadSignatureType(
+				c,
+				a.Results[i],
+				b.Results[i],
+				aRefs,
+				bRefs,
+			) {
+				return false
+			}
+		}
+
+		return true
+
+	case TypeDistinct,
+		TypeEnum,
+		TypeUnion,
+		TypeTypeParam,
+		TypeValueParam:
+		return a.Name == b.Name
+
+	default:
+		return c.sameType(a, b)
+	}
+}
+
+func sameParamSignature(
+	c *Checker,
+	a *Type,
+	b *Type,
+) bool {
+	if a == nil || b == nil {
+		return false
+	}
+
+	if !sameGenericOverloadParameterSignature(
+		a.GenericParams,
+		b.GenericParams,
+	) {
+		return false
+	}
+
 	if len(a.Params) != len(b.Params) {
 		return false
 	}
 
+	aRefs := overloadGenericParamRefs(
+		a.GenericParams,
+	)
+	bRefs := overloadGenericParamRefs(
+		b.GenericParams,
+	)
+
 	for i := range a.Params {
-		if !c.sameType(a.Params[i], b.Params[i]) {
+		if !sameOverloadSignatureType(
+			c,
+			a.Params[i],
+			b.Params[i],
+			aRefs,
+			bRefs,
+		) {
 			return false
 		}
 	}
@@ -6241,59 +7519,255 @@ func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTy
 	return InvalidType
 }
 
-func (c *Checker) checkGenericCallResultTypes(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) []*Type {
+func (c *Checker) checkGenericOverloadCallResultTypes(
+	scope *Scope,
+	gen *ast.GenericExpr,
+	sym *Symbol,
+	packageName string,
+	args []ast.Expr,
+	span source.Span,
+) []*Type {
+	if sym == nil ||
+		sym.Kind != SymbolOverload {
+		return []*Type{InvalidType}
+	}
+
+	c.ensureOverloadSymbolPrepared(
+		scope,
+		sym,
+	)
+
+	info := sym.Overload
+	if info == nil {
+		c.diags.Add(
+			sym.Span,
+			fmt.Sprintf(
+				"symbol %q is not a valid overload",
+				sym.Name,
+			),
+		)
+		return []*Type{InvalidType}
+	}
+
+	resolvedGenericArgs :=
+		c.resolveOverloadGenericArguments(
+			scope,
+			gen.Args,
+		)
+
+	runtimeArgTypes, runtimeArgSpans :=
+		c.checkCallArgumentTypes(
+			scope,
+			args,
+		)
+
+	result := c.resolveGenericOverload(
+		scope,
+		info,
+		packageName,
+		gen.Args,
+		resolvedGenericArgs,
+		runtimeArgTypes,
+	)
+
+	if !result.Matched {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"no generic overload of %q matches generic arguments <%s> and argument types (%s)",
+				info.Name,
+				formatGenericArguments(gen.Args),
+				c.formatTypes(runtimeArgTypes),
+			),
+		)
+
+		return []*Type{InvalidType}
+	}
+
+	if result.Ambiguous {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"ambiguous generic overload call %q with generic arguments <%s> and argument types (%s)",
+				info.Name,
+				formatGenericArguments(gen.Args),
+				c.formatTypes(runtimeArgTypes),
+			),
+		)
+
+		return []*Type{InvalidType}
+	}
+
+	// Candidate selection uses only generic parameter categories and runtime
+	// parameter conversion. Constraints are checked only after one candidate
+	// has been selected.
+	c.checkGenericArgsAgainstParams(
+		scope,
+		gen.Args,
+		result.Candidate.Type.GenericParams,
+		gen.Span(),
+	)
+
+	c.checkTaskTypeCallArguments(
+		result.TaskType,
+		runtimeArgTypes,
+		runtimeArgSpans,
+		span,
+	)
+
+	genericArguments := overloadGenericArgumentInfos(
+		result.Candidate.Type.GenericParams,
+		gen.Args,
+		resolvedGenericArgs,
+	)
+
+	c.genericOverloadCalls[gen] =
+		GenericOverloadCallResolution{
+			Candidate:        result.Candidate,
+			TaskType:         result.TaskType,
+			PackageName:      packageName,
+			GenericArguments: genericArguments,
+		}
+
+	return result.TaskType.Results
+}
+
+func (c *Checker) checkGenericCallResultTypes(
+	scope *Scope,
+	gen *ast.GenericExpr,
+	argTypes []*Type,
+	argSpans []source.Span,
+	args []ast.Expr,
+	span source.Span,
+) []*Type {
+	_ = argTypes
+	_ = argSpans
+
 	if id, ok := gen.Base.(*ast.IdentExpr); ok {
-		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
-			actualTypes, _ := c.checkCallArgumentTypes(scope, args)
-			result := c.checkGenericIntrinsicCall(scope, gen, actualTypes, args, span)
+		if task, ok :=
+			builtin.LookupTask(id.Name.Name); ok &&
+			task.Generic {
+			actualTypes, _ :=
+				c.checkCallArgumentTypes(
+					scope,
+					args,
+				)
+
+			result := c.checkGenericIntrinsicCall(
+				scope,
+				gen,
+				actualTypes,
+				args,
+				span,
+			)
+
 			return []*Type{result}
 		}
 	}
 
-	sym := c.taskSymbolFromGenericExprBase(scope, gen.Base)
-	if sym == nil {
+	sym, packageName, ok := c.genericBaseSymbol(
+		scope,
+		gen.Base,
+	)
+	if !ok {
 		return []*Type{InvalidType}
 	}
 
-	if sym.Type == nil || sym.Type.Kind != TypeTask {
-		c.diags.Add(gen.Base.Span(), "generic callee has invalid task type")
+	switch sym.Kind {
+	case SymbolOverload:
+		return c.checkGenericOverloadCallResultTypes(
+			scope,
+			gen,
+			sym,
+			packageName,
+			args,
+			span,
+		)
+
+	case SymbolTask:
+		// Continue with ordinary generic-task specialization.
+
+	default:
+		c.diags.Add(
+			gen.Base.Span(),
+			fmt.Sprintf(
+				"generic callee %q is not a task or overload",
+				sym.Name,
+			),
+		)
+		return []*Type{InvalidType}
+	}
+
+	c.ensureTaskSymbolPrepared(
+		scope,
+		sym,
+	)
+
+	if sym.Type == nil ||
+		sym.Type.Kind != TypeTask {
+		c.diags.Add(
+			gen.Base.Span(),
+			"generic callee has invalid task type",
+		)
 		return []*Type{InvalidType}
 	}
 
 	if len(sym.Type.GenericParams) == 0 {
-		c.diags.Add(gen.Span(), fmt.Sprintf("task %q is not generic", sym.Name))
+		c.diags.Add(
+			gen.Span(),
+			fmt.Sprintf(
+				"task %q is not generic",
+				sym.Name,
+			),
+		)
 		return []*Type{InvalidType}
 	}
 
-	c.checkGenericArgsAgainstParams(scope, gen.Args, sym.Type.GenericParams, gen.Span())
+	c.checkGenericArgsAgainstParams(
+		scope,
+		gen.Args,
+		sym.Type.GenericParams,
+		gen.Span(),
+	)
 
-	taskDecl, _ := sym.Node.(*ast.TaskDecl)
+	taskDecl, _ :=
+		sym.Node.(*ast.TaskDecl)
 
 	var instantiated *Type
 
-	if pkgName, ok := c.packageNameFromGenericExprBase(
-		scope,
-		gen.Base,
-	); ok {
-		instantiated = c.taskTypeFromImportedGenericSignature(
-			scope,
-			pkgName,
-			sym.Type,
-			gen.Args,
-			gen.Span(),
-		)
-	} else if taskDecl != nil {
+	switch {
+	case packageName != "":
+		instantiated =
+			c.taskTypeFromImportedGenericSignature(
+				scope,
+				packageName,
+				sym.Type,
+				gen.Args,
+				gen.Span(),
+			)
+
+	case taskDecl != nil:
 		instantiated = c.taskTypeFromGenericCall(
 			scope,
 			taskDecl,
 			gen.Args,
 		)
 
-	} else {
-		instantiated = c.taskTypeFromGenericSignature(scope, sym.Type, gen.Args, gen.Span())
+	default:
+		instantiated = c.taskTypeFromGenericSignature(
+			scope,
+			sym.Type,
+			gen.Args,
+			gen.Span(),
+		)
 	}
 
-	c.checkGenericTaskCallArguments(scope, instantiated, args, span)
+	c.checkGenericTaskCallArguments(
+		scope,
+		instantiated,
+		args,
+		span,
+	)
 
 	return instantiated.Results
 }
