@@ -1,0 +1,105 @@
+c :: @c_import {
+    include "stdlib.h"
+}
+
+_Malloc :: extern("malloc") task(
+    size uint,
+) rawptr
+
+_Calloc :: extern("calloc") task(
+    count uint,
+    size uint,
+) rawptr
+
+_Free :: extern("free") task(
+    ptr rawptr,
+)
+
+/*
+CAllocator uses the C standard library allocation functions.
+
+The unused field exists because standard C does not support empty
+structs portably.
+*/
+CAllocator :: struct {
+    _unused u8
+}
+
+NewCAllocator :: task() CAllocator {
+    return CAllocator{
+        _unused = 0,
+    }
+}
+
+Allocator :: impl CAllocator {
+    Alloc :: task(
+        self *CAllocator,
+        size uint,
+    ) rawptr {
+        return _Malloc(size)
+    }
+}
+
+ZeroAllocator :: impl CAllocator {
+    AllocZeroed :: task(
+        self *CAllocator,
+        count uint,
+        size uint,
+    ) rawptr {
+        return _Calloc(count, size)
+    }
+}
+
+Deallocator :: impl CAllocator {
+    Free :: task(
+        self *CAllocator,
+        ptr rawptr,
+    ) {
+        _Free(ptr)
+    }
+}
+
+/*
+Direct C allocation helpers.
+
+These are convenient when a configurable allocator is unnecessary.
+*/
+
+AllocC :: task(
+    size uint,
+) rawptr {
+    return _Malloc(size)
+}
+
+CallocC :: task(
+    count uint,
+    size uint,
+) rawptr {
+    return _Calloc(count, size)
+}
+
+AllocTypeC :: task <T type>() *T {
+    return cast<*T>(
+        _Malloc(size(T)),
+    )
+}
+
+NewC :: task <T type>() *T {
+    return cast<*T>(
+        _Calloc(1, size(T)),
+    )
+}
+
+FreeC :: task(
+    ptr rawptr,
+) {
+    _Free(ptr)
+}
+
+FreeTypeC :: task <T type>(
+    ptr *T,
+) {
+    _Free(
+        cast<rawptr>(ptr),
+    )
+}

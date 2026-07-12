@@ -1,0 +1,77 @@
+/*
+AllocWith reserves an uninitialized block of memory.
+*/
+AllocWith :: task(
+    allocator Allocator,
+    size uint,
+) rawptr {
+    return Alloc(allocator, size)
+}
+
+/*
+AllocTypeWith reserves enough uninitialized memory for one value of T.
+*/
+AllocTypeWith :: task <T type>(
+    allocator Allocator,
+) *T {
+    ptr := Alloc(
+        allocator,
+        size(T),
+    )
+
+    return cast<*T>(ptr)
+}
+
+/*
+AllocZeroedWith reserves zero-initialized memory for count elements,
+each containing elementSize bytes.
+*/
+AllocZeroedWith :: task(
+    allocator ZeroAllocator,
+    count uint,
+    elementSize uint,
+) rawptr {
+    return AllocZeroed(
+        allocator,
+        count,
+        elementSize,
+    )
+}
+
+/*
+NewWith reserves zero-initialized memory for one value of T.
+*/
+NewWith :: task <T type>(
+    allocator ZeroAllocator,
+) *T {
+    ptr := AllocZeroed(
+        allocator,
+        1,
+        size(T),
+    )
+
+    return cast<*T>(ptr)
+}
+
+/*
+FreeWith releases an untyped allocation.
+*/
+FreeWith :: task(
+    deallocator Deallocator,
+    ptr rawptr,
+) {
+    Free(deallocator, ptr)
+}
+
+/*
+FreeTypeWith releases a typed allocation.
+*/
+FreeTypeWith :: task <T type>(
+    deallocator Deallocator,
+    ptr *T,
+) {
+    Free(
+        deallocator,
+        cast<rawptr>(ptr),
+    )
+}

@@ -1,0 +1,54 @@
+/*
+Allocator represents the capability to reserve a block of memory.
+
+The returned memory is uninitialized unless the concrete allocator
+documents otherwise.
+
+A nil result indicates that the allocation failed.
+*/
+Allocator :: interface {
+    Alloc :: task(
+        self *self,
+        size uint,
+    ) rawptr
+}
+
+/*
+ZeroAllocator represents the capability to reserve zero-initialized
+memory.
+
+The allocation contains count elements, each occupying size bytes.
+A nil result indicates that the allocation failed.
+*/
+ZeroAllocator :: interface {
+    AllocZeroed :: task(
+        self *self,
+        count uint,
+        size uint,
+    ) rawptr
+}
+
+/*
+Deallocator represents the capability to release an individual
+allocation.
+
+Arena and bump allocators normally do not implement this interface.
+*/
+Deallocator :: interface {
+    Free :: task(
+        self *self,
+        ptr rawptr,
+    )
+}
+
+/*
+ResetAllocator represents an allocator whose allocations can be
+discarded together.
+
+Arena and bump allocators can implement this interface.
+*/
+ResetAllocator :: interface {
+    Reset :: task(
+        self *self,
+    )
+}

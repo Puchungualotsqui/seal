@@ -3,21 +3,57 @@ Point :: struct {
     Y int
 }
 
-TestDirectAllocation :: task() {
-    point := mem.NewC<Point>()
+TestRawCAllocation :: task() {
+    ptr := mem.AllocC(16)
 
-    if point == nil {
-        panic(c"direct allocation failed")
+    if ptr == nil {
+        panic(c"raw C allocation failed")
     }
 
-    assert(point.X == 0)
-    assert(point.Y == 0)
+    ptr[0] = 42
+    ptr[15] = 84
+
+    assert(ptr[0] == 42)
+    assert(ptr[15] == 84)
+
+    mem.FreeC(ptr)
+}
+
+TestTypedCAllocation :: task() {
+    point := mem.AllocTypeC<Point>()
+
+    if point == nil {
+        panic(c"typed C allocation failed")
+    }
 
     point.X = 10
     point.Y = 20
 
     assert(point.X == 10)
     assert(point.Y == 20)
+
+    point.X = 30
+
+    assert(point.X == 30)
+
+    mem.FreeTypeC<Point>(point)
+}
+
+TestZeroedCAllocation :: task() {
+    point := mem.NewC<Point>()
+
+    if point == nil {
+        panic(c"zeroed C allocation failed")
+    }
+
+    assert(point.X == 0)
+    assert(point.Y == 0)
+
+    point.X = 100
+    point.Y = 200
+
+    assert(point.X == 100)
+    assert(point.Y == 200)
 
     mem.FreeTypeC<Point>(point)
 }
@@ -41,11 +77,11 @@ TestAllocatorInterface :: task() {
         panic(c"allocator interface allocation failed")
     }
 
-    point.X = 30
-    point.Y = 40
+    point.X = 5
+    point.Y = 7
 
-    assert(point.X == 30)
-    assert(point.Y == 40)
+    assert(point.X == 5)
+    assert(point.Y == 7)
 
     mem.FreeTypeWith<Point>(
         deallocator,
@@ -75,11 +111,11 @@ TestZeroAllocatorInterface :: task() {
     assert(point.X == 0)
     assert(point.Y == 0)
 
-    point.X = 50
-    point.Y = 60
+    point.X = 15
+    point.Y = 25
 
-    assert(point.X == 50)
-    assert(point.Y == 60)
+    assert(point.X == 15)
+    assert(point.Y == 25)
 
     mem.FreeTypeWith<Point>(
         deallocator,
@@ -87,23 +123,7 @@ TestZeroAllocatorInterface :: task() {
     )
 }
 
-TestRawAllocation :: task() {
-    ptr := mem.AllocC(16)
-
-    if ptr == nil {
-        panic(c"raw allocation failed")
-    }
-
-    ptr[0] = 10
-    ptr[15] = 20
-
-    assert(ptr[0] == 10)
-    assert(ptr[15] == 20)
-
-    mem.FreeC(ptr)
-}
-
-TestDefer :: task() {
+TestDeferredFree :: task() {
     cAllocator := mem.NewCAllocator()
 
     allocator := cast<mem.Allocator>(
@@ -127,17 +147,18 @@ TestDefer :: task() {
         point,
     )
 
-    point.X = 70
-    point.Y = 80
+    point.X = 50
+    point.Y = 60
 
-    assert(point.X == 70)
-    assert(point.Y == 80)
+    assert(point.X == 50)
+    assert(point.Y == 60)
 }
 
 Main :: task() {
-    TestDirectAllocation()
+    TestRawCAllocation()
+    TestTypedCAllocation()
+    TestZeroedCAllocation()
     TestAllocatorInterface()
     TestZeroAllocatorInterface()
-    TestRawAllocation()
-    TestDefer()
+    TestDeferredFree()
 }
