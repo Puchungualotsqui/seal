@@ -1,14 +1,365 @@
+TestPrimitiveTextRules :: task() {
+    ascii := "hello"
+    unicode := "mañana"
+    letter := "ñ"
+
+    assert(size(ascii) == 5)
+    assert(len(ascii) == 5)
+
+    assert(size(unicode) == 7)
+    assert(len(unicode) == 6)
+
+    assert(size(letter) == 2)
+    assert(len(letter) == 1)
+
+    assert(unicode[0] == 'm')
+    assert(unicode[2] == 'ñ')
+    assert(unicode[-1] == 'a')
+
+    cText := c"mañana"
+
+    assert(size(cText) == 7)
+    assert(len(cText) == 6)
+    assert(cText[2] == 'ñ')
+    assert(cText[-1] == 'a')
+}
+
+TestBorrowedStringView :: task() {
+    source := c"hello"
+
+    view := strings.BorrowString(source)
+
+    assert(view == "hello")
+    assert(size(view) == 5)
+    assert(len(view) == 5)
+}
+
+TestClone :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := "mañana"
+
+    owned := strings.Clone(
+        allocator,
+        source,
+    )
+
+    if owned.Data == nil {
+        panic("Clone allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    view := strings.View(&owned)
+
+    assert(view == source)
+    assert(size(view) == 7)
+    assert(len(view) == 6)
+
+    sourceData := cast<rawptr>(source)
+    ownedData := owned.Data
+
+    assert(sourceData != ownedData)
+}
+
+TestCStringClone :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := c"Seal"
+
+    owned := strings.CloneC(
+        allocator,
+        source,
+    )
+
+    if owned.Data == nil {
+        panic("CloneC allocation failed")
+    }
+
+    defer strings.DestroyC(
+        deallocator,
+        &owned,
+    )
+
+    view := strings.CView(&owned)
+
+    assert(view == source)
+    assert(size(view) == 4)
+    assert(len(view) == 4)
+
+    assert(
+        owned.Data[
+            cast<int>(owned.ByteLength)
+        ] == 0,
+    )
+}
+
+TestStringToCString :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := "mañana"
+
+    owned := strings.ToCString(
+        allocator,
+        source,
+    )
+
+    defer strings.DestroyC(
+        deallocator,
+        &owned,
+    )
+
+    cView := strings.CView(&owned)
+
+    assert(cView == c"mañana")
+    assert(size(cView) == size(source))
+    assert(len(cView) == len(source))
+
+    assert(
+        owned.Data[
+            cast<int>(owned.ByteLength)
+        ] == 0,
+    )
+}
+
+TestEmbeddedNullRejection :: task(
+    allocator mem.Allocator,
+) {
+    source := "left\0right"
+
+    assert(strings.HasNullByte(source))
+
+    owned, success := strings.TryToCString(
+        allocator,
+        source,
+    )
+
+    assert(!success)
+    assert(owned.Data == nil)
+}
+
+TestCStringToOwnedString :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := c"world"
+
+    owned := strings.FromCString(
+        allocator,
+        source,
+    )
+
+    if owned.Data == nil {
+        panic("FromCString allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    view := strings.View(&owned)
+
+    assert(view == "world")
+    assert(size(view) == 5)
+    assert(len(view) == 5)
+}
+
+TestConcat :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    owned := strings.Concat(
+        allocator,
+        "hello, ",
+        "世界",
+    )
+
+    if owned.Data == nil {
+        panic("Concat allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    result := strings.View(&owned)
+
+    assert(result == "hello, 世界")
+    assert(size(result) == 13)
+    assert(len(result) == 9)
+    assert(result[-1] == '界')
+}
+
+TestConcat3 :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    owned := strings.Concat3(
+        allocator,
+        "Seal",
+        " ",
+        "language",
+    )
+
+    if owned.Data == nil {
+        panic("Concat3 allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    result := strings.View(&owned)
+
+    assert(result == "Seal language")
+}
+
+TestPredicates :: task() {
+    value := "Seal programming language"
+
+    assert(!strings.IsEmpty(value))
+    assert(strings.IsEmpty(""))
+
+    assert(
+        strings.StartsWith(
+            value,
+            "Seal",
+        ),
+    )
+
+    assert(
+        !strings.StartsWith(
+            value,
+            "seal",
+        ),
+    )
+
+    assert(
+        strings.EndsWith(
+            value,
+            "language",
+        ),
+    )
+
+    assert(
+        strings.Contains(
+            value,
+            "programming",
+        ),
+    )
+
+    assert(
+        strings.Contains(
+            "mañana",
+            "ñ",
+        ),
+    )
+
+    assert(
+        !strings.Contains(
+            value,
+            "compiler",
+        ),
+    )
+}
+
+TestEmptyValues :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    cloned := strings.Clone(
+        allocator,
+        "",
+    )
+
+    if cloned.Data == nil {
+        panic("empty Clone allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &cloned,
+    )
+
+    assert(strings.View(&cloned) == "")
+    assert(cloned.ByteLength == 0)
+
+    cOwned := strings.ToCString(
+        allocator,
+        "",
+    )
+
+    defer strings.DestroyC(
+        deallocator,
+        &cOwned,
+    )
+
+    assert(strings.CView(&cOwned) == c"")
+    assert(cOwned.ByteLength == 0)
+    assert(cOwned.Data[0] == 0)
+}
+
 Main :: task() {
-    empty := ""
-    hello := "hello"
-    enye := "ñ"
+    cAllocator := mem.NewCAllocator()
 
-    assert(strings.IsEmpty(empty))
-    assert(strings.IsNotEmpty(hello))
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
 
-    assert(strings.ByteLen(hello) == 5)
-    assert(strings.ByteLen(enye) == 2)
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
 
-    assert(strings.Equal("Seal", "Seal"))
-    assert(strings.NotEqual("Seal", "C"))
+    TestPrimitiveTextRules()
+    TestBorrowedStringView()
+
+    TestClone(
+        allocator,
+        deallocator,
+    )
+
+    TestCStringClone(
+        allocator,
+        deallocator,
+    )
+
+    TestStringToCString(
+        allocator,
+        deallocator,
+    )
+
+    TestEmbeddedNullRejection(
+        allocator,
+    )
+
+    TestCStringToOwnedString(
+        allocator,
+        deallocator,
+    )
+
+    TestConcat(
+        allocator,
+        deallocator,
+    )
+
+    TestConcat3(
+        allocator,
+        deallocator,
+    )
+
+    TestPredicates()
+
+    TestEmptyValues(
+        allocator,
+        deallocator,
+    )
 }

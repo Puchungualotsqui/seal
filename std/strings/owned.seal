@@ -1,0 +1,100 @@
+/*
+OwnedString owns a block of UTF-8 bytes.
+
+It does not store a trailing null byte as part of its contract.
+Use View to construct a borrowed string view.
+
+OwnedString values must not be copied and destroyed independently.
+Exactly one logical owner must release the allocation.
+*/
+OwnedString :: struct {
+    Data rawptr
+    ByteLength uint
+}
+
+/*
+OwnedCString owns a null-terminated UTF-8 byte sequence.
+
+ByteLength excludes the terminating null byte.
+Use CView to construct a borrowed cstring view.
+
+OwnedCString values must not be copied and destroyed independently.
+Exactly one logical owner must release the allocation.
+*/
+OwnedCString :: struct {
+    Data rawptr
+    ByteLength uint
+}
+
+/*
+View returns a borrowed string view into an OwnedString.
+
+The returned view must not outlive the owner or be used after Destroy.
+*/
+View :: task(
+    owner *OwnedString,
+) string {
+    return cast<string>(
+        owner.Data,
+        owner.ByteLength,
+    )
+}
+
+/*
+CView returns a borrowed cstring view into an OwnedCString.
+
+The runtime verifies that Data[ByteLength] is null.
+The returned view must not outlive the owner or be used after DestroyC.
+*/
+CView :: task(
+    owner *OwnedCString,
+) cstring {
+    return cast<cstring>(
+        owner.Data,
+        owner.ByteLength,
+    )
+}
+
+/*
+Destroy releases an OwnedString allocation.
+
+All views derived from owner become invalid.
+*/
+Destroy :: task(
+    deallocator mem.Deallocator,
+    owner *OwnedString,
+) {
+    if owner.Data == nil {
+        return
+    }
+
+    mem.FreeWith(
+        deallocator,
+        owner.Data,
+    )
+
+    owner.Data = nil
+    owner.ByteLength = 0
+}
+
+/*
+DestroyC releases an OwnedCString allocation.
+
+All views derived from owner become invalid.
+*/
+DestroyC :: task(
+    deallocator mem.Deallocator,
+    owner *OwnedCString,
+) {
+    if owner.Data == nil {
+        return
+    }
+
+    mem.FreeWith(
+        deallocator,
+        owner.Data,
+    )
+
+    owner.Data = nil
+    owner.ByteLength = 0
+}

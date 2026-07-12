@@ -1,0 +1,139 @@
+/*
+BorrowString constructs a borrowed string view over a cstring.
+
+No allocation or copy is performed.
+The returned string has the same lifetime as value.
+*/
+BorrowString :: task(
+    value cstring,
+) string {
+    return cast<string>(
+        cast<rawptr>(value),
+        size(value),
+    )
+}
+
+/*
+HasNullByte reports whether a string contains an embedded null byte.
+
+This examines UTF-8 storage bytes rather than Unicode scalars.
+*/
+HasNullByte :: task(
+    value string,
+) bool {
+    data := cast<rawptr>(value)
+    byteLength := size(value)
+
+    for i: uint = 0; i < byteLength; i += 1 {
+        if data[cast<int>(i)] == 0 {
+            return true
+        }
+    }
+
+    return false
+}
+
+/*
+TryToCString creates an owned null-terminated copy of value.
+
+It returns false when value contains an embedded null byte or when
+allocation fails.
+*/
+TryToCString :: task(
+    allocator mem.Allocator,
+    value string,
+) OwnedCString, bool {
+    if HasNullByte(value) {
+        return OwnedCString{
+            Data = nil,
+            ByteLength = 0,
+        }, false
+    }
+
+    byteLength := size(value)
+
+    destination := _AllocCStringBytes(
+        allocator,
+        byteLength,
+    )
+
+    if destination == nil {
+        return OwnedCString{
+            Data = nil,
+            ByteLength = 0,
+        }, false
+    }
+
+    source := cast<rawptr>(value)
+
+    _CopyBytes(
+        destination,
+        source,
+        byteLength,
+    )
+
+    destination[cast<int>(byteLength)] = 0
+
+    return OwnedCString{
+        Data = destination,
+        ByteLength = byteLength,
+    }, true
+}
+
+/*
+ToCString creates an owned null-terminated copy of value.
+
+It panics if value contains an embedded null byte or allocation fails.
+*/
+ToCString :: task(
+    allocator mem.Allocator,
+    value string,
+) OwnedCString {
+    result, success := TryToCString(
+        allocator,
+        value,
+    )
+
+    if !success {
+        panic("strings.ToCString failed")
+    }
+
+    return result
+}
+
+/*
+FromCString creates an owned Seal string copy of a cstring.
+
+The null terminator is not part of the resulting string.
+*/
+FromCString :: task(
+    allocator mem.Allocator,
+    value cstring,
+) OwnedString {
+    byteLength := size(value)
+
+    destination := _AllocBytes(
+        allocator,
+        byteLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    source := cast<rawptr>(value)
+
+    _CopyBytes(
+        destination,
+        source,
+        byteLength,
+    )
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = byteLength,
+    }
+}

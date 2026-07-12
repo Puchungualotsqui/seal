@@ -1,0 +1,120 @@
+/*
+IsEmpty reports whether value contains zero UTF-8 bytes.
+*/
+IsEmpty :: task(
+    value string,
+) bool {
+    return size(value) == 0
+}
+
+/*
+IsEmptyC reports whether value points to an empty C string.
+*/
+IsEmptyC :: task(
+    value cstring,
+) bool {
+    return size(value) == 0
+}
+
+/*
+StartsWith reports whether value begins with prefix.
+*/
+StartsWith :: task(
+    value string,
+    prefix string,
+) bool {
+    valueLength := size(value)
+    prefixLength := size(prefix)
+
+    if prefixLength > valueLength {
+        return false
+    }
+
+    valueData := cast<rawptr>(value)
+    prefixData := cast<rawptr>(prefix)
+
+    for i: uint = 0; i < prefixLength; i += 1 {
+        if valueData[cast<int>(i)] !=
+            prefixData[cast<int>(i)] {
+            return false
+        }
+    }
+
+    return true
+}
+
+/*
+EndsWith reports whether value ends with suffix.
+*/
+EndsWith :: task(
+    value string,
+    suffix string,
+) bool {
+    valueLength := size(value)
+    suffixLength := size(suffix)
+
+    if suffixLength > valueLength {
+        return false
+    }
+
+    offset := valueLength - suffixLength
+
+    valueData := cast<rawptr>(value)
+    suffixData := cast<rawptr>(suffix)
+
+    for i: uint = 0; i < suffixLength; i += 1 {
+        if valueData[cast<int>(offset + i)] !=
+            suffixData[cast<int>(i)] {
+            return false
+        }
+    }
+
+    return true
+}
+
+/*
+Contains reports whether value contains needle.
+
+This performs exact UTF-8 byte matching. Because both arguments are
+valid UTF-8 strings, matches cannot begin inside a continuation byte
+and still equal a valid UTF-8 needle.
+*/
+Contains :: task(
+    value string,
+    needle string,
+) bool {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    if needleLength == 0 {
+        return true
+    }
+
+    if needleLength > valueLength {
+        return false
+    }
+
+    valueData := cast<rawptr>(value)
+    needleData := cast<rawptr>(needle)
+
+    finalStart := valueLength - needleLength
+
+    for start: uint = 0; start <= finalStart; start += 1 {
+        matches := true
+
+        for i: uint = 0; i < needleLength; i += 1 {
+            if valueData[
+                cast<int>(start + i)
+            ] != needleData[cast<int>(i)] {
+                matches = false
+                break
+            }
+        }
+
+        if matches {
+            return true
+        }
+    }
+
+    return false
+}

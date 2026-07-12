@@ -2,4 +2,31 @@
 name = "stringsExample"
 version = "0.1.0"
 kind = "executable"
-dependencies = ["strings"]
+dependencies = [
+    "mem",
+    "strings",
+]
+
+[build]
+compiler = "cc"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+
+[compiler.clang]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wconversion",
+]
