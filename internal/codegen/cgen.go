@@ -4768,6 +4768,188 @@ func (g *Generator) genericArgsInContext(args []ast.GenericArg) []ast.GenericArg
 	return out
 }
 
+func (g *Generator) crossPackageTypeOwner(
+	name string,
+) string {
+	if name == "" ||
+		g.packageName == "" ||
+		builtin.IsType(name) {
+		return ""
+	}
+
+	// When CGen is emitting code originating in another package, an
+	// unqualified type name belongs to that type context first.
+	if g.typeContextPackage != "" &&
+		g.typeContextPackage != g.packageName {
+		pkg := g.packages[g.typeContextPackage]
+
+		if g.packageHasType(pkg, name) {
+			return g.typeContextPackage
+		}
+	}
+
+	// Otherwise, check whether the type belongs to the package currently
+	// being generated.
+	if g.structs[name] != nil ||
+		g.distincts[name] != nil ||
+		g.enums[name] != nil ||
+		g.unions[name] != nil ||
+		g.interfaces[name] != nil {
+		return g.packageName
+	}
+
+	return ""
+}
+
+func (g *Generator) qualifyTypeForCrossPackageRequest(
+	typ ast.Type,
+) ast.Type {
+	if typ == nil {
+		return nil
+	}
+
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		if len(t.Parts) != 1 {
+			// Already package-qualified.
+			return t
+		}
+
+		owner := g.crossPackageTypeOwner(
+			t.Parts[0].Name,
+		)
+
+		if owner == "" {
+			return t
+		}
+
+		parts := []ast.Ident{
+			{
+				Name: owner,
+			},
+		}
+
+		parts = append(
+			parts,
+			t.Parts...,
+		)
+
+		return &ast.NamedType{
+			Parts: parts,
+			Loc:   t.Loc,
+		}
+
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem: g.qualifyTypeForCrossPackageRequest(
+				t.Elem,
+			),
+			Loc: t.Loc,
+		}
+
+	case *ast.GenericType:
+		args := make(
+			[]ast.GenericArg,
+			0,
+			len(t.Args),
+		)
+
+		for _, arg := range t.Args {
+			if arg.Kind == ast.GenericArgType {
+				args = append(
+					args,
+					g.qualifyTypeArgForCrossPackageRequest(
+						arg,
+					),
+				)
+				continue
+			}
+
+			args = append(args, arg)
+		}
+
+		return &ast.GenericType{
+			Base: g.qualifyTypeForCrossPackageRequest(
+				t.Base,
+			),
+			Args: args,
+			Loc:  t.Loc,
+		}
+	}
+
+	return typ
+}
+
+func (g *Generator) qualifyTypeArgForCrossPackageRequest(
+	arg ast.GenericArg,
+) ast.GenericArg {
+	typ := typeAstFromGenericArgForCGen(arg)
+	if typ == nil {
+		return arg
+	}
+
+	return ast.GenericArg{
+		Kind: ast.GenericArgType,
+		Type: g.qualifyTypeForCrossPackageRequest(
+			typ,
+		),
+		Loc: arg.Loc,
+	}
+}
+
+func (g *Generator) crossPackageRequestGenericArgs(
+	params []ast.GenericParam,
+	args []ast.GenericArg,
+) []ast.GenericArg {
+	if len(args) == 0 {
+		return nil
+	}
+
+	out := make(
+		[]ast.GenericArg,
+		0,
+		len(args),
+	)
+
+	for i, arg := range args {
+		category := ast.GenericParamInvalid
+
+		if i < len(params) {
+			category = params[i].Category
+		}
+
+		switch category {
+		case ast.GenericParamType,
+			ast.GenericParamEnum,
+			ast.GenericParamUnion:
+			out = append(
+				out,
+				g.qualifyTypeArgForCrossPackageRequest(
+					arg,
+				),
+			)
+
+		default:
+			// This also handles extra arguments defensively when their AST
+			// already identifies them explicitly as type arguments.
+			if category == ast.GenericParamInvalid &&
+				arg.Kind == ast.GenericArgType {
+				out = append(
+					out,
+					g.qualifyTypeArgForCrossPackageRequest(
+						arg,
+					),
+				)
+				continue
+			}
+
+			out = append(out, arg)
+		}
+	}
+
+	return out
+}
+
 func (g *Generator) cTaskName(name string) string {
 	if name == "Main" {
 		return "main"
@@ -8225,26 +8407,75 @@ func (g *Generator) importedGenericTaskInfoFromSelector(sel *ast.SelectorExpr) (
 	return id.Name.Name, sel.Name.Name, info, true
 }
 
-func (g *Generator) registerImportedGenericTaskInstance(packageName string, taskName string, info TaskInfo, args []ast.GenericArg) string {
-	args = normalizeGenericArgsForCGenParams(info.GenericParams, args)
-	name := g.specializedImportedTaskCName(packageName, taskName, info, args)
+func (g *Generator) registerImportedGenericTaskInstance(
+	packageName string,
+	taskName string,
+	info TaskInfo,
+	args []ast.GenericArg,
+) string {
+	args = normalizeGenericArgsForCGenParams(
+		info.GenericParams,
+		args,
+	)
+
+	// Keep the original arguments for type lowering in the calling package.
+	//
+	// For example, app sees:
+	//
+	//     mem.NewC<Point>() -> Point *
+	//
+	// The owning package request, however, must retain the source package:
+	//
+	//     Point -> app.Point
+	//
+	// This lets mem generate sizeof(app_Point) rather than sizeof(Point).
+	requestArgs := g.crossPackageRequestGenericArgs(
+		info.GenericParams,
+		args,
+	)
+
+	name := g.specializedImportedTaskCName(
+		packageName,
+		taskName,
+		info,
+		requestArgs,
+	)
 
 	if _, exists := g.importedGenericTasks[name]; exists {
-		g.addImportedGenericTaskRequest(packageName, taskName, args)
+		g.addImportedGenericTaskRequest(
+			packageName,
+			taskName,
+			append(
+				[]ast.GenericArg(nil),
+				requestArgs...,
+			),
+		)
+
 		return name
 	}
 
-	copiedArgs := append([]ast.GenericArg(nil), args...)
+	copiedArgs := append(
+		[]ast.GenericArg(nil),
+		args...,
+	)
 
-	g.importedGenericTasks[name] = &ImportedGenericTaskInstance{
-		PackageName: packageName,
-		TaskName:    taskName,
-		Name:        name,
-		Info:        info,
-		Args:        copiedArgs,
-	}
+	g.importedGenericTasks[name] =
+		&ImportedGenericTaskInstance{
+			PackageName: packageName,
+			TaskName:    taskName,
+			Name:        name,
+			Info:        info,
+			Args:        copiedArgs,
+		}
 
-	g.addImportedGenericTaskRequest(packageName, taskName, copiedArgs)
+	g.addImportedGenericTaskRequest(
+		packageName,
+		taskName,
+		append(
+			[]ast.GenericArg(nil),
+			requestArgs...,
+		),
+	)
 
 	return name
 }
@@ -12583,34 +12814,80 @@ func (g *Generator) cTypeFromGenericType(typ *ast.GenericType) CType {
 	return base
 }
 
-func (g *Generator) registerImportedGenericStructInstance(packageName string, typeName string, decl *ast.StructDecl, args []ast.GenericArg) string {
-	if packageName == "" || typeName == "" || decl == nil || isInvalidCStructName(typeName) || isInvalidCStructName(decl.Name.Name) {
+func (g *Generator) registerImportedGenericStructInstance(
+	packageName string,
+	typeName string,
+	decl *ast.StructDecl,
+	args []ast.GenericArg,
+) string {
+	if packageName == "" ||
+		typeName == "" ||
+		decl == nil ||
+		isInvalidCStructName(typeName) ||
+		isInvalidCStructName(decl.Name.Name) {
 		return CInvalid.Name
 	}
 
-	args = normalizeGenericArgsForCGenParams(decl.GenericParams, args)
+	args = normalizeGenericArgsForCGenParams(
+		decl.GenericParams,
+		args,
+	)
 
-	name := g.specializedImportedStructCName(packageName, typeName, decl, args)
+	// Preserve caller-local argument spelling for the imported representation
+	// emitted in the caller, but use package-qualified arguments for the
+	// owning-package request and stable specialization name.
+	requestArgs := g.crossPackageRequestGenericArgs(
+		decl.GenericParams,
+		args,
+	)
+
+	name := g.specializedImportedStructCName(
+		packageName,
+		typeName,
+		decl,
+		requestArgs,
+	)
+
 	if isInvalidCStructName(name) {
 		return CInvalid.Name
 	}
 
-	if _, exists := g.importedGenericStructs[name]; exists {
-		g.addImportedGenericStructRequest(packageName, typeName, args)
+	if _, exists :=
+		g.importedGenericStructs[name]; exists {
+		g.addImportedGenericStructRequest(
+			packageName,
+			typeName,
+			append(
+				[]ast.GenericArg(nil),
+				requestArgs...,
+			),
+		)
+
 		return name
 	}
 
-	copiedArgs := append([]ast.GenericArg(nil), args...)
+	copiedArgs := append(
+		[]ast.GenericArg(nil),
+		args...,
+	)
 
-	g.importedGenericStructs[name] = &ImportedGenericStructInstance{
-		PackageName: packageName,
-		TypeName:    typeName,
-		Name:        name,
-		Decl:        decl,
-		Args:        copiedArgs,
-	}
+	g.importedGenericStructs[name] =
+		&ImportedGenericStructInstance{
+			PackageName: packageName,
+			TypeName:    typeName,
+			Name:        name,
+			Decl:        decl,
+			Args:        copiedArgs,
+		}
 
-	g.addImportedGenericStructRequest(packageName, typeName, copiedArgs)
+	g.addImportedGenericStructRequest(
+		packageName,
+		typeName,
+		append(
+			[]ast.GenericArg(nil),
+			requestArgs...,
+		),
+	)
 
 	return name
 }
