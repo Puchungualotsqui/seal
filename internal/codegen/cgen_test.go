@@ -4973,3 +4973,620 @@ Main :: task() {
 		)
 	}
 }
+
+func TestGenerateGenericOverloadByArgumentCategory(t *testing.T) {
+	out, reporter := generate(t, `
+SelectType :: task <T type>() int {
+	return 1
+}
+
+SelectInt :: task <N int>() int {
+	return N
+}
+
+Select :: overload {
+	SelectType
+	SelectInt
+}
+
+Main :: task() {
+	fromType := Select<int>()
+	fromInt := Select<42>()
+
+	assert(fromType == 1)
+	assert(fromInt == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"intptr_t SelectType_int(void);",
+		"intptr_t SelectInt_42(void);",
+
+		"intptr_t fromType = SelectType_int();",
+		"intptr_t fromInt = SelectInt_42();",
+
+		"intptr_t SelectType_int(void) {",
+		"intptr_t SelectInt_42(void) {",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(out, "Select_int(") ||
+		strings.Contains(out, "Select_42(") {
+		t.Fatalf(
+			"generic overload name itself must not be specialized:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateMixedOrdinaryAndGenericOverloadCandidates(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ProcessBool :: task(value bool) bool {
+	return value
+}
+
+ProcessType :: task <T type>(value T) T {
+	return value
+}
+
+ProcessCount :: task <N int>(value int) int {
+	return value + N
+}
+
+Process :: overload {
+	ProcessType
+	ProcessCount
+	ProcessBool
+}
+
+Main :: task() {
+	boolean := Process(true)
+	typed := Process<int>(10)
+	counted := Process<32>(10)
+
+	assert(boolean)
+	assert(typed == 10)
+	assert(counted == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"bool ProcessBool(bool value);",
+		"intptr_t ProcessType_int(intptr_t value);",
+		"intptr_t ProcessCount_32(intptr_t value);",
+
+		"bool boolean = ProcessBool(true);",
+		"intptr_t typed = ProcessType_int(10);",
+		"intptr_t counted = ProcessCount_32(10);",
+
+		"intptr_t ProcessType_int(intptr_t value) {",
+		"intptr_t ProcessCount_32(intptr_t value) {",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateGenericOverloadInsideGenericTaskSpecialization(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+SelectType :: task <T type>(value T) T {
+	return value
+}
+
+SelectCount :: task <N int>(value int) int {
+	return value + N
+}
+
+Select :: overload {
+	SelectType
+	SelectCount
+}
+
+Forward :: task <T type>(value T) T {
+	return Select<T>(value)
+}
+
+Main :: task() {
+	integer := Forward<int>(42)
+	text := Forward<string>("hello")
+
+	assert(integer == 42)
+	assert(size(text) > 0)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"intptr_t SelectType_int(intptr_t value);",
+		"sealString SelectType_string(sealString value);",
+
+		"intptr_t Forward_int(intptr_t value);",
+		"sealString Forward_string(sealString value);",
+
+		"SelectType_int(value)",
+		"SelectType_string(value)",
+
+		"intptr_t integer = Forward_int(42);",
+		`sealString text = Forward_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5});`,
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	// This specifically verifies that substituteExprForCGen preserved the
+	// checker resolution on the copied GenericExpr in each Forward<T>
+	// specialization.
+	if strings.Contains(out, "Select_T(") {
+		t.Fatalf(
+			"generic overload call retained an unspecialized type parameter:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateGenericOverloadDefaultParameters(t *testing.T) {
+	out, reporter := generate(t, `
+DefaultType :: task <T type>(
+	value T = cast<T>(7),
+) T {
+	return value
+}
+
+DefaultCount :: task <N int>(
+	value int = N,
+) int {
+	return value
+}
+
+Default :: overload {
+	DefaultType
+	DefaultCount
+}
+
+Main :: task() {
+	typed := Default<int>()
+	counted := Default<42>()
+
+	assert(typed == 7)
+	assert(counted == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"intptr_t DefaultType_int(intptr_t value);",
+		"intptr_t DefaultCount_42(intptr_t value);",
+
+		"intptr_t typed = DefaultType_int(((intptr_t)(7)));",
+		"intptr_t counted = DefaultCount_42(42);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateGenericOverloadMultipleReturns(t *testing.T) {
+	out, reporter := generate(t, `
+PairType :: task <T type>(left T, right T) T, T {
+	return left, right
+}
+
+PairCount :: task <N int>(left int, right int) int, int {
+	return left + N, right + N
+}
+
+Pair :: overload {
+	PairType
+	PairCount
+}
+
+Main :: task() {
+	typeLeft, typeRight := Pair<int>(1, 2)
+	countLeft, countRight := Pair<10>(1, 2)
+
+	assert(typeLeft == 1)
+	assert(typeRight == 2)
+	assert(countLeft == 11)
+	assert(countRight == 12)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct PairType_int_Result {",
+		"typedef struct PairCount_10_Result {",
+
+		"PairType_int_Result PairType_int(intptr_t left, intptr_t right);",
+		"PairCount_10_Result PairCount_10(intptr_t left, intptr_t right);",
+
+		"= PairType_int(1, 2);",
+		"= PairCount_10(1, 2);",
+
+		"intptr_t typeLeft = __seal_multi_result_",
+		"intptr_t typeRight = __seal_multi_result_",
+		"intptr_t countLeft = __seal_multi_result_",
+		"intptr_t countRight = __seal_multi_result_",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(out, "Pair_Result") {
+		t.Fatalf(
+			"overload declaration must not emit a result structure:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateGenericOverloadTaskArgumentCategory(t *testing.T) {
+	out, reporter := generate(t, `
+Double :: task(value int) int {
+	return value * 2
+}
+
+ApplyTask :: task <F task>(value int) int {
+	return F(value)
+}
+
+ApplyType :: task <T type>(value T) T {
+	return value
+}
+
+Apply :: overload {
+	ApplyTask
+	ApplyType
+}
+
+Main :: task() {
+	fromTask := Apply<Double>(21)
+	fromType := Apply<int>(21)
+
+	assert(fromTask == 42)
+	assert(fromType == 21)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"intptr_t ApplyTask_Double(intptr_t value);",
+		"intptr_t ApplyType_int(intptr_t value);",
+
+		"intptr_t fromTask = ApplyTask_Double(21);",
+		"intptr_t fromType = ApplyType_int(21);",
+
+		"Double(value)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestImportedGenericOverloadSpecializationCodegen(
+	t *testing.T,
+) {
+	rulesPkg,
+		rulesResolverPkg,
+		rulesCheckerPkg := exportCGenPackage(
+		t,
+		"rules",
+		`
+ChooseType :: task <T type>(value T) T {
+	return value
+}
+
+ChooseCount :: task <N int>(value int) int {
+	return value + N
+}
+
+Choose :: overload {
+	ChooseType
+	ChooseCount
+}
+`,
+	)
+
+	out, reporter := generateWithPackages(
+		t,
+		`
+Main :: task() {
+	typed := rules.Choose<int>(10)
+	counted := rules.Choose<32>(10)
+
+	assert(typed == 10)
+	assert(counted == 42)
+}
+`,
+		map[string]*PackageInfo{
+			"rules": rulesPkg,
+		},
+		map[string]*resolver.PackageInfo{
+			"rules": rulesResolverPkg,
+		},
+		map[string]*checker.PackageInfo{
+			"rules": rulesCheckerPkg,
+		},
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"intptr_t rules_ChooseType_int(intptr_t value);",
+		"intptr_t rules_ChooseCount_32(intptr_t value);",
+
+		"intptr_t typed = rules_ChooseType_int(10);",
+		"intptr_t counted = rules_ChooseCount_32(10);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(out, "rules_Choose_int(") ||
+		strings.Contains(out, "rules_Choose_32(") {
+		t.Fatalf(
+			"imported overload name itself must not be specialized:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestImportedGenericOverloadRecordsSelectedInstanceRequest(
+	t *testing.T,
+) {
+	rulesPkg,
+		rulesResolverPkg,
+		rulesCheckerPkg := exportCGenPackage(
+		t,
+		"rules",
+		`
+ChooseType :: task <T type>(value T) T {
+	return value
+}
+
+ChooseCount :: task <N int>(value int) int {
+	return value + N
+}
+
+Choose :: overload {
+	ChooseType
+	ChooseCount
+}
+`,
+	)
+
+	file := source.NewFile(
+		"test.seal",
+		`
+Main :: task() {
+	value := rules.Choose<int>(10)
+}
+`,
+	)
+
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(file, reporter)
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	p := parser.New(tokens, reporter)
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	r := resolver.NewWithPackages(
+		reporter,
+		map[string]*resolver.PackageInfo{
+			"rules": rulesResolverPkg,
+		},
+	)
+	r.ResolveFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	c := checker.NewWithPackages(
+		reporter,
+		map[string]*checker.PackageInfo{
+			"rules": rulesCheckerPkg,
+		},
+	)
+	c.CheckFile(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	g := NewWithPackagesAndSemanticInfo(
+		reporter,
+		"",
+		map[string]*PackageInfo{
+			"rules": rulesPkg,
+		},
+		c.SemanticInfo(),
+	)
+
+	_ = g.Generate(parsed)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected CGen diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	requests := g.RequestedGenericInstances()
+
+	var selectedCandidate bool
+	var overloadName bool
+	var wrongCandidate bool
+
+	for _, request := range requests {
+		if request.Kind != GenericInstanceTask ||
+			request.PackageName != "rules" {
+			continue
+		}
+
+		switch request.SymbolName {
+		case "ChooseType":
+			selectedCandidate = true
+
+		case "Choose":
+			overloadName = true
+
+		case "ChooseCount":
+			wrongCandidate = true
+		}
+	}
+
+	if !selectedCandidate {
+		t.Fatalf(
+			"expected request for selected task rules.ChooseType<int>, got %#v",
+			requests,
+		)
+	}
+
+	if overloadName {
+		t.Fatalf(
+			"must not request specialization of overload rules.Choose, got %#v",
+			requests,
+		)
+	}
+
+	if wrongCandidate {
+		t.Fatalf(
+			"must not request unselected candidate rules.ChooseCount, got %#v",
+			requests,
+		)
+	}
+}

@@ -304,6 +304,8 @@ type Generator struct {
 	indexResolutions map[*ast.IndexExpr]checker.IndexResolution
 	lenResolutions   map[*ast.CallExpr]checker.LenResolution
 
+	genericOverloadCalls map[*ast.GenericExpr]checker.GenericOverloadCallResolution
+
 	genericInstanceRequests        *GenericInstanceRequestSet
 	pendingGenericInstanceRequests []GenericInstanceRequest
 
@@ -412,6 +414,7 @@ func NewWithPackagesAndSemanticInfo(
 		importedGenericTasks:          map[string]*ImportedGenericTaskInstance{},
 		genericTasks:                  map[string]*GenericTaskInstance{},
 		emittedGenericTasks:           map[string]bool{},
+		genericOverloadCalls:          cloneGenericOverloadCalls(semantic.GenericOverloadCalls),
 		importedGenericStructs:        map[string]*ImportedGenericStructInstance{},
 		emittedImportedGenericStructs: map[string]bool{},
 		tasks:                         map[string]TaskInfo{},
@@ -485,6 +488,25 @@ func cloneLenResolutions(
 
 	for call, resolution := range input {
 		out[call] = resolution
+	}
+
+	return out
+}
+
+func cloneGenericOverloadCalls(
+	input map[*ast.GenericExpr]checker.GenericOverloadCallResolution,
+) map[*ast.GenericExpr]checker.GenericOverloadCallResolution {
+	if len(input) == 0 {
+		return map[*ast.GenericExpr]checker.GenericOverloadCallResolution{}
+	}
+
+	out := make(
+		map[*ast.GenericExpr]checker.GenericOverloadCallResolution,
+		len(input),
+	)
+
+	for expr, resolution := range input {
+		out[expr] = resolution
 	}
 
 	return out
@@ -1091,19 +1113,29 @@ func (g *Generator) emitSemanticTaskCall(
 	args []ast.Expr,
 	preparedArgs []string,
 ) string {
-	outArgs := make([]string, 0, len(args))
+	outArgs := make(
+		[]string,
+		0,
+		len(info.ParamTypes),
+	)
 
 	for i, arg := range args {
 		prepared := ""
-		if preparedArgs != nil && i < len(preparedArgs) {
+
+		if preparedArgs != nil &&
+			i < len(preparedArgs) {
 			prepared = preparedArgs[i]
 		}
 
 		expected := (*CType)(nil)
+
 		if i < len(info.ParamTypes) {
 			expected = &info.ParamTypes[i]
 		}
 
+		// Bracket and len overloads use a pointer receiver while Seal syntax
+		// passes the value expression. Preserve the existing automatic
+		// reference behavior for the first argument.
 		if i == 0 && expected != nil {
 			outArgs = append(
 				outArgs,
@@ -1117,20 +1149,93 @@ func (g *Generator) emitSemanticTaskCall(
 		}
 
 		if prepared != "" {
-			outArgs = append(outArgs, prepared)
+			outArgs = append(
+				outArgs,
+				prepared,
+			)
 			continue
 		}
 
 		outArgs = append(
 			outArgs,
-			g.emitExpr(arg, expected),
+			g.emitExpr(
+				arg,
+				expected,
+			),
 		)
+	}
+
+	// A checker-selected generic overload may have default parameters.
+	// Candidate selection has already happened, so defaults must come from
+	// the selected specialized TaskInfo rather than from overload lookup.
+	if !info.IsVariadic {
+		for i := len(args); i < len(info.ParamTypes); i++ {
+			if i >= len(info.ParamHasDefault) ||
+				!info.ParamHasDefault[i] {
+				continue
+			}
+
+			if i >= len(info.ParamDefaults) ||
+				info.ParamDefaults[i] == nil {
+				g.error(
+					source.Span{},
+					fmt.Sprintf(
+						"selected task %s is missing default argument %d",
+						name,
+						i+1,
+					),
+				)
+				continue
+			}
+
+			expected := info.ParamTypes[i]
+
+			outArgs = append(
+				outArgs,
+				g.emitExpr(
+					info.ParamDefaults[i],
+					&expected,
+				),
+			)
+		}
 	}
 
 	return fmt.Sprintf(
 		"%s(%s)",
 		name,
 		strings.Join(outArgs, ", "),
+	)
+}
+
+func (g *Generator) emitSemanticTaskCallInTypeContext(
+	packageName string,
+	name string,
+	info TaskInfo,
+	args []ast.Expr,
+	preparedArgs []string,
+) string {
+	if packageName == "" ||
+		packageName == g.packageName {
+		return g.emitSemanticTaskCall(
+			name,
+			info,
+			args,
+			preparedArgs,
+		)
+	}
+
+	old := g.typeContextPackage
+	g.typeContextPackage = packageName
+
+	defer func() {
+		g.typeContextPackage = old
+	}()
+
+	return g.emitSemanticTaskCall(
+		name,
+		info,
+		args,
+		preparedArgs,
 	)
 }
 
@@ -2728,6 +2833,33 @@ func (g *Generator) collectGenericStructInstancesFromExpr(
 		}
 
 	case *ast.GenericExpr:
+		if resolution, ok :=
+			g.genericOverloadCalls[e]; ok {
+			if resolution.Candidate == nil {
+				g.error(
+					e.Span(),
+					"checker generic-overload resolution has no candidate",
+				)
+				return
+			}
+
+			_, _, _ = g.semanticTaskSelection(
+				resolution.Candidate,
+				resolution.PackageName,
+				resolution.GenericArguments,
+				e.Span(),
+			)
+
+			// The checker-provided generic arguments are collected by
+			// semanticTaskSelection according to the selected candidate's
+			// generic parameter categories.
+			g.collectGenericStructInstancesFromExpr(
+				e.Base,
+			)
+
+			return
+		}
+
 		handledAsTask := false
 
 		switch base := e.Base.(type) {
@@ -3200,7 +3332,7 @@ func (g *Generator) substituteExprForCGen(
 			)
 		}
 
-		return &ast.GenericExpr{
+		out := &ast.GenericExpr{
 			Base: g.substituteExprForCGen(
 				e.Base,
 				subst,
@@ -3208,6 +3340,17 @@ func (g *Generator) substituteExprForCGen(
 			Args: args,
 			Loc:  e.Loc,
 		}
+
+		// Generic task bodies are copied through AST substitution before
+		// emission. Preserve the checker-selected overload candidate on the
+		// copied expression, just as index and len resolutions are preserved.
+		if resolution, ok :=
+			g.genericOverloadCalls[e]; ok {
+			g.genericOverloadCalls[out] =
+				resolution
+		}
+
+		return out
 
 	case *ast.SpreadExpr:
 		return &ast.SpreadExpr{
@@ -8608,6 +8751,37 @@ func (g *Generator) emitCallExpr(e *ast.CallExpr) string {
 }
 
 func (g *Generator) emitGenericCall(gen *ast.GenericExpr, args []ast.Expr, preparedArgs []string) string {
+	if resolution, ok :=
+		g.genericOverloadCalls[gen]; ok {
+		if resolution.Candidate == nil {
+			g.error(
+				gen.Span(),
+				"checker generic-overload resolution has no candidate",
+			)
+			return "0"
+		}
+
+		name, info, selected :=
+			g.semanticTaskSelection(
+				resolution.Candidate,
+				resolution.PackageName,
+				resolution.GenericArguments,
+				gen.Span(),
+			)
+
+		if !selected {
+			return "0"
+		}
+
+		return g.emitSemanticTaskCallInTypeContext(
+			resolution.PackageName,
+			name,
+			info,
+			args,
+			preparedArgs,
+		)
+	}
+
 	if id, ok := gen.Base.(*ast.IdentExpr); ok {
 		if task, ok := builtin.LookupTask(id.Name.Name); ok && task.Generic {
 			return g.emitGenericIntrinsicCall(gen, args)
@@ -10086,6 +10260,29 @@ func (g *Generator) callReturnTypes(
 
 	if gen, ok :=
 		call.Callee.(*ast.GenericExpr); ok {
+		if resolution, exists :=
+			g.genericOverloadCalls[gen]; exists {
+			if resolution.Candidate == nil {
+				return []CType{CInvalid}
+			}
+
+			_, info, selected :=
+				g.semanticTaskSelection(
+					resolution.Candidate,
+					resolution.PackageName,
+					resolution.GenericArguments,
+					call.Span(),
+				)
+
+			if !selected {
+				return []CType{CInvalid}
+			}
+
+			return append(
+				[]CType(nil),
+				info.ReturnTypes...,
+			)
+		}
 		if id, ok :=
 			gen.Base.(*ast.IdentExpr); ok {
 			if task, ok :=
@@ -10366,6 +10563,26 @@ func (g *Generator) inferCallExprType(
 
 	if gen, ok :=
 		e.Callee.(*ast.GenericExpr); ok {
+		if resolution, exists :=
+			g.genericOverloadCalls[gen]; exists {
+			if resolution.Candidate == nil {
+				return CInvalid
+			}
+
+			_, info, selected :=
+				g.semanticTaskSelection(
+					resolution.Candidate,
+					resolution.PackageName,
+					resolution.GenericArguments,
+					e.Span(),
+				)
+
+			if !selected {
+				return CInvalid
+			}
+
+			return info.ReturnType
+		}
 		if id, ok :=
 			gen.Base.(*ast.IdentExpr); ok {
 			if task, ok :=
