@@ -9654,19 +9654,19 @@ func (g *Generator) emitGenericIntrinsicCall(
 			)
 
 		case "cstring":
-			if len(args) != 1 {
+			if len(args) != 2 {
 				g.error(
 					gen.Span(),
-					"cast<cstring> expects exactly 1 pointer argument",
+					"cast<cstring> expects exactly 2 arguments: rawptr and uint byte length",
 				)
+
 				return "((const char *)NULL)"
 			}
 
-			sourceType :=
-				g.inferExprType(
-					args[0],
-					nil,
-				)
+			sourceType := g.inferExprType(
+				args[0],
+				nil,
+			)
 
 			if sourceType.SealName == "string" {
 				g.error(
@@ -9677,14 +9677,20 @@ func (g *Generator) emitGenericIntrinsicCall(
 				return "((const char *)NULL)"
 			}
 
-			value := g.emitExpr(
+			data := g.emitExpr(
 				args[0],
 				nil,
 			)
 
+			byteLength := g.emitExpr(
+				args[1],
+				&CUint,
+			)
+
 			return fmt.Sprintf(
-				"((const char *)(%s))",
-				value,
+				"seal_cstring_from_parts((const char *)(%s), (uintptr_t)(%s))",
+				data,
+				byteLength,
 			)
 
 		case "rawptr":
@@ -10800,6 +10806,36 @@ func (g *Generator) emitRuntimeSupport() {
 	g.line("}")
 	g.line("")
 	g.line("return len;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline const char *seal_cstring_from_parts(")
+	g.indent++
+	g.line("const char *data,")
+	g.line("uintptr_t byte_len")
+	g.indent--
+	g.line(") {")
+	g.indent++
+
+	g.line("if (data == NULL) {")
+	g.indent++
+	g.line(`seal_panic_cstring("cannot construct cstring from a null pointer");`)
+	g.line("return NULL;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("if (((const uint8_t *)data)[byte_len] != 0) {")
+	g.indent++
+	g.line(`seal_panic_cstring("cstring data is not null-terminated at the supplied byte length");`)
+	g.line("return NULL;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("return data;")
+
 	g.indent--
 	g.line("}")
 	g.line("")

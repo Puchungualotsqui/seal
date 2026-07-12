@@ -895,7 +895,7 @@ Main :: task() {
 
     csource := c"world"
     cdata := cast<rawptr>(csource)
-    cview := cast<cstring>(cdata)
+    cview := cast<cstring>(cdata, size(csource))
 
     assert(view == source)
     assert(cview == csource)
@@ -918,7 +918,11 @@ Main :: task() {
 
 		"void * cdata = ((void *)(csource));",
 
-		"const char * cview = ((const char *)(cdata));",
+		"const char * cview = seal_cstring_from_parts(",
+
+		"(const char *)(cdata)",
+
+		"(uintptr_t)(seal_cstring_byte_len(csource))",
 
 		"seal_string_equal(view, source)",
 
