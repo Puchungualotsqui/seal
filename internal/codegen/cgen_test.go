@@ -5308,7 +5308,7 @@ Double :: task(value int) int {
 	return value * 2
 }
 
-ApplyTask :: task <F task>(value int) int {
+ApplyTask :: task <F task[(int) int]>(value int) int {
 	return F(value)
 }
 
@@ -5338,13 +5338,17 @@ Main :: task() {
 	}
 
 	checks := []string{
+		"intptr_t Double(intptr_t value);",
 		"intptr_t ApplyTask_Double(intptr_t value);",
 		"intptr_t ApplyType_int(intptr_t value);",
 
 		"intptr_t fromTask = ApplyTask_Double(21);",
 		"intptr_t fromType = ApplyType_int(21);",
 
-		"Double(value)",
+		"intptr_t ApplyTask_Double(intptr_t value) {",
+		"= Double(value);",
+
+		"intptr_t ApplyType_int(intptr_t value) {",
 	}
 
 	for _, want := range checks {
@@ -5355,6 +5359,14 @@ Main :: task() {
 				out,
 			)
 		}
+	}
+
+	if strings.Contains(out, "Apply_Double(") ||
+		strings.Contains(out, "Apply_int(") {
+		t.Fatalf(
+			"overload name itself must not be specialized:\n%s",
+			out,
+		)
 	}
 
 	compileGeneratedC(t, out)
