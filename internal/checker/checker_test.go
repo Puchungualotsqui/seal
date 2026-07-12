@@ -1741,16 +1741,22 @@ Main :: task() {
 		t.Fatalf("expected diagnostics")
 	}
 
-	if !strings.Contains(reporter.String(), `string has no field "len"`) {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	if !strings.Contains(
+		reporter.String(),
+		`string has no accessible field "len"`,
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 }
 
-func TestCStringByteIndexingIsValid(t *testing.T) {
+func TestCStringCharacterIndexingIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     cs := c"hola"
-    c: u8 = cs[0]
+    c: char = cs[0]
 }
 `)
 
@@ -1766,29 +1772,29 @@ func TestCStringIndexAssignmentIsInvalid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     cs := c"hola"
-    cs[0] = 65
+    cs[0] = 'H'
 }
 `)
 
 	assertCheckerDiagnosticContains(
 		t,
 		reporter,
-		"cannot assign to cstring index",
+		"cannot assign to immutable cstring index",
 	)
 }
 
-func TestStringIndexAssignmentRequiresOverload(t *testing.T) {
+func TestStringIndexAssignmentIsInvalid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     s := "hola"
-    s[0] = 72
+    s[0] = 'H'
 }
 `)
 
 	assertCheckerDiagnosticContains(
 		t,
 		reporter,
-		"type string does not define bracket assignment operator []=",
+		"cannot assign to immutable string index",
 	)
 }
 
@@ -2210,21 +2216,82 @@ Main :: task() {
 	}
 }
 
-func TestRejectLenString(t *testing.T) {
+func TestLenStringIsValid(t *testing.T) {
 	_, reporter := check(t, `
 Main :: task() {
     s := "hello"
-    n := len(s)
+    n: uint = len(s)
 }
 `)
 
-	if !reporter.HasErrors() {
-		t.Fatalf("expected diagnostics")
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
+}
 
-	if !strings.Contains(reporter.String(), "len does not support string") {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+func TestLenCStringIsValid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := c"hello"
+    n: uint = len(s)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
+}
+
+func TestStringCharacterIndexingIsValid(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hola"
+    c: char = s[0]
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestStringIndexDoesNotReturnByte(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := "hola"
+    c: u8 = s[0]
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"cannot assign char to u8",
+	)
+}
+
+func TestCStringIndexDoesNotReturnByte(t *testing.T) {
+	_, reporter := check(t, `
+Main :: task() {
+    s := c"hola"
+    c: u8 = s[0]
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"cannot assign char to u8",
+	)
 }
 
 func TestIntrinsicStructAndTaskDeclarations(t *testing.T) {
@@ -7267,7 +7334,7 @@ Get :: pure task(self Box, index int) int {
     Get
 }
 `,
-			want: `must be a pointer to a struct or string`,
+			want: `must be a pointer to a struct`,
 		},
 		{
 			name: "bracket index must be int",
@@ -7374,7 +7441,7 @@ len :: overload {
     BoxLen
 }
 `,
-			want: `must be a pointer to a struct or string`,
+			want: `must be a pointer to a struct`,
 		},
 		{
 			name: "len default parameter",
