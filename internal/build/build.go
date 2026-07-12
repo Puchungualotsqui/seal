@@ -20,6 +20,22 @@ type Dependency struct {
 	Version string
 }
 
+type CompilerProfile struct {
+	CompilerPath *string
+	CompilerArgs *[]string
+
+	CFlags      *[]string
+	LinkFlags   *[]string
+	IncludeDirs *[]string
+	LibraryDirs *[]string
+	Libraries   *[]string
+	Defines     *[]string
+
+	Target   *string
+	Standard *string
+	Linkage  *string
+}
+
 type Config struct {
 	Name    string
 	Version string
@@ -28,18 +44,20 @@ type Config struct {
 
 	Dependencies []Dependency
 
-	Compiler     string
-	CompilerPath string
-	CompilerArgs []string
-	CFlags       []string
-	LinkFlags    []string
-	IncludeDirs  []string
-	LibraryDirs  []string
-	Libraries    []string
-	Defines      []string
-	Target       string
-	Standard     string
-	Linkage      string
+	Compiler         string
+	CompilerPath     string
+	CompilerArgs     []string
+	CompilerProfiles map[string]CompilerProfile
+
+	CFlags      []string
+	LinkFlags   []string
+	IncludeDirs []string
+	LibraryDirs []string
+	Libraries   []string
+	Defines     []string
+	Target      string
+	Standard    string
+	Linkage     string
 
 	AutoInitializeVariables        bool
 	AllowUninitializedVariables    bool

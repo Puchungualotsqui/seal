@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"seal/internal/build"
 	"seal/internal/checker"
@@ -236,38 +237,184 @@ func runPackages(path string) {
 	fmt.Print(build.DebugGraph(graph))
 }
 
-func runBuild(args []string) {
-	path := "."
-	options := build.BuildOptions{}
+func extractCompilerOverride(
+	args []string,
+) ([]string, string, error) {
+	remaining := make(
+		[]string,
+		0,
+		len(args),
+	)
+
+	compiler := ""
+	foundCompiler := false
+
+	setCompiler := func(
+		option string,
+		value string,
+	) error {
+		value = strings.TrimSpace(value)
+
+		if value == "" {
+			return fmt.Errorf(
+				"%s requires a non-empty compiler name",
+				option,
+			)
+		}
+
+		if foundCompiler {
+			return fmt.Errorf(
+				"compiler option was specified more than once",
+			)
+		}
+
+		compiler = value
+		foundCompiler = true
+		return nil
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
-		switch arg {
-		case "--emit-c":
-			options.EmitOnly = true
-
-		case "-o":
+		switch {
+		case arg == "-compiler" ||
+			arg == "--compiler":
 			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "missing output path after -o")
-				os.Exit(1)
+				return nil,
+					"",
+					fmt.Errorf(
+						"%s requires a compiler name",
+						arg,
+					)
 			}
 
 			i++
-			options.Output = args[i]
+
+			if err := setCompiler(
+				arg,
+				args[i],
+			); err != nil {
+				return nil, "", err
+			}
+
+		case strings.HasPrefix(
+			arg,
+			"-compiler=",
+		):
+			if err := setCompiler(
+				"-compiler",
+				strings.TrimPrefix(
+					arg,
+					"-compiler=",
+				),
+			); err != nil {
+				return nil, "", err
+			}
+
+		case strings.HasPrefix(
+			arg,
+			"--compiler=",
+		):
+			if err := setCompiler(
+				"--compiler",
+				strings.TrimPrefix(
+					arg,
+					"--compiler=",
+				),
+			); err != nil {
+				return nil, "", err
+			}
 
 		default:
-			path = arg
+			remaining = append(
+				remaining,
+				arg,
+			)
 		}
 	}
 
-	result, err := build.BuildWorkspace(path, options)
+	return remaining, compiler, nil
+}
+
+func runBuild(args []string) {
+	remainingArgs,
+		compilerOverride,
+		err := extractCompilerOverride(args)
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("built %s\n", result.Output)
+	path := "."
+	options := build.BuildOptions{
+		Compiler: compilerOverride,
+	}
+
+	for i := 0; i < len(remainingArgs); i++ {
+		arg := remainingArgs[i]
+
+		switch arg {
+		case "--emit-c":
+			options.EmitOnly = true
+
+		case "-o", "--output":
+			if i+1 >= len(remainingArgs) {
+				fmt.Fprintf(
+					os.Stderr,
+					"missing output path after %s\n",
+					arg,
+				)
+				os.Exit(1)
+			}
+
+			i++
+			options.Output = remainingArgs[i]
+
+		case "-compiler", "--compiler":
+			// extractCompilerOverride should already have removed these.
+			fmt.Fprintln(
+				os.Stderr,
+				"internal error: compiler option was not extracted",
+			)
+			os.Exit(1)
+
+		default:
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(
+					os.Stderr,
+					"unknown build option %q\n",
+					arg,
+				)
+				os.Exit(1)
+			}
+
+			path = arg
+		}
+	}
+
+	result, err := build.BuildWorkspace(
+		path,
+		options,
+	)
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if options.EmitOnly {
+		fmt.Printf(
+			"generated C in %s\n",
+			result.OutDir,
+		)
+		return
+	}
+
+	fmt.Printf(
+		"built %s\n",
+		result.Output,
+	)
 }
 
 func printToken(tok token.Token) {

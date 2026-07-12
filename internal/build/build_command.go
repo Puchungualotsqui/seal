@@ -20,6 +20,10 @@ type BuildOptions struct {
 	EmitOnly bool
 	OutDir   string
 	Output   string
+
+	// Compiler temporarily overrides [build].compiler.
+	// It does not modify seal.toml.
+	Compiler string
 }
 
 type BuildResult struct {
@@ -224,6 +228,7 @@ func BuildWorkspace(
 			graph,
 			loaded,
 			output,
+			options.Compiler,
 		); err != nil {
 			return nil, err
 		}
@@ -404,13 +409,24 @@ func codegenPackagesForPackage(
 	return out, nil
 }
 
-func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) error {
+func compileExecutable(
+	graph *Graph,
+	loaded []*LoadedPackage,
+	output string,
+	compilerOverride string,
+) error {
 	root := graph.Root
 	if root == nil {
 		return fmt.Errorf("missing root package")
 	}
 
-	compilerPath, compilerArgs, err := compilerCommand(root.Config)
+	compilerConfig := resolveCompilerConfig(
+		root.Config,
+		compilerOverride,
+	)
+
+	compilerPath, compilerArgs, err :=
+		compilerCommand(compilerConfig)
 	if err != nil {
 		return err
 	}
@@ -446,7 +462,10 @@ func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) err
 		}
 	}
 
-	args = append(args, compilerConfigArgs(root.Config)...)
+	args = append(
+		args,
+		compilerConfigArgs(compilerConfig)...,
+	)
 	args = append(args, "-o", output)
 
 	cmd := exec.Command(compilerPath, args...)
@@ -460,12 +479,147 @@ func compileExecutable(graph *Graph, loaded []*LoadedPackage, output string) err
 	return nil
 }
 
-func compilerCommand(cfg Config) (string, []string, error) {
-	compiler := strings.TrimSpace(cfg.Compiler)
-	compilerPath := strings.TrimSpace(cfg.CompilerPath)
-	args := append([]string(nil), cfg.CompilerArgs...)
+func resolveCompilerConfig(
+	cfg Config,
+	compilerOverride string,
+) Config {
+	out := cfg
 
-	if compiler == "" && compilerPath == "" {
+	selected := strings.TrimSpace(
+		compilerOverride,
+	)
+
+	if selected == "" {
+		selected = strings.TrimSpace(
+			cfg.Compiler,
+		)
+	}
+
+	if selected == "" {
+		selected = "cc"
+	}
+
+	selected =
+		normalizeCompilerProfileName(
+			selected,
+		)
+
+	out.Compiler = selected
+
+	if profile, ok :=
+		cfg.CompilerProfiles["default"]; ok {
+		applyCompilerProfile(
+			&out,
+			profile,
+		)
+	}
+
+	if profile, ok :=
+		cfg.CompilerProfiles[selected]; ok {
+		applyCompilerProfile(
+			&out,
+			profile,
+		)
+	}
+
+	return out
+}
+
+func applyCompilerProfile(
+	cfg *Config,
+	profile CompilerProfile,
+) {
+	if cfg == nil {
+		return
+	}
+
+	if profile.CompilerPath != nil {
+		cfg.CompilerPath =
+			*profile.CompilerPath
+	}
+
+	if profile.CompilerArgs != nil {
+		cfg.CompilerArgs = append(
+			[]string(nil),
+			(*profile.CompilerArgs)...,
+		)
+	}
+
+	if profile.CFlags != nil {
+		cfg.CFlags = append(
+			[]string(nil),
+			(*profile.CFlags)...,
+		)
+	}
+
+	if profile.LinkFlags != nil {
+		cfg.LinkFlags = append(
+			[]string(nil),
+			(*profile.LinkFlags)...,
+		)
+	}
+
+	if profile.IncludeDirs != nil {
+		cfg.IncludeDirs = append(
+			[]string(nil),
+			(*profile.IncludeDirs)...,
+		)
+	}
+
+	if profile.LibraryDirs != nil {
+		cfg.LibraryDirs = append(
+			[]string(nil),
+			(*profile.LibraryDirs)...,
+		)
+	}
+
+	if profile.Libraries != nil {
+		cfg.Libraries = append(
+			[]string(nil),
+			(*profile.Libraries)...,
+		)
+	}
+
+	if profile.Defines != nil {
+		cfg.Defines = append(
+			[]string(nil),
+			(*profile.Defines)...,
+		)
+	}
+
+	if profile.Target != nil {
+		cfg.Target = *profile.Target
+	}
+
+	if profile.Standard != nil {
+		cfg.Standard = *profile.Standard
+	}
+
+	if profile.Linkage != nil {
+		cfg.Linkage = *profile.Linkage
+	}
+}
+
+func compilerCommand(
+	cfg Config,
+) (string, []string, error) {
+	compiler :=
+		normalizeCompilerProfileName(
+			cfg.Compiler,
+		)
+
+	compilerPath :=
+		strings.TrimSpace(
+			cfg.CompilerPath,
+		)
+
+	args := append(
+		[]string(nil),
+		cfg.CompilerArgs...,
+	)
+
+	if compiler == "" &&
+		compilerPath == "" {
 		compiler = "cc"
 	}
 
@@ -483,17 +637,18 @@ func compilerCommand(cfg Config) (string, []string, error) {
 	case "clang":
 		return "clang", args, nil
 
-	case "zigcc", "zig-cc", "zig cc":
+	case "zigcc":
 		if len(args) == 0 {
 			args = append(args, "cc")
 		}
+
 		return "zig", args, nil
 
-	case "msvc", "cl":
+	case "msvc":
 		return "cl", args, nil
 
 	default:
-		// Allow custom compiler names directly:
+		// Custom compiler executable:
 		//
 		//     compiler = "tcc"
 		//     compiler = "x86_64-w64-mingw32-gcc"
@@ -506,7 +661,7 @@ func compilerConfigArgs(cfg Config) []string {
 
 	if cfg.Standard != "" {
 		switch normalizedCompilerName(cfg) {
-		case "msvc", "cl":
+		case "msvc":
 			// MSVC does not use -std=c11.
 			// Add MSVC-specific flags later if needed.
 		default:
@@ -516,7 +671,7 @@ func compilerConfigArgs(cfg Config) []string {
 
 	if cfg.Target != "" {
 		switch normalizedCompilerName(cfg) {
-		case "zigcc", "zig-cc", "zig cc":
+		case "zigcc":
 			args = append(args, "-target", cfg.Target)
 		default:
 			// GCC/Clang target handling is platform-specific.
@@ -547,19 +702,34 @@ func compilerConfigArgs(cfg Config) []string {
 	return args
 }
 
-func normalizedCompilerName(cfg Config) string {
+func normalizedCompilerName(
+	cfg Config,
+) string {
 	if cfg.Compiler != "" {
-		return strings.ToLower(strings.TrimSpace(cfg.Compiler))
+		return normalizeCompilerProfileName(
+			cfg.Compiler,
+		)
 	}
 
-	base := strings.ToLower(filepath.Base(cfg.CompilerPath))
-	base = strings.TrimSuffix(base, ".exe")
+	base := strings.ToLower(
+		filepath.Base(cfg.CompilerPath),
+	)
 
-	if base == "zig" {
+	base = strings.TrimSuffix(
+		base,
+		".exe",
+	)
+
+	switch base {
+	case "zig":
 		return "zigcc"
-	}
 
-	return base
+	case "cl":
+		return "msvc"
+
+	default:
+		return base
+	}
 }
 
 func withDiagnostics(err error, reporter *diag.Reporter) error {

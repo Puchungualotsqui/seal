@@ -28,18 +28,20 @@ func defaultConfig() Config {
 		Version: "0.1.0",
 		Kind:    KindLibrary,
 
-		Compiler:     "",
-		CompilerPath: "",
-		CompilerArgs: nil,
-		CFlags:       nil,
-		LinkFlags:    nil,
-		IncludeDirs:  nil,
-		LibraryDirs:  nil,
-		Libraries:    nil,
-		Defines:      nil,
-		Target:       "",
-		Standard:     "c11",
-		Linkage:      "static",
+		Compiler:         "",
+		CompilerPath:     "",
+		CompilerArgs:     nil,
+		CompilerProfiles: map[string]CompilerProfile{},
+
+		CFlags:      nil,
+		LinkFlags:   nil,
+		IncludeDirs: nil,
+		LibraryDirs: nil,
+		Libraries:   nil,
+		Defines:     nil,
+		Target:      "",
+		Standard:    "c11",
+		Linkage:     "static",
 
 		AutoInitializeVariables:        true,
 		AllowUninitializedVariables:    false,
@@ -100,6 +102,13 @@ func (p *configParser) parse() error {
 
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
+
+		var err error
+
+		value, err = p.collectMultilineValue(value)
+		if err != nil {
+			return err
+		}
 
 		if p.section != "" {
 			key = p.section + "." + key
@@ -231,6 +240,25 @@ func (p *configParser) assign(
 	key string,
 	value string,
 ) error {
+	if strings.HasPrefix(key, "compiler.") {
+		parts := strings.Split(key, ".")
+
+		if len(parts) != 3 {
+			return p.err(
+				fmt.Sprintf(
+					"invalid compiler profile key %q",
+					key,
+				),
+			)
+		}
+
+		return p.assignCompilerProfile(
+			parts[1],
+			parts[2],
+			value,
+		)
+	}
+
 	switch key {
 	case "name", "package.name":
 		s, err := parseString(value)
@@ -463,6 +491,178 @@ func (p *configParser) assign(
 	return nil
 }
 
+func (p *configParser) assignCompilerProfile(
+	profileName string,
+	field string,
+	value string,
+) error {
+	profileName = normalizeCompilerProfileName(
+		profileName,
+	)
+
+	if profileName == "" {
+		return p.err("compiler profile name cannot be empty")
+	}
+
+	if p.cfg.CompilerProfiles == nil {
+		p.cfg.CompilerProfiles =
+			map[string]CompilerProfile{}
+	}
+
+	profile := p.cfg.CompilerProfiles[profileName]
+
+	assignString := func(target **string) error {
+		parsed, err := parseString(value)
+		if err != nil {
+			return err
+		}
+
+		*target = stringPointer(parsed)
+		return nil
+	}
+
+	assignArray := func(target **[]string) error {
+		parsed, err := parseStringArray(value)
+		if err != nil {
+			return err
+		}
+
+		*target = stringSlicePointer(parsed)
+		return nil
+	}
+
+	switch field {
+	case "path", "compiler_path":
+		if profileName == "default" {
+			return p.err(
+				"compiler.default cannot set path; " +
+					"set path in a named compiler profile",
+			)
+		}
+
+		if err := assignString(
+			&profile.CompilerPath,
+		); err != nil {
+			return err
+		}
+
+	case "args", "compiler_args":
+		if err := assignArray(
+			&profile.CompilerArgs,
+		); err != nil {
+			return err
+		}
+
+	case "c_flags":
+		if err := assignArray(
+			&profile.CFlags,
+		); err != nil {
+			return err
+		}
+
+	case "link_flags":
+		if err := assignArray(
+			&profile.LinkFlags,
+		); err != nil {
+			return err
+		}
+
+	case "include_dirs":
+		if err := assignArray(
+			&profile.IncludeDirs,
+		); err != nil {
+			return err
+		}
+
+	case "library_dirs":
+		if err := assignArray(
+			&profile.LibraryDirs,
+		); err != nil {
+			return err
+		}
+
+	case "libraries":
+		if err := assignArray(
+			&profile.Libraries,
+		); err != nil {
+			return err
+		}
+
+	case "defines":
+		if err := assignArray(
+			&profile.Defines,
+		); err != nil {
+			return err
+		}
+
+	case "target":
+		if err := assignString(
+			&profile.Target,
+		); err != nil {
+			return err
+		}
+
+	case "standard":
+		if err := assignString(
+			&profile.Standard,
+		); err != nil {
+			return err
+		}
+
+	case "linkage":
+		if err := assignString(
+			&profile.Linkage,
+		); err != nil {
+			return err
+		}
+
+	default:
+		return p.err(
+			fmt.Sprintf(
+				"unknown compiler profile field %q",
+				field,
+			),
+		)
+	}
+
+	p.cfg.CompilerProfiles[profileName] = profile
+	return nil
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+func stringSlicePointer(
+	value []string,
+) *[]string {
+	copied := append(
+		[]string(nil),
+		value...,
+	)
+
+	return &copied
+}
+
+func normalizeCompilerProfileName(
+	name string,
+) string {
+	name = strings.ToLower(
+		strings.TrimSpace(name),
+	)
+
+	switch name {
+	case "zig-cc", "zig cc":
+		return "zigcc"
+
+	case "cl":
+		return "msvc"
+
+	default:
+		return name
+	}
+}
+
 func (p *configParser) cleanLine(line string) string {
 	line = strings.TrimSpace(line)
 
@@ -496,7 +696,7 @@ func parseStringArray(value string) ([]string, error) {
 
 	content := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
 	if content == "" {
-		return nil, nil
+		return []string{}, nil
 	}
 
 	parts := splitComma(content)
@@ -564,6 +764,99 @@ func splitTopLevelObjects(input string) []string {
 	}
 
 	return result
+}
+
+func (p *configParser) collectMultilineValue(
+	value string,
+) (string, error) {
+	value = strings.TrimSpace(value)
+
+	if !strings.HasPrefix(value, "[") {
+		return value, nil
+	}
+
+	var content strings.Builder
+	content.WriteString(value)
+
+	depth, err := arrayBracketDepth(value)
+	if err != nil {
+		return "", p.err(err.Error())
+	}
+
+	for depth > 0 {
+		if p.index >= len(p.lines) {
+			return "", p.err("array is not closed")
+		}
+
+		line := p.cleanLine(p.lines[p.index])
+		p.index++
+
+		if line == "" {
+			continue
+		}
+
+		content.WriteByte(' ')
+		content.WriteString(line)
+
+		lineDepth, err := arrayBracketDepth(line)
+		if err != nil {
+			return "", p.err(err.Error())
+		}
+
+		depth += lineDepth
+	}
+
+	if depth != 0 {
+		return "", p.err("array is not closed")
+	}
+
+	return content.String(), nil
+}
+
+func arrayBracketDepth(
+	value string,
+) (int, error) {
+	depth := 0
+	inString := false
+	escaped := false
+
+	for _, ch := range value {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+
+			switch ch {
+			case '\\':
+				escaped = true
+
+			case '"':
+				inString = false
+			}
+
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inString = true
+
+		case '[':
+			depth++
+
+		case ']':
+			depth--
+
+			if depth < 0 {
+				return 0, fmt.Errorf(
+					"unexpected closing array bracket",
+				)
+			}
+		}
+	}
+
+	return depth, nil
 }
 
 func splitComma(input string) []string {
