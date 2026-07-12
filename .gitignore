@@ -1,2 +1,5 @@
 .seal/
 **/.seal/
+compiler
+main
+seal
