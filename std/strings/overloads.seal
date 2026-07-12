@@ -1,0 +1,7 @@
+[] :: overload {
+    ByteAt
+}
+
+len :: overload {
+    ByteLen
+}

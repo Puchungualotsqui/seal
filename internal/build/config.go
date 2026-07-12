@@ -132,48 +132,46 @@ func (p *configParser) parse() error {
 	return nil
 }
 
-func (p *configParser) parseDependencies(value string) ([]Dependency, error) {
-	var content string
+func (p *configParser) parseDependencies(
+	value string,
+) ([]Dependency, error) {
+	content := strings.TrimSpace(value)
 
-	if strings.HasPrefix(value, "[") && strings.Contains(value, "]") {
-		content = value
-	} else if value == "[" {
-		var b strings.Builder
-		b.WriteString(value)
-
-		for p.index < len(p.lines) {
-			line := p.cleanLine(p.lines[p.index])
-			p.index++
-
-			b.WriteString(line)
-
-			if strings.Contains(line, "]") {
-				break
-			}
-		}
-
-		content = b.String()
-	} else {
-		return nil, p.err("dependencies must be an array")
+	if !strings.HasPrefix(content, "[") {
+		return nil, p.err(
+			"dependencies must be an array",
+		)
 	}
 
-	content = strings.TrimSpace(content)
-
-	if !strings.HasPrefix(content, "[") || !strings.HasSuffix(content, "]") {
-		return nil, p.err("dependencies array is not closed")
+	if !strings.HasSuffix(content, "]") {
+		return nil, p.err(
+			"dependencies array is not closed",
+		)
 	}
 
-	content = strings.TrimPrefix(content, "[")
-	content = strings.TrimSuffix(content, "]")
+	content = strings.TrimPrefix(
+		content,
+		"[",
+	)
+
+	content = strings.TrimSuffix(
+		content,
+		"]",
+	)
+
 	content = strings.TrimSpace(content)
 
 	if content == "" {
-		return nil, nil
+		return []Dependency{}, nil
 	}
 
-	var deps []Dependency
-
 	entries := splitTopLevelObjects(content)
+
+	dependencies := make(
+		[]Dependency,
+		0,
+		len(entries),
+	)
 
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
@@ -185,55 +183,120 @@ func (p *configParser) parseDependencies(value string) ([]Dependency, error) {
 		if strings.HasPrefix(entry, `"`) {
 			name, err := parseString(entry)
 			if err != nil {
-				return nil, err
+				return nil, p.err(
+					fmt.Sprintf(
+						"invalid dependency: %v",
+						err,
+					),
+				)
 			}
 
-			deps = append(deps, Dependency{Name: name})
+			if name == "" {
+				return nil, p.err(
+					"dependency name cannot be empty",
+				)
+			}
+
+			dependencies = append(
+				dependencies,
+				Dependency{
+					Name: name,
+				},
+			)
+
 			continue
 		}
 
-		if !strings.HasPrefix(entry, "{") || !strings.HasSuffix(entry, "}") {
-			return nil, p.err("dependency must be string or { name = ..., version = ... }")
+		if !strings.HasPrefix(entry, "{") ||
+			!strings.HasSuffix(entry, "}") {
+			return nil, p.err(
+				"dependency must be a string or " +
+					"{ name = ..., version = ... }",
+			)
 		}
 
-		entry = strings.TrimPrefix(entry, "{")
-		entry = strings.TrimSuffix(entry, "}")
+		objectContent := strings.TrimSpace(
+			strings.TrimSuffix(
+				strings.TrimPrefix(
+					entry,
+					"{",
+				),
+				"}",
+			),
+		)
 
-		dep := Dependency{}
-		fields := splitComma(entry)
+		if objectContent == "" {
+			return nil, p.err(
+				"dependency object cannot be empty",
+			)
+		}
 
-		for _, field := range fields {
-			k, v, ok := strings.Cut(field, "=")
+		dependency := Dependency{}
+
+		for _, field := range splitComma(objectContent) {
+			field = strings.TrimSpace(field)
+
+			if field == "" {
+				continue
+			}
+
+			key, fieldValue, ok := strings.Cut(
+				field,
+				"=",
+			)
+
 			if !ok {
-				return nil, p.err("dependency field must be key = value")
+				return nil, p.err(
+					"dependency field must be key = value",
+				)
 			}
 
-			k = strings.TrimSpace(k)
-			v = strings.TrimSpace(v)
+			key = strings.TrimSpace(key)
+			fieldValue = strings.TrimSpace(fieldValue)
 
-			s, err := parseString(v)
+			parsedValue, err :=
+				parseString(fieldValue)
+
 			if err != nil {
-				return nil, err
+				return nil, p.err(
+					fmt.Sprintf(
+						"invalid dependency field %q: %v",
+						key,
+						err,
+					),
+				)
 			}
 
-			switch k {
+			switch key {
 			case "name":
-				dep.Name = s
+				dependency.Name = parsedValue
+
 			case "version":
-				dep.Version = s
+				dependency.Version = parsedValue
+
 			default:
-				return nil, p.err(fmt.Sprintf("unknown dependency field %q", k))
+				return nil, p.err(
+					fmt.Sprintf(
+						"unknown dependency field %q",
+						key,
+					),
+				)
 			}
 		}
 
-		if dep.Name == "" {
-			return nil, p.err("dependency name is required")
+		if dependency.Name == "" {
+			return nil, p.err(
+				"dependency name is required",
+			)
 		}
 
-		deps = append(deps, dep)
+		dependencies = append(
+			dependencies,
+			dependency,
+		)
 	}
 
-	return deps, nil
+	return dependencies, nil
 }
 
 func (p *configParser) assign(
@@ -783,31 +846,45 @@ func (p *configParser) collectMultilineValue(
 		return "", p.err(err.Error())
 	}
 
+	if depth < 0 {
+		return "", p.err(
+			"unexpected closing array bracket",
+		)
+	}
+
 	for depth > 0 {
 		if p.index >= len(p.lines) {
-			return "", p.err("array is not closed")
+			return "", p.err(
+				"array is not closed",
+			)
 		}
 
-		line := p.cleanLine(p.lines[p.index])
+		line := p.cleanLine(
+			p.lines[p.index],
+		)
 		p.index++
 
 		if line == "" {
 			continue
 		}
 
-		content.WriteByte(' ')
-		content.WriteString(line)
+		lineDepth, err :=
+			arrayBracketDepth(line)
 
-		lineDepth, err := arrayBracketDepth(line)
 		if err != nil {
 			return "", p.err(err.Error())
 		}
 
 		depth += lineDepth
-	}
 
-	if depth != 0 {
-		return "", p.err("array is not closed")
+		if depth < 0 {
+			return "", p.err(
+				"unexpected closing array bracket",
+			)
+		}
+
+		content.WriteByte(' ')
+		content.WriteString(line)
 	}
 
 	return content.String(), nil
@@ -847,13 +924,13 @@ func arrayBracketDepth(
 
 		case ']':
 			depth--
-
-			if depth < 0 {
-				return 0, fmt.Errorf(
-					"unexpected closing array bracket",
-				)
-			}
 		}
+	}
+
+	if inString {
+		return 0, fmt.Errorf(
+			"unterminated string in array value",
+		)
 	}
 
 	return depth, nil

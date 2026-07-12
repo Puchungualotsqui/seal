@@ -1,13 +1,4 @@
 [package]
-name = "mem_test"
+name = "mem"
 version = "0.1.0"
-kind = "executable"
-dependencies = ["mem"]
-
-[build]
-compiler = "cc"
-standard = "c11"
-c_flags = [
-    "-Wall",
-    "-Wextra",
-]
+kind = "library"
