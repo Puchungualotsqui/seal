@@ -1,0 +1,14 @@
+Main :: task() {
+    empty := ""
+    hello := "hello"
+    enye := "ñ"
+
+    assert(strings.IsEmpty(empty))
+    assert(strings.IsNotEmpty(hello))
+
+    assert(strings.ByteLen(hello) == 5)
+    assert(strings.ByteLen(enye) == 2)
+
+    assert(strings.Equal("Seal", "Seal"))
+    assert(strings.NotEqual("Seal", "C"))
+}
