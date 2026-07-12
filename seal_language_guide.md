@@ -1553,7 +1553,22 @@ a := Sum(1, 2)
 b := Sum(1.0, 2.0)
 ```
 
-The checker selects the candidate based on argument types.
+The checker selects the candidate based on argument types. And also compiler time arguments.
+
+```seal
+SumInt :: task(a int, b int) int {
+    return a + b
+}
+
+SumGen :: task<T type>(a T, b f64) f64 {
+    return a + b
+}
+
+Sum :: overload {
+    SumInt
+    SumGen
+}
+```
 
 ### 26.2 Operator overload
 
