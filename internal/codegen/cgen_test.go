@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -109,6 +110,82 @@ func generate(t *testing.T, input string) (string, *diag.Reporter) {
 	out := g.Generate(parsed)
 
 	return out, reporter
+}
+
+func runGeneratedC(t *testing.T, generated string) {
+	t.Helper()
+
+	var compiler string
+
+	for _, candidate := range []string{"cc", "clang", "gcc"} {
+		path, err := exec.LookPath(candidate)
+		if err == nil {
+			compiler = path
+			break
+		}
+	}
+
+	if compiler == "" {
+		t.Skip(
+			"no C compiler found; install cc, clang, or gcc to run generated-C execution tests",
+		)
+	}
+
+	tempDir := t.TempDir()
+	sourcePath := filepath.Join(
+		tempDir,
+		"generated.c",
+	)
+
+	executableName := "generated"
+	if runtime.GOOS == "windows" {
+		executableName += ".exe"
+	}
+
+	executablePath := filepath.Join(
+		tempDir,
+		executableName,
+	)
+
+	if err := os.WriteFile(
+		sourcePath,
+		[]byte(generated),
+		0o600,
+	); err != nil {
+		t.Fatalf(
+			"failed to write generated C source: %v",
+			err,
+		)
+	}
+
+	compile := exec.Command(
+		compiler,
+		"-std=c11",
+		sourcePath,
+		"-o",
+		executablePath,
+	)
+
+	output, err := compile.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"generated C failed to compile with %s:\n%s\n\ngenerated C:\n%s",
+			compiler,
+			string(output),
+			generated,
+		)
+	}
+
+	run := exec.Command(executablePath)
+
+	output, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"generated executable failed:\n%s\n\ngenerated C:\n%s",
+			string(output),
+			generated,
+		)
+	}
 }
 
 func TestGenerateSimpleMain(t *testing.T) {
@@ -546,27 +623,60 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, "typedef struct sealAny") {
-		t.Fatalf("expected sealAny runtime, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		"typedef struct sealAny",
+	) {
+		t.Fatalf(
+			"expected sealAny runtime, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "sealAny x = sealAny_int(10);") {
-		t.Fatalf("expected any boxing, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		"sealAny x = sealAny_int(10);",
+	) {
+		t.Fatalf(
+			"expected any boxing, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "uintptr_t CountAny(sealVariadic_any args)") {
-		t.Fatalf("expected CountAny variadic any signature, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		"uintptr_t CountAny(sealVariadic_any args)",
+	) {
+		t.Fatalf(
+			"expected CountAny variadic any signature, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, `sealAny_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5})`) {
-		t.Fatalf("expected string boxing, got:\n%s", out)
+	expectedString := `sealAny_string((sealString){.data = (const uint8_t *)"hello", .len = (uintptr_t)5})`
+
+	if !strings.Contains(out, expectedString) {
+		t.Fatalf(
+			"expected string boxing %q, got:\n%s",
+			expectedString,
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "sealAny_f64(3.14)") {
-		t.Fatalf("expected f64 boxing, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		"sealAny_f64(3.14)",
+	) {
+		t.Fatalf(
+			"expected f64 boxing, got:\n%s",
+			out,
+		)
 	}
 }
 
@@ -664,50 +774,292 @@ Main :: task() {
 
 func TestGenerateStringCStringAndChar(t *testing.T) {
 	out, reporter := generate(t, `
-printf :: extern("printf") task(format cstring, args ...any) int
-
 Main :: task() {
     c: char = 'ñ'
     s: string = "hola"
     cs: cstring = c"world"
 
-    n: uint = size(s)
+    stringBytes: uint = size(s)
+    stringChars: uint = len(s)
 
-    printf(c"%zu %u %s", n, c, cs)
+    cstringBytes: uint = size(cs)
+    cstringChars: uint = len(cs)
+
+    stringFirst: char = s[0]
+    cstringLast: char = cs[-1]
+
+    sameString := s == "hola"
+    sameCString := cs == c"world"
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, "typedef struct sealString") {
-		t.Fatalf("expected sealString runtime, got:\n%s", out)
+	checks := []string{
+		"typedef struct sealString {",
+		"const uint8_t *data;",
+		"uintptr_t len;",
+		"} sealString;",
+
+		"uint32_t c = ((uint32_t)241);",
+
+		`sealString s = (sealString){.data = (const uint8_t *)"hola", .len = (uintptr_t)4};`,
+		`const char * cs = "world";`,
+
+		"uintptr_t stringBytes = (uintptr_t)(s).len;",
+		"uintptr_t stringChars = seal_string_scalar_len(s);",
+
+		"uintptr_t cstringBytes = seal_cstring_byte_len(cs);",
+		"uintptr_t cstringChars = seal_cstring_scalar_len(cs);",
+
+		"uint32_t stringFirst = seal_string_index(s, 0);",
+		"uint32_t cstringLast = seal_cstring_index(cs, (-1));",
+
+		`bool sameString = seal_string_equal(s, (sealString){.data = (const uint8_t *)"hola", .len = (uintptr_t)4});`,
+		`bool sameCString = seal_cstring_equal(cs, "world");`,
 	}
 
-	if strings.Contains(out, "sealString_len") {
-		t.Fatalf("did not expect removed sealString_len helper, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
 	}
 
-	if strings.Contains(out, "sealString_at") {
-		t.Fatalf("did not expect removed sealString_at helper, got:\n%s", out)
+	if strings.Contains(out, ".byte_len") {
+		t.Fatalf(
+			"generated C still uses obsolete byte_len field:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, `sealString s = (sealString){.data = (const unsigned char *)"hola", .byte_len = 4};`) {
-		t.Fatalf("expected string literal lowering, got:\n%s", out)
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateUTF8LiteralByteEncoding(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    s: string = "ñ🙂"
+    cs: cstring = c"ñ🙂"
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, `const char * cs = "world";`) {
-		t.Fatalf("expected cstring literal lowering, got:\n%s", out)
+	expectedString :=
+		`sealString s = (sealString){.data = (const uint8_t *)"\303\261\360\237\231\202", .len = (uintptr_t)6};`
+
+	if !strings.Contains(out, expectedString) {
+		t.Fatalf(
+			"expected UTF-8 string bytes %q, got:\n%s",
+			expectedString,
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "uint32_t c = 241;") {
-		t.Fatalf("expected char lowering for ñ, got:\n%s", out)
+	expectedCString :=
+		`const char * cs = "\303\261\360\237\231\202";`
+
+	if !strings.Contains(out, expectedCString) {
+		t.Fatalf(
+			"expected UTF-8 cstring bytes %q, got:\n%s",
+			expectedCString,
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "uintptr_t n = (uintptr_t)(s).byte_len;") {
-		t.Fatalf("expected size(s) lowering, got:\n%s", out)
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateBorrowedStringAndCStringCasts(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    source := "hello"
+    data := cast<rawptr>(source)
+    view := cast<string>(data, size(source))
+
+    csource := c"world"
+    cdata := cast<rawptr>(csource)
+    cview := cast<cstring>(cdata)
+
+    assert(view == source)
+    assert(cview == csource)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
+
+	checks := []string{
+		"void * data = ((void *)((source).data));",
+
+		"sealString view = (sealString){.data = (const uint8_t *)(data),",
+
+		".len = (uintptr_t)((uintptr_t)(source).len)",
+
+		"void * cdata = ((void *)(csource));",
+
+		"const char * cview = ((const char *)(cdata));",
+
+		"seal_string_equal(view, source)",
+
+		"seal_cstring_equal(cview, csource)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if strings.Contains(out, "malloc(") {
+		t.Fatalf(
+			"borrowed casts must not allocate:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(out, "free(") {
+		t.Fatalf(
+			"borrowed casts must not free memory:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateCStringExternABI(t *testing.T) {
+	out, reporter := generate(t, `
+SetWindowTitle :: extern("seal_test_set_window_title") task(
+    title cstring,
+)
+
+GetError :: extern("seal_test_get_error") task() cstring
+
+Main :: task() {
+    SetWindowTitle(c"Seal")
+    message := GetError()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"void seal_test_set_window_title(const char * title);",
+
+		"const char * seal_test_get_error(void);",
+
+		`seal_test_set_window_title("Seal");`,
+
+		"const char * message = seal_test_get_error();",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestRunGeneratedUnicodeStringOperations(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    text := "Año🙂"
+    ctext := c"Año🙂"
+
+    assert(size(text) == 8)
+    assert(len(text) == 4)
+
+    assert(size(ctext) == 8)
+    assert(len(ctext) == 4)
+
+    assert(text[0] == 'A')
+    assert(text[1] == 'ñ')
+    assert(text[-1] == '🙂')
+
+    assert(ctext[0] == 'A')
+    assert(ctext[1] == 'ñ')
+    assert(ctext[-1] == '🙂')
+
+    assert(text == "Año🙂")
+    assert(text != "Otro")
+
+    assert(ctext == c"Año🙂")
+    assert(ctext != c"Otro")
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"seal_string_scalar_len(text)",
+		"seal_cstring_scalar_len(ctext)",
+
+		"seal_string_index(text, 0)",
+		"seal_string_index(text, 1)",
+		"seal_string_index(text, (-1))",
+
+		"seal_cstring_index(ctext, 0)",
+		"seal_cstring_index(ctext, 1)",
+		"seal_cstring_index(ctext, (-1))",
+
+		"seal_string_equal(",
+		"seal_cstring_equal(",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	runGeneratedC(t, out)
 }
 
 func TestGenerateForwardVariadicIntoVariadicTask(t *testing.T) {
@@ -1138,33 +1490,42 @@ Goblin :: struct {
 Main :: task() {
     x := 10
     s := "ñ"
+    cs := c"ñ"
 
     a: uint = size(int)
     b: uint = size(Goblin)
     c: uint = size(x)
     d: uint = size(s)
+    e: uint = size(cs)
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, "uintptr_t a = (uintptr_t)sizeof(intptr_t);") {
-		t.Fatalf("expected size(int)")
+	checks := []string{
+		"uintptr_t a = (uintptr_t)sizeof(intptr_t);",
+		"uintptr_t b = (uintptr_t)sizeof(Goblin);",
+		"uintptr_t c = (uintptr_t)sizeof(x);",
+		"uintptr_t d = (uintptr_t)(s).len;",
+		"uintptr_t e = seal_cstring_byte_len(cs);",
 	}
 
-	if !strings.Contains(out, "uintptr_t b = (uintptr_t)sizeof(Goblin);") {
-		t.Fatalf("expected size(Goblin)")
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
 	}
 
-	if !strings.Contains(out, "uintptr_t c = (uintptr_t)sizeof(x);") {
-		t.Fatalf("expected size(x)")
-	}
-
-	if !strings.Contains(out, "uintptr_t d = (uintptr_t)(s).byte_len;") {
-		t.Fatalf("expected size(string)")
-	}
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateAssertPrimitive(t *testing.T) {
@@ -1461,32 +1822,35 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, "intptr_t Identity_int(intptr_t value);") {
-		t.Fatalf("expected Identity_int prototype, got:\n%s", out)
+	checks := []string{
+		"intptr_t Identity_int(intptr_t value);",
+		"sealString Identity_string(sealString value);",
+
+		"intptr_t Identity_int(intptr_t value) {",
+		"sealString Identity_string(sealString value) {",
+
+		"intptr_t a = Identity_int(10);",
+
+		`sealString b = Identity_string((sealString){.data = (const uint8_t *)"hello", .len = (uintptr_t)5});`,
 	}
 
-	if !strings.Contains(out, "sealString Identity_string(sealString value);") {
-		t.Fatalf("expected Identity_string prototype, got:\n%s", out)
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
 	}
 
-	if !strings.Contains(out, "intptr_t Identity_int(intptr_t value) {") {
-		t.Fatalf("expected Identity_int body, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sealString Identity_string(sealString value) {") {
-		t.Fatalf("expected Identity_string body, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "intptr_t a = Identity_int(10);") {
-		t.Fatalf("expected Identity_int call, got:\n%s", out)
-	}
-
-	if !strings.Contains(out, "sealString b = Identity_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});") {
-		t.Fatalf("expected Identity_string call, got:\n%s", out)
-	}
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateGenericTaskReturnsGenericStruct(t *testing.T) {
@@ -1564,46 +1928,60 @@ Main :: task() {
 	}
 }
 
-func TestGenerateGenericTaskCallsGenericTaskWithTypeParam(t *testing.T) {
+func TestGenerateGenericTaskCallsGenericTaskWithTypeParam(
+	t *testing.T,
+) {
 	out, reporter := generate(t, `
 Identity :: task <T type>(value T) T {
-	return value
+    return value
 }
 
 Forward :: task <T type>(value T) T {
-	return Identity<T>(value)
+    return Identity<T>(value)
 }
 
 Main :: task() {
-	a := Forward<int>(10)
-	b := Forward<string>("hello")
+    a := Forward<int>(10)
+    b := Forward<string>("hello")
 
-	assert(a == 10)
-	assert(size(b) > 0)
+    assert(a == 10)
+    assert(size(b) > 0)
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
 		"intptr_t Identity_int(intptr_t value);",
 		"sealString Identity_string(sealString value);",
+
 		"intptr_t Forward_int(intptr_t value);",
 		"sealString Forward_string(sealString value);",
-		"return __seal_return_value_",
+
 		"Identity_int(value)",
 		"Identity_string(value)",
+
 		"intptr_t a = Forward_int(10);",
-		"sealString b = Forward_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});",
+
+		`sealString b = Forward_string((sealString){.data = (const uint8_t *)"hello", .len = (uintptr_t)5});`,
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+			t.Fatalf(
+				"expected generated output to contain %q\n\n%s",
+				want,
+				out,
+			)
 		}
 	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateGenericTaskUsesGenericStructOnlyInBody(t *testing.T) {
@@ -1677,36 +2055,41 @@ Main :: task() {
 	}
 }
 
-func TestGenerateGenericTaskNestedGenericStructInReturn(t *testing.T) {
+func TestGenerateGenericTaskNestedGenericStructInReturn(
+	t *testing.T,
+) {
 	out, reporter := generate(t, `
 Box :: struct <T type> {
-	value T
+    value T
 }
 
 Pair :: struct <A type, B type> {
-	first A
-	second B
+    first A
+    second B
 }
 
 MakeNested :: task <T type>(value T) Box<Pair<int, T>> {
-	return Box<Pair<int, T>>{
-		value = Pair<int, T>{
-			first = 1,
-			second = value,
-		},
-	}
+    return Box<Pair<int, T>>{
+        value = Pair<int, T>{
+            first = 1,
+            second = value,
+        },
+    }
 }
 
 Main :: task() {
-	nested := MakeNested<string>("hello")
-	pair := nested.value
-	assert(pair.first == 1)
-	assert(size(pair.second) > 0)
+    nested := MakeNested<string>("hello")
+    pair := nested.value
+    assert(pair.first == 1)
+    assert(size(pair.second) > 0)
 }
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
@@ -1714,21 +2097,32 @@ Main :: task() {
 		"intptr_t first;",
 		"sealString second;",
 		"} Pair_int_string;",
+
 		"typedef struct Box_Pair_int_string {",
 		"Pair_int_string value;",
 		"} Box_Pair_int_string;",
+
 		"Box_Pair_int_string MakeNested_string(sealString value);",
 		"Box_Pair_int_string MakeNested_string(sealString value) {",
+
 		"return __seal_return_value_",
-		"Box_Pair_int_string nested = MakeNested_string((sealString){.data = (const unsigned char *)\"hello\", .byte_len = 5});",
+
+		`Box_Pair_int_string nested = MakeNested_string((sealString){.data = (const uint8_t *)"hello", .len = (uintptr_t)5});`,
+
 		"Pair_int_string pair = (nested).value;",
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+			t.Fatalf(
+				"expected generated output to contain %q\n\n%s",
+				want,
+				out,
+			)
 		}
 	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateGenericTaskParameterValueCall(t *testing.T) {
@@ -5108,28 +5502,28 @@ func TestGenerateGenericOverloadInsideGenericTaskSpecialization(
 ) {
 	out, reporter := generate(t, `
 SelectType :: task <T type>(value T) T {
-	return value
+    return value
 }
 
 SelectCount :: task <N int>(value int) int {
-	return value + N
+    return value + N
 }
 
 Select :: overload {
-	SelectType
-	SelectCount
+    SelectType
+    SelectCount
 }
 
 Forward :: task <T type>(value T) T {
-	return Select<T>(value)
+    return Select<T>(value)
 }
 
 Main :: task() {
-	integer := Forward<int>(42)
-	text := Forward<string>("hello")
+    integer := Forward<int>(42)
+    text := Forward<string>("hello")
 
-	assert(integer == 42)
-	assert(size(text) > 0)
+    assert(integer == 42)
+    assert(size(text) > 0)
 }
 `)
 
@@ -5151,7 +5545,8 @@ Main :: task() {
 		"SelectType_string(value)",
 
 		"intptr_t integer = Forward_int(42);",
-		`sealString text = Forward_string((sealString){.data = (const unsigned char *)"hello", .byte_len = 5});`,
+
+		`sealString text = Forward_string((sealString){.data = (const uint8_t *)"hello", .len = (uintptr_t)5});`,
 	}
 
 	for _, want := range checks {
@@ -5164,9 +5559,6 @@ Main :: task() {
 		}
 	}
 
-	// This specifically verifies that substituteExprForCGen preserved the
-	// checker resolution on the copied GenericExpr in each Forward<T>
-	// specialization.
 	if strings.Contains(out, "Select_T(") {
 		t.Fatalf(
 			"generic overload call retained an unspecialized type parameter:\n%s",
