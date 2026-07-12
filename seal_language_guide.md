@@ -870,26 +870,60 @@ f64 → C double
 
 ### 9.3 Character type
 
-`char` stores a Unicode scalar value and currently lowers to:
+`char` stores one Unicode scalar value.
+
+It currently lowers to:
 
 ```text
-uint32_t
+char → C uint32_t
 ```
 
-Example:
+Examples:
 
 ```seal
-letter: char = 'ñ'
+ascii: char = 'A'
+unicode: char = 'ñ'
+emoji: char = '😀'
 ```
 
-### 9.4 Pointer and dynamic types
+A `char` is not a UTF-8 byte and is not equivalent to the C type `char`.
+
+For example, `'ñ'` is represented as one Seal `char`, even though its UTF-8 encoding occupies two bytes.
+
+A valid `char` literal must contain exactly one Unicode scalar value. The compiler rejects:
+
+* empty character literals;
+* literals containing multiple Unicode scalar values;
+* invalid UTF-8;
+* surrogate code points;
+* values outside the Unicode scalar range.
+
+`char` represents a Unicode scalar, not a user-perceived grapheme cluster. A displayed character composed from multiple Unicode scalars may therefore require more than one Seal `char`.
+
+---
+
+### 9.4 Pointer, text, and dynamic types
 
 ```text
 rawptr  → void *
 cstring → const char *
+char    → uint32_t
 ```
 
-`string` and `any` use compiler-generated runtime structs.
+`string` uses a compiler-generated runtime structure equivalent to:
+
+```c
+typedef struct sealString {
+    const uint8_t *data;
+    uintptr_t len;
+} sealString;
+```
+
+The `len` field in this C structure is the number of UTF-8 bytes, not the number of Unicode scalar values.
+
+The structure fields are backend details and are not directly accessible from Seal source.
+
+`any` also uses a compiler-generated tagged runtime representation.
 
 ---
 
@@ -920,23 +954,57 @@ Unsuffixed numeric literals begin as untyped numeric values and are checked agai
 ```seal
 ascii: char = 'A'
 unicode: char = 'ñ'
+emoji: char = '😀'
 ```
+
+A character literal contains exactly one Unicode scalar value.
+
+The compiler validates that the literal:
+
+* is valid UTF-8;
+* decodes to exactly one scalar;
+* is a valid Unicode scalar value.
+
+A `char` is represented as a 32-bit unsigned value. It does not store the original UTF-8 byte sequence.
 
 ### 10.4 Seal strings
 
 ```seal
 message: string = "hello"
+unicode: string = "mañana"
 ```
 
-A Seal string is UTF-8 data plus a byte length.
+A `string` literal contains immutable UTF-8 data and a byte length.
+
+String literals may contain embedded null bytes because a Seal `string` is length-delimited rather than null-terminated:
+
+```seal
+value := "left\0right"
+```
+
+A string literal must contain valid UTF-8.
 
 ### 10.5 C strings
 
 ```seal
 format: cstring = c"%d\n"
+name: cstring = c"Seal"
 ```
 
-The `c"..."` prefix creates a null-terminated C string literal.
+The `c"..."` prefix creates an immutable, null-terminated UTF-8 C string literal.
+
+A `cstring` literal cannot contain an embedded null byte:
+
+```seal
+// Invalid:
+value := c"left\0right"
+```
+
+The compiler also requires a `cstring` literal to contain valid UTF-8.
+
+The terminating null byte is part of the C storage but is not included in `size(cstring)` or `len(cstring)`.
+
+---
 
 ### 10.6 `nil`
 
@@ -1604,84 +1672,562 @@ value[0] = low
 
 This is low-level, representation-dependent behavior.
 
-### 23.7 C-string indexing
+### 23.7 Strings, C strings, and raw pointers
 
-A `cstring` can be read as bytes:
+`string` and `cstring` are immutable text views.
+
+They support read-only Unicode-scalar indexing:
 
 ```seal
-first: u8 = text[0]
+text := "mañana"
+first: char = text[0]
+
+cText := c"mañana"
+last: char = cText[-1]
 ```
 
-Writing through a `cstring` is invalid because it is represented as `const char *`.
+They do not support indexed assignment:
+
+```seal
+// Invalid:
+text[0] = 'M'
+
+// Invalid:
+cText[0] = 'M'
+```
+
+Indexing a `string` or `cstring` returns `char`, not `u8`.
+
+Raw pointers retain byte-based indexing:
+
+```seal
+ptr: rawptr
+
+firstByte: u8 = ptr[0]
+ptr[0] = 255
+```
+
+Use an explicit cast when the underlying byte pointer is required:
+
+```seal
+text := "hello"
+data := cast<rawptr>(text)
+
+cText := c"hello"
+cData := cast<rawptr>(cText)
+```
+
+These casts produce borrowed pointers. They do not allocate, copy, or transfer ownership.
+
+Writing through a raw pointer obtained from `string` or `cstring` is invalid behavior because both text types represent immutable data.
 
 ---
 
-## 24. Strings and C strings
+## 24. Strings, C strings, and characters
 
-Seal distinguishes:
+Seal distinguishes three text-related primitive types:
 
 ```seal
 string
 cstring
+char
 ```
 
-### 24.1 Seal string
+They serve different purposes:
+
+```text
+string  → immutable UTF-8 pointer plus explicit byte length
+cstring → immutable null-terminated UTF-8 C string
+char    → one Unicode scalar value
+```
+
+### 24.1 `string`
+
+A Seal `string` is an immutable, length-delimited UTF-8 view.
 
 ```seal
 text := "hello"
 ```
 
-The runtime representation contains:
+Its generated C representation is equivalent to:
 
-```text
-UTF-8 byte pointer
-byte length
+```c
+typedef struct sealString {
+    const uint8_t *data;
+    uintptr_t len;
+} sealString;
 ```
 
-### 24.2 C string
+The stored length is measured in bytes.
+
+The pointer and length are not accessible as Seal fields:
+
+```seal
+// Invalid:
+bytes := text.len
+
+// Invalid:
+pointer := text.data
+```
+
+Use the language operations instead:
+
+```seal
+bytes := size(text)
+characters := len(text)
+pointer := cast<rawptr>(text)
+```
+
+A `string`:
+
+* is immutable;
+* may contain embedded null bytes;
+* is not required to have a trailing null byte;
+* does not own or free its storage by itself;
+* may refer to static, stack, foreign, or manually allocated memory;
+* must not outlive the storage it references.
+
+### 24.2 `cstring`
+
+A `cstring` is an immutable borrowed pointer to null-terminated UTF-8 data.
 
 ```seal
 text := c"hello"
 ```
 
-This is a null-terminated C string suitable for C APIs.
+It lowers directly to:
 
-### 24.3 Character values
+```c
+const char *
+```
+
+Unlike `string`, a `cstring` does not store a byte length. Operations that need its length scan until the first null byte.
+
+A `cstring`:
+
+* must be null-terminated;
+* cannot represent embedded null bytes as part of its text;
+* is immutable;
+* is directly compatible with ordinary C APIs accepting `const char *`;
+* does not own or free its storage by itself.
+
+### 24.3 `char`
+
+A `char` stores one Unicode scalar value:
 
 ```seal
 letter := 'ñ'
 ```
 
-`char` is a Unicode scalar value, not a one-byte C `char`.
+It lowers to:
 
-### 24.4 String size
-
-```seal
-bytes: uint = size(text)
+```c
+uint32_t
 ```
 
-For `string`, `size` returns the stored UTF-8 byte length.
+`char` is not equivalent to:
 
-### 24.5 String indexing and length
+* one UTF-8 byte;
+* one C `char`;
+* one grapheme cluster;
+* one displayed glyph in every writing system.
 
-Compiler-native string indexing and compiler-native `len(string)` have been removed.
+For example, a combining sequence can contain multiple Unicode scalars even when it appears visually as one character.
 
-These operations should be provided by the standard library through overloads:
+### 24.4 Byte length with `size`
+
+For `string`, `size` returns the stored number of UTF-8 bytes:
 
 ```seal
-character := text[index]
-count := len(text)
+ascii := "hello"
+assert(size(ascii) == 5)
+
+unicode := "ñ"
+assert(size(unicode) == 2)
 ```
 
-The checker selects the string overload, and CGen emits the selected task call.
+For `cstring`, `size` scans until the null terminator and returns the number of bytes before it:
 
-This allows the standard library to define whether indexing means:
+```seal
+value := c"hello"
+assert(size(value) == 5)
+```
 
-- byte indexing;
-- Unicode scalar indexing;
-- another documented string model.
+The terminating null byte is not included.
 
-The compiler no longer hardcodes `sealString_at` or `sealString_len`.
+For both text types:
+
+```text
+size(text) → UTF-8 byte count
+```
+
+### 24.5 Unicode-scalar length with `len`
+
+`len(string)` and `len(cstring)` return the number of Unicode scalar values:
+
+```seal
+ascii := "hello"
+assert(len(ascii) == 5)
+
+unicode := "mañana"
+assert(len(unicode) == 6)
+
+single := "ñ"
+assert(size(single) == 2)
+assert(len(single) == 1)
+```
+
+For `string`, the runtime decodes exactly the stored byte range.
+
+For `cstring`, the runtime first finds the terminating null byte and then decodes that byte range.
+
+Invalid UTF-8 encountered through a borrowed runtime view causes a runtime failure.
+
+Because Unicode scalar counting requires decoding UTF-8, `len(string)` and `len(cstring)` are linear-time operations.
+
+### 24.6 Unicode-scalar indexing
+
+Both text types support read-only indexing:
+
+```seal
+text := "Seal"
+first: char = text[0]
+
+cText := c"Seal"
+second: char = cText[1]
+```
+
+Indexing returns a `char`:
+
+```seal
+letter: char = "ñ"[0]
+```
+
+It does not return a UTF-8 byte:
+
+```seal
+// Invalid because indexing returns char:
+byte: u8 = "hello"[0]
+```
+
+Indexes are measured in Unicode scalar values rather than bytes.
+
+UTF-8 decoding is therefore performed while locating the requested scalar.
+
+### 24.7 Negative indexes
+
+String and C-string indexes may be negative:
+
+```seal
+text := "Seal"
+
+last := text[-1]
+beforeLast := text[-2]
+
+assert(last == 'l')
+assert(beforeLast == 'a')
+```
+
+A negative index is interpreted relative to the number of Unicode scalar values:
+
+```text
+-1 → final scalar
+-2 → scalar before the final scalar
+```
+
+An index outside the valid range causes a runtime failure.
+
+Because negative indexing needs the scalar count, it may require an additional scan.
+
+### 24.8 Immutability
+
+`string` and `cstring` indexing is read-only:
+
+```seal
+text := "hello"
+
+// Invalid:
+text[0] = 'H'
+```
+
+```seal
+text := c"hello"
+
+// Invalid:
+text[0] = 'H'
+```
+
+There is no built-in `[]=` operation for either text type.
+
+Mutable text must use an explicitly mutable buffer or a future standard-library owned string type.
+
+### 24.9 Equality
+
+Equality for two `string` values compares:
+
+1. byte lengths;
+2. UTF-8 bytes.
+
+```seal
+assert("hello" == "hello")
+assert("hello" != "world")
+```
+
+Equality for two `cstring` values compares their null-terminated contents:
+
+```seal
+assert(c"hello" == c"hello")
+assert(c"hello" != c"world")
+```
+
+Text equality is content-based rather than pointer-based.
+
+`string` and `cstring` are different types and are not implicitly compared with each other:
+
+```seal
+sealText := "hello"
+cText := c"hello"
+
+// Invalid without an explicit conversion:
+same := sealText == cText
+```
+
+Equality compares encoded text exactly. It does not perform Unicode normalization. Canonically equivalent but differently encoded strings may compare unequal.
+
+### 24.10 Borrowed cast from `string` to `rawptr`
+
+```seal
+text := "hello"
+data := cast<rawptr>(text)
+```
+
+This returns the string’s UTF-8 data pointer.
+
+The cast:
+
+* does not allocate;
+* does not copy;
+* does not append a null terminator;
+* does not transfer ownership;
+* does not extend the storage lifetime.
+
+The resulting pointer must not be used after the original storage becomes invalid.
+
+The pointer is not guaranteed to reference null-terminated data.
+
+### 24.11 Borrowed cast from `cstring` to `rawptr`
+
+```seal
+text := c"hello"
+data := cast<rawptr>(text)
+```
+
+This returns the underlying null-terminated C pointer.
+
+The cast is borrowed and performs no allocation or copy.
+
+Although `rawptr` itself permits low-level writes, writing through a pointer derived from a `cstring` is invalid because `cstring` data is immutable and may reside in read-only static storage.
+
+### 24.12 Constructing a borrowed `string` view
+
+A `string` view can be constructed from a raw pointer and a byte length:
+
+```seal
+view := cast<string>(data, byteLength)
+```
+
+The arguments are:
+
+```text
+data       rawptr
+byteLength uint
+```
+
+The resulting string refers to exactly `byteLength` bytes beginning at `data`.
+
+This cast:
+
+* does not allocate;
+* does not copy;
+* does not take ownership;
+* does not add a null terminator;
+* allows embedded null bytes;
+* requires the supplied byte range to remain valid for the view’s lifetime.
+
+The bytes must contain valid UTF-8 before operations such as `len` or indexing are used.
+
+Example:
+
+```seal
+source := "hello"
+data := cast<rawptr>(source)
+view := cast<string>(data, size(source))
+
+assert(view == source)
+```
+
+### 24.13 Constructing a borrowed `cstring` view
+
+A `cstring` view is constructed from a raw pointer and the expected byte length:
+
+```seal
+view := cast<cstring>(data, byteLength)
+```
+
+The arguments are:
+
+```text
+data       rawptr
+byteLength uint
+```
+
+The runtime verifies that:
+
+```text
+data[byteLength] == 0
+```
+
+The byte length excludes the terminating null byte.
+
+Example:
+
+```seal
+source := c"hello"
+data := cast<rawptr>(source)
+view := cast<cstring>(data, size(source))
+
+assert(view == source)
+```
+
+This cast:
+
+* does not allocate;
+* does not copy;
+* does not take ownership;
+* returns the original pointer as a borrowed `cstring`;
+* requires at least `byteLength + 1` accessible bytes;
+* requires a null byte at exactly `data[byteLength]`.
+
+Passing an invalid pointer, an incorrect length, or storage that cannot safely be read at `data[byteLength]` is invalid low-level behavior.
+
+### 24.14 No direct `string` to `cstring` cast
+
+A `string` cannot be cast directly to `cstring`:
+
+```seal
+text := "hello"
+
+// Invalid:
+cText := cast<cstring>(text)
+```
+
+A `string` is not guaranteed to:
+
+* have a trailing null byte;
+* contain no embedded null bytes;
+* remain valid for the lifetime expected by a C API.
+
+A standard-library conversion from runtime `string` to `cstring` must allocate or otherwise provide explicitly managed null-terminated storage.
+
+Such a conversion should expose ownership clearly rather than pretending the result is a free borrowed cast.
+
+### 24.15 Ownership and lifetime
+
+Plain `string` and `cstring` values are views. They do not automatically free memory.
+
+For manually allocated storage:
+
+```seal
+data := mem.Alloc(byteCount)
+
+// Populate the bytes...
+
+view := cast<string>(data, byteCount)
+
+// Use view while data remains alive.
+
+mem.Free(data)
+```
+
+After `mem.Free(data)`, every `string`, `cstring`, or raw pointer referring to that allocation is dangling and must not be used.
+
+Only the owner of the allocation should free it.
+
+A borrowed text view must never be freed independently from its backing allocation.
+
+### 24.16 C interoperability
+
+Use `cstring` for ordinary C APIs that accept `const char *`:
+
+```seal
+puts :: extern("puts") task(text cstring) int
+
+Main :: task() {
+    puts(c"Hello from Seal")
+}
+```
+
+Use `string` when the API accepts a pointer and explicit byte count:
+
+```seal
+WriteBytes :: task(text string) {
+    data := cast<rawptr>(text)
+    count := size(text)
+
+    // Pass data and count to an appropriate C API.
+}
+```
+
+A C function returning a borrowed `const char *` can be declared as returning `cstring`:
+
+```seal
+GetName :: extern("get_name") task() cstring
+```
+
+The pointer’s lifetime and ownership are determined by the C API contract.
+
+Do not free a returned `cstring` unless the C API explicitly transfers ownership and specifies the matching deallocation function.
+
+### 24.17 Mutable C buffers
+
+`cstring` represents `const char *`, not mutable `char *`.
+
+A C function that writes into a character buffer should use `rawptr` or another explicitly mutable byte-buffer type:
+
+```seal
+ReadIntoBuffer :: extern("read_into_buffer") task(
+    destination rawptr,
+    capacity uint,
+) int
+```
+
+After the C call writes a terminator, a borrowed view may be created with:
+
+```seal
+text := cast<cstring>(destination, writtenByteLength)
+```
+
+### 24.18 Performance characteristics
+
+Current text operations have these general costs:
+
+```text
+size(string)       O(1)
+size(cstring)      O(n bytes)
+
+len(string)        O(n bytes)
+len(cstring)       O(n bytes)
+
+string[index]      O(n bytes)
+cstring[index]     O(n bytes)
+
+string equality    O(n bytes)
+cstring equality   O(n bytes)
+```
+
+Negative indexing may require both scalar counting and scalar lookup.
+
+The current implementation favors a small, C-compatible representation over cached Unicode metadata.
 
 ---
 
@@ -1865,20 +2411,66 @@ len
 
 Indexing and `len` use exact semantic resolutions produced by the checker.
 
-### 27.1 `[]` read overload
+The checker distinguishes:
+
+* compiler-provided text indexing;
+* compiler-provided text length;
+* compiler-provided variadic indexing and length where applicable;
+* raw-pointer byte indexing;
+* user-defined `[]` overloads;
+* user-defined `[]=` overloads;
+* user-defined `len` overloads;
+* ordinary tasks that happen to be named `len`.
+
+The checker records the selected meaning. The C backend consumes that decision rather than repeating overload resolution.
+
+### 27.1 Built-in text indexing
+
+`string` and `cstring` have built-in read-only indexing:
+
+```seal
+stringValue := "mañana"
+character: char = stringValue[2]
+
+cstringValue := c"mañana"
+last: char = cstringValue[-1]
+```
+
+The index type is `int`.
+
+The result type is `char`.
+
+Indexes refer to Unicode scalar values, not UTF-8 bytes.
+
+Negative indexes are supported.
+
+Neither type supports built-in index assignment.
+
+### 27.2 Raw-pointer indexing
+
+`rawptr` uses built-in byte indexing:
+
+```seal
+byte: u8 = pointer[index]
+pointer[index] = 255
+```
+
+The index type is `int` and the indexed value type is `u8`.
+
+### 27.3 `[]` read overload
 
 A user-defined index reader must have a compatible shape:
 
 ```seal
-Get :: pure task(receiver *Container, index int) Element
+Get :: pure task(
+    receiver *Container,
+    index int,
+) Element
 ```
 
-or use a trusted-pure equivalent.
+The receiver must be a pointer to a struct-backed type.
 
-The receiver is normally:
-
-- a pointer to a struct-backed container;
-- a temporary pointer materialization for `string`.
+The task must be pure or trusted-pure.
 
 Use:
 
@@ -1886,7 +2478,9 @@ Use:
 value := container[index]
 ```
 
-### 27.2 `[]=` write overload
+Built-in `string`, `cstring`, and `rawptr` indexing takes precedence over user-defined container behavior for those primitive types.
+
+### 27.4 `[]=` write overload
 
 A user-defined index setter has a compatible shape:
 
@@ -1915,12 +2509,47 @@ container[index] += 1
 
 are not yet lowered as read-modify-write overload sequences.
 
-### 27.3 `len` overload
+`string` and `cstring` cannot use indexed assignment because they are immutable built-in text types.
 
-A user-defined `len` task must be pure or trusted-pure and return `uint`:
+### 27.5 Built-in text `len`
+
+`len(string)` and `len(cstring)` are built-in operations returning `uint`:
 
 ```seal
-ContainerLen :: pure task(receiver *Container) uint {
+sealLength: uint = len("mañana")
+cLength: uint = len(c"mañana")
+```
+
+The result is the number of Unicode scalar values.
+
+It is not the UTF-8 byte count. Use `size` for bytes.
+
+### 27.6 Built-in variadic `len`
+
+A variadic value also has built-in length:
+
+```seal
+Count :: task(values ...int) uint {
+    return len(values)
+}
+```
+
+The result is the number of variadic elements.
+
+### 27.7 User-defined `len` overload
+
+A user-defined `len` task must:
+
+* receive a pointer to a struct-backed type;
+* be pure or trusted-pure;
+* return `uint`.
+
+Example:
+
+```seal
+ContainerLen :: pure task(
+    receiver *Container,
+) uint {
     // ...
 }
 ```
@@ -1931,19 +2560,9 @@ Use:
 count := len(container)
 ```
 
-### 27.4 Built-in `len`
+### 27.8 Ordinary `len` task shadowing
 
-The remaining built-in length case is a variadic value:
-
-```seal
-Count :: task(values ...int) uint {
-    return len(values)
-}
-```
-
-### 27.5 Ordinary `len` task shadowing
-
-An ordinary task named `len` shadows the primitive built-in name in its scope.
+An ordinary task named `len` shadows the primitive built-in name when it resolves normally in that scope.
 
 Therefore:
 
@@ -1953,7 +2572,7 @@ len :: task(value Custom) uint {
 }
 ```
 
-is treated as an ordinary task call when it resolves normally.
+is treated as an ordinary task call when selected by normal task resolution.
 
 ---
 
@@ -2480,33 +3099,80 @@ The condition must be `bool`.
 
 ### 36.2 `size`
 
-For a type:
+For a type, `size` returns its generated C storage size:
 
 ```seal
 bytes := size(int)
 bytes := size(Player)
+bytes := size(char)
 ```
 
-For an ordinary value:
+For an ordinary value, it normally returns the generated C storage size of that value.
+
+Text values have special behavior.
+
+For `string`, `size` returns the stored UTF-8 byte length:
 
 ```seal
-bytes := size(value)
+text := "ñ"
+assert(size(text) == 2)
 ```
 
-For `string`, `size` returns UTF-8 byte length:
+For `cstring`, `size` scans to the null terminator and returns the number of bytes before it:
 
 ```seal
-bytes := size(text)
+text := c"ñ"
+assert(size(text) == 2)
 ```
+
+The terminating null byte is not included.
+
+Use `len` when the number of Unicode scalar values is required.
 
 ### 36.3 `cast`
+
+Ordinary explicit conversions use:
 
 ```seal
 id := cast<UserId>(10)
 pointer := cast<*Player>(raw)
 ```
 
-Casts are explicit and lower to C casts where supported.
+Text-related casts have specific forms.
+
+Borrow a string’s data pointer:
+
+```seal
+data := cast<rawptr>(text)
+```
+
+Borrow a C string’s pointer:
+
+```seal
+data := cast<rawptr>(cText)
+```
+
+Construct a borrowed length-delimited string view:
+
+```seal
+text := cast<string>(data, byteLength)
+```
+
+Construct a borrowed null-terminated C-string view:
+
+```seal
+cText := cast<cstring>(data, byteLength)
+```
+
+The `cstring` constructor verifies that the byte immediately following the supplied text range is null:
+
+```text
+data[byteLength] == 0
+```
+
+These casts do not allocate, copy, free, or transfer ownership.
+
+A direct cast from `string` to `cstring` is invalid because a `string` is not guaranteed to be null-terminated.
 
 ### 36.4 `anyIs`
 
@@ -2522,21 +3188,46 @@ number := anyAs<int>(value)
 
 ### 36.6 `len`
 
-`len` is special because it may be:
+`len` may resolve to:
 
-- a variadic built-in;
-- a user-defined overload;
-- an ordinary shadowing task.
+* built-in Unicode-scalar length for `string`;
+* built-in Unicode-scalar length for `cstring`;
+* built-in element count for variadic values;
+* a user-defined `len` overload;
+* an ordinary shadowing task named `len`.
+
+Examples:
+
+```seal
+characters := len("mañana")
+cCharacters := len(c"mañana")
+items := len(variadicValues)
+containerLength := len(container)
+```
+
+For text:
+
+```text
+len  → Unicode scalar count
+size → UTF-8 byte count
+```
 
 The checker records which meaning applies to each call.
 
 ### 36.7 `panic`
 
+`panic` accepts either `string` or `cstring`:
+
 ```seal
+panic("fatal error")
 panic(c"fatal error")
 ```
 
-The exact accepted message forms depend on the current intrinsic signature and runtime support.
+A `string` message is written using its explicit byte length, so it does not require null termination.
+
+A `cstring` message is written using its null terminator.
+
+Calling `panic` prints the message through the generated runtime and terminates the program.
 
 ### 36.8 `trap`
 
@@ -2602,7 +3293,81 @@ Use C strings for C format strings:
 printf(c"%d %s\n", 10, c"hello")
 ```
 
-### 37.4 Native C source files
+### 37.4 Text types in C declarations
+
+Use `cstring` for C parameters and results declared as immutable null-terminated strings:
+
+```c
+const char *
+```
+
+Seal declaration:
+
+```seal
+GetWindowTitle :: extern("get_window_title") task() cstring
+
+SetWindowTitle :: extern("set_window_title") task(
+    title cstring,
+)
+```
+
+C-string literals pass directly:
+
+```seal
+SetWindowTitle(c"Seal application")
+```
+
+Use `string` only for Seal-facing APIs or for C wrappers that explicitly receive both a pointer and byte count.
+
+A `string` is not ABI-compatible with `const char *` because it is a two-field structure.
+
+To pass a Seal string to a pointer-and-length C API:
+
+```seal
+text := "hello"
+data := cast<rawptr>(text)
+byteLength := size(text)
+```
+
+To pass a runtime Seal string to a C API requiring `const char *`, first create explicitly owned null-terminated storage through a standard-library conversion. Do not directly reinterpret a `string` as `cstring`.
+
+### 37.5 Borrowed C results
+
+An extern task returning `cstring` returns a borrowed `const char *` view:
+
+```seal
+GetError :: extern("library_get_error") task() cstring
+```
+
+The C library determines:
+
+* whether the pointer may be null;
+* how long it remains valid;
+* whether it is static, thread-local, object-owned, or caller-owned;
+* whether the caller must free it.
+
+Seal does not automatically free a returned `cstring`.
+
+### 37.6 Mutable character buffers
+
+Do not use `cstring` for C parameters declared as mutable `char *`.
+
+Use `rawptr` or a dedicated mutable buffer abstraction:
+
+```seal
+FillBuffer :: extern("fill_buffer") task(
+    destination rawptr,
+    capacity uint,
+) int
+```
+
+After the function writes valid UTF-8 and a terminating null byte, construct a borrowed view with the known written length:
+
+```seal
+view := cast<cstring>(destination, writtenLength)
+```
+
+### 37.7 Native C source files
 
 Every `.c` file found under a package root is included in the final executable compilation.
 
@@ -2624,7 +3389,7 @@ native/
 └── implementation.c
 ```
 
-### 37.5 Include and link configuration
+### 37.8 Include and link configuration
 
 Common include and link settings may be placed under `[build]`:
 
@@ -2972,11 +3737,29 @@ These forms have been removed:
 
 Use standard-library generic containers instead.
 
-### 40.3 No builtin string indexing or `len(string)`
+### 40.3 Text operations are scalar-based but not grapheme-aware
 
-String indexing and logical length belong to standard-library overloads.
+`string` and `cstring` currently provide built-in:
 
-`size(string)` remains the byte-length operation.
+```seal
+size(text)
+len(text)
+text[index]
+```
+
+Their meanings are:
+
+```text
+size  → UTF-8 byte count
+len   → Unicode scalar count
+[]    → Unicode scalar at an index
+```
+
+They do not perform grapheme-cluster segmentation or Unicode normalization.
+
+Operations such as `len` and indexing decode UTF-8 linearly and may be relatively expensive for repeated random access.
+
+Higher-level Unicode operations belong in the standard library.
 
 ### 40.4 Generic inference is not stable
 
@@ -2996,16 +3779,27 @@ Identity(10)
 
 `Option<T>` and `Result<T, E>` remain planned foundational types.
 
-### 40.6 Memory model is not finalized
+### 40.6 Ownership remains explicit and low-level
+
+Plain `string` and `cstring` are borrowed immutable views.
 
 Seal has:
 
-- typed pointers;
-- `rawptr`;
-- C allocation access;
-- `defer`.
+* typed pointers;
+* `rawptr`;
+* borrowed text views;
+* C allocation access;
+* `defer`.
 
-It does not yet have a finalized ownership, borrowing, destructor, or garbage-collection model.
+It does not yet have a finalized general ownership, borrowing, destructor, or garbage-collection model.
+
+The standard library still needs explicit owned text and mutable buffer abstractions for operations such as:
+
+* runtime string construction;
+* concatenation;
+* null-terminated conversion;
+* mutable UTF-8 editing;
+* allocator-backed text storage.
 
 ### 40.7 Some `seal.toml` policy flags are only partially enforced
 
@@ -3196,6 +3990,94 @@ Pi :: 3.14159265
 x := 10
 x: int = 10
 x: int
+```
+
+### Character literal
+
+```seal
+letter: char = 'ñ'
+```
+
+### Seal string
+
+```seal
+text: string = "mañana"
+```
+
+### C string
+
+```seal
+text: cstring = c"mañana"
+```
+
+### UTF-8 byte length
+
+```seal
+bytes := size(text)
+```
+
+### Unicode-scalar length
+
+```seal
+characters := len(text)
+```
+
+### Unicode-scalar indexing
+
+```seal
+first: char = text[0]
+last: char = text[-1]
+```
+
+### Borrow text data as a raw pointer
+
+```seal
+data := cast<rawptr>(text)
+```
+
+### Construct a borrowed string view
+
+```seal
+view := cast<string>(data, byteLength)
+```
+
+### Construct a borrowed C-string view
+
+```seal
+view := cast<cstring>(data, byteLength)
+```
+
+### Borrowed cast example
+
+```seal
+source := "hello"
+data := cast<rawptr>(source)
+view := cast<string>(data, size(source))
+
+assert(view == source)
+```
+
+### Borrowed C-string cast example
+
+```seal
+source := c"hello"
+data := cast<rawptr>(source)
+view := cast<cstring>(data, size(source))
+
+assert(view == source)
+```
+
+### Text equality
+
+```seal
+assert("hello" == "hello")
+assert(c"hello" == c"hello")
+```
+
+### C text parameter
+
+```seal
+puts :: extern("puts") task(text cstring) int
 ```
 
 ### Task
