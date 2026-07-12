@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"seal/internal/ast"
 	"seal/internal/builtin"
@@ -1261,9 +1262,16 @@ func (g *Generator) emitBuiltinIndexRead(
 			index,
 		)
 
+	case leftType.SealName == "string":
+		return fmt.Sprintf(
+			"seal_string_index(%s, %s)",
+			left,
+			index,
+		)
+
 	case leftType.SealName == "cstring":
 		return fmt.Sprintf(
-			"((const unsigned char *)(%s))[%s]",
+			"seal_cstring_index(%s, %s)",
 			left,
 			index,
 		)
@@ -1317,6 +1325,13 @@ func (g *Generator) emitBuiltinIndexLValue(
 			left,
 			index,
 		), CU8, true
+
+	case leftType.SealName == "string":
+		g.error(
+			e.Left.Span(),
+			"string indexing is read-only",
+		)
+		return "0", CInvalid, false
 
 	case leftType.SealName == "cstring":
 		g.error(
@@ -1526,8 +1541,11 @@ func (g *Generator) indexExprType(
 	case leftType.SealName == "rawptr":
 		return CU8
 
+	case leftType.SealName == "string":
+		return CChar
+
 	case leftType.SealName == "cstring":
-		return CU8
+		return CChar
 
 	case leftType.IsVariadic &&
 		leftType.Elem != nil:
@@ -3798,23 +3816,33 @@ func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
 	}
 
 	if typ, ok := g.cTypeFromSizeArg(e.Args[0]); ok {
-		return fmt.Sprintf("(uintptr_t)sizeof(%s)", typ.Name)
+		return fmt.Sprintf(
+			"(uintptr_t)sizeof(%s)",
+			typ.Name,
+		)
 	}
 
 	argType := g.inferExprType(e.Args[0], nil)
-
-	if argType.SealName == "string" {
-		value := g.emitExpr(e.Args[0], nil)
-		return fmt.Sprintf("(uintptr_t)(%s).byte_len", value)
-	}
-
-	if argType.SealName == "cstring" {
-		g.error(e.Args[0].Span(), "size(cstring) is not supported because cstring length requires scanning memory")
-		return "0"
-	}
-
 	value := g.emitExpr(e.Args[0], nil)
-	return fmt.Sprintf("(uintptr_t)sizeof(%s)", value)
+
+	switch argType.SealName {
+	case "string":
+		return fmt.Sprintf(
+			"(uintptr_t)(%s).len",
+			value,
+		)
+
+	case "cstring":
+		return fmt.Sprintf(
+			"seal_cstring_byte_len(%s)",
+			value,
+		)
+	}
+
+	return fmt.Sprintf(
+		"(uintptr_t)sizeof(%s)",
+		value,
+	)
 }
 
 func (g *Generator) emitNoArgRuntimeCall(name string, cName string, e *ast.CallExpr) string {
@@ -8685,6 +8713,15 @@ func (g *Generator) emitExpr(
 		leftType := g.inferExprType(e.Left, nil)
 		rightType := g.inferExprType(e.Right, nil)
 
+		if value, ok :=
+			g.emitBuiltinTextBinaryExpr(
+				e,
+				leftType,
+				rightType,
+			); ok {
+			return value
+		}
+
 		if g.hasOperatorOverload(e.Op.String()) {
 			if candidate, ok :=
 				g.resolveOverload(
@@ -8866,46 +8903,178 @@ func (g *Generator) emitExpr(
 	return "0"
 }
 
-func (g *Generator) emitStringLiteral(e *ast.StringLitExpr) string {
+func (g *Generator) emitBuiltinTextBinaryExpr(
+	e *ast.BinaryExpr,
+	leftType CType,
+	rightType CType,
+) (string, bool) {
+	if e.Op != token.EqEq &&
+		e.Op != token.NotEq {
+		return "", false
+	}
+
+	var comparison string
+
+	switch {
+	case leftType.SealName == "string" &&
+		rightType.SealName == "string":
+		left := g.emitExpr(e.Left, &leftType)
+		right := g.emitExpr(e.Right, &rightType)
+
+		comparison = fmt.Sprintf(
+			"seal_string_equal(%s, %s)",
+			left,
+			right,
+		)
+
+	case leftType.SealName == "cstring" &&
+		rightType.SealName == "cstring":
+		left := g.emitExpr(e.Left, &leftType)
+		right := g.emitExpr(e.Right, &rightType)
+
+		comparison = fmt.Sprintf(
+			"seal_cstring_equal(%s, %s)",
+			left,
+			right,
+		)
+
+	default:
+		return "", false
+	}
+
+	if e.Op == token.NotEq {
+		return fmt.Sprintf(
+			"(!(%s))",
+			comparison,
+		), true
+	}
+
+	return comparison, true
+}
+
+func (g *Generator) emitStringLiteral(
+	e *ast.StringLitExpr,
+) string {
 	value, err := strconv.Unquote(e.Value)
 	if err != nil {
-		g.error(e.Span(), fmt.Sprintf("invalid string literal: %v", err))
-		return "(sealString){.data = NULL, .byte_len = 0}"
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid string literal: %v",
+				err,
+			),
+		)
+
+		return "(sealString){.data = NULL, .len = 0}"
+	}
+
+	if !utf8.ValidString(value) {
+		g.error(
+			e.Span(),
+			"string literal must contain valid UTF-8",
+		)
+
+		return "(sealString){.data = NULL, .len = 0}"
 	}
 
 	return fmt.Sprintf(
-		"(sealString){.data = (const unsigned char *)%s, .byte_len = %d}",
-		strconv.Quote(value),
-		len([]byte(value)),
+		"(sealString){.data = (const uint8_t *)%s, .len = (uintptr_t)%d}",
+		quoteCByteString(value),
+		len(value),
 	)
 }
 
-func (g *Generator) emitCStringLiteral(e *ast.CStringLitExpr) string {
-	raw := strings.TrimPrefix(e.Value, "c")
+func (g *Generator) emitCStringLiteral(
+	e *ast.CStringLitExpr,
+) string {
+	raw := strings.TrimPrefix(
+		e.Value,
+		"c",
+	)
 
 	value, err := strconv.Unquote(raw)
 	if err != nil {
-		g.error(e.Span(), fmt.Sprintf("invalid cstring literal: %v", err))
-		return "\"\""
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid cstring literal: %v",
+				err,
+			),
+		)
+
+		return `""`
 	}
 
-	return strconv.Quote(value)
+	if !utf8.ValidString(value) {
+		g.error(
+			e.Span(),
+			"cstring literal must contain valid UTF-8",
+		)
+
+		return `""`
+	}
+
+	if strings.IndexByte(value, 0) >= 0 {
+		g.error(
+			e.Span(),
+			"cstring literal cannot contain an embedded null byte",
+		)
+
+		return `""`
+	}
+
+	return quoteCByteString(value)
 }
 
-func (g *Generator) emitCharLiteral(e *ast.CharLitExpr) string {
+func (g *Generator) emitCharLiteral(
+	e *ast.CharLitExpr,
+) string {
 	value, err := strconv.Unquote(e.Value)
 	if err != nil {
-		g.error(e.Span(), fmt.Sprintf("invalid char literal: %v", err))
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"invalid char literal: %v",
+				err,
+			),
+		)
+
 		return "0"
 	}
 
-	runes := []rune(value)
-	if len(runes) != 1 {
-		g.error(e.Span(), "char literal must contain exactly one Unicode scalar value")
+	if !utf8.ValidString(value) {
+		g.error(
+			e.Span(),
+			"char literal must contain valid UTF-8",
+		)
+
 		return "0"
 	}
 
-	return fmt.Sprintf("%d", runes[0])
+	if utf8.RuneCountInString(value) != 1 {
+		g.error(
+			e.Span(),
+			"char literal must contain exactly one Unicode scalar value",
+		)
+
+		return "0"
+	}
+
+	scalar, _ := utf8.DecodeRuneInString(value)
+
+	if !utf8.ValidRune(scalar) {
+		g.error(
+			e.Span(),
+			"char literal contains an invalid Unicode scalar value",
+		)
+
+		return "0"
+	}
+
+	return fmt.Sprintf(
+		"((uint32_t)%d)",
+		scalar,
+	)
 }
 
 func (g *Generator) emitAnyExpr(expr ast.Expr) string {
@@ -9314,54 +9483,104 @@ func (g *Generator) emitCallExprWithArgs(
 	)
 }
 
-func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Expr) string {
+func (g *Generator) emitGenericIntrinsicCall(
+	gen *ast.GenericExpr,
+	args []ast.Expr,
+) string {
 	id, ok := gen.Base.(*ast.IdentExpr)
 	if !ok {
-		g.error(gen.Base.Span(), "only intrinsic generic calls are supported here")
+		g.error(
+			gen.Base.Span(),
+			"only intrinsic generic calls are supported here",
+		)
 		return "0"
 	}
 
 	task, ok := builtin.LookupTask(id.Name.Name)
 	if !ok || !task.Generic {
-		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
+		g.error(
+			id.Span(),
+			fmt.Sprintf(
+				"unknown generic intrinsic %q",
+				id.Name.Name,
+			),
+		)
 		return "0"
 	}
 
 	if len(gen.Args) != 1 {
-		g.error(gen.Span(), fmt.Sprintf("%s expects exactly 1 type argument", id.Name.Name))
-		return "0"
-	}
-
-	if len(args) != 1 {
-		g.error(gen.Span(), fmt.Sprintf("%s expects exactly 1 value argument", id.Name.Name))
+		g.error(
+			gen.Span(),
+			fmt.Sprintf(
+				"%s expects exactly 1 type argument",
+				id.Name.Name,
+			),
+		)
 		return "0"
 	}
 
 	targetArg := gen.Args[0]
+
 	if g.genericSubst != nil {
-		targetArg = g.substituteGenericArgForCGen(targetArg, g.genericSubst)
+		targetArg =
+			g.substituteGenericArgForCGen(
+				targetArg,
+				g.genericSubst,
+			)
 	}
 
 	target := g.cTypeFromGenericArg(targetArg)
 
 	switch task.Kind {
 	case builtin.TaskAnyIs:
+		if len(args) != 1 {
+			g.error(
+				gen.Span(),
+				"anyIs expects exactly 1 value argument",
+			)
+			return "false"
+		}
+
 		value := g.emitExpr(args[0], nil)
 
 		kind, ok := g.sealTypeKindFor(target)
 		if !ok {
-			g.error(gen.Args[0].Span(), fmt.Sprintf("anyIs does not support %s yet", target.String()))
+			g.error(
+				gen.Args[0].Span(),
+				fmt.Sprintf(
+					"anyIs does not support %s yet",
+					target.String(),
+				),
+			)
 			return "false"
 		}
 
-		return fmt.Sprintf("((%s).type == %s)", value, kind)
+		return fmt.Sprintf(
+			"((%s).type == %s)",
+			value,
+			kind,
+		)
 
 	case builtin.TaskAnyAs:
+		if len(args) != 1 {
+			g.error(
+				gen.Span(),
+				"anyAs expects exactly 1 value argument",
+			)
+			return "0"
+		}
+
 		value := g.emitExpr(args[0], nil)
 
 		field, ok := g.sealAnyFieldFor(target)
 		if !ok {
-			g.error(gen.Args[0].Span(), fmt.Sprintf("anyAs does not support %s yet", target.String()))
+			g.error(
+				gen.Args[0].Span(),
+				fmt.Sprintf(
+					"anyAs does not support %s yet",
+					target.String(),
+				),
+			)
 			return "0"
 		}
 
@@ -9369,11 +9588,28 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 			return value
 		}
 
-		return fmt.Sprintf("((%s).value.%s)", value, field)
+		return fmt.Sprintf(
+			"((%s).value.%s)",
+			value,
+			field,
+		)
 
 	case builtin.TaskCast:
 		if g.isInterfaceCType(target) {
-			value, ok := g.tryEmitInterfaceConversion(target, args[0])
+			if len(args) != 1 {
+				g.error(
+					gen.Span(),
+					"interface cast expects exactly 1 value argument",
+				)
+				return g.nilInterfaceValue(target)
+			}
+
+			value, ok :=
+				g.tryEmitInterfaceConversion(
+					target,
+					args[0],
+				)
+
 			if ok {
 				return value
 			}
@@ -9386,14 +9622,143 @@ func (g *Generator) emitGenericIntrinsicCall(gen *ast.GenericExpr, args []ast.Ex
 					target.String(),
 				),
 			)
+
 			return g.nilInterfaceValue(target)
 		}
 
-		value := g.emitExpr(args[0], nil)
-		return fmt.Sprintf("((%s)(%s))", target.Name, value)
+		switch target.SealName {
+		case "string":
+			if len(args) != 2 {
+				g.error(
+					gen.Span(),
+					"cast<string> expects data and byte length",
+				)
+
+				return "(sealString){.data = NULL, .len = 0}"
+			}
+
+			data := g.emitExpr(
+				args[0],
+				nil,
+			)
+
+			byteLength := g.emitExpr(
+				args[1],
+				&CUint,
+			)
+
+			return fmt.Sprintf(
+				"(sealString){.data = (const uint8_t *)(%s), .len = (uintptr_t)(%s)}",
+				data,
+				byteLength,
+			)
+
+		case "cstring":
+			if len(args) != 1 {
+				g.error(
+					gen.Span(),
+					"cast<cstring> expects exactly 1 pointer argument",
+				)
+				return "((const char *)NULL)"
+			}
+
+			sourceType :=
+				g.inferExprType(
+					args[0],
+					nil,
+				)
+
+			if sourceType.SealName == "string" {
+				g.error(
+					args[0].Span(),
+					"cannot cast string directly to cstring because string is not guaranteed to be null-terminated",
+				)
+
+				return "((const char *)NULL)"
+			}
+
+			value := g.emitExpr(
+				args[0],
+				nil,
+			)
+
+			return fmt.Sprintf(
+				"((const char *)(%s))",
+				value,
+			)
+
+		case "rawptr":
+			if len(args) != 1 {
+				g.error(
+					gen.Span(),
+					"cast<rawptr> expects exactly 1 value argument",
+				)
+				return "NULL"
+			}
+
+			sourceType :=
+				g.inferExprType(
+					args[0],
+					nil,
+				)
+
+			value := g.emitExpr(
+				args[0],
+				nil,
+			)
+
+			switch sourceType.SealName {
+			case "string":
+				return fmt.Sprintf(
+					"((void *)((%s).data))",
+					value,
+				)
+
+			case "cstring":
+				return fmt.Sprintf(
+					"((void *)(%s))",
+					value,
+				)
+			}
+
+			return fmt.Sprintf(
+				"((%s)(%s))",
+				target.Name,
+				value,
+			)
+
+		default:
+			if len(args) != 1 {
+				g.error(
+					gen.Span(),
+					fmt.Sprintf(
+						"cast<%s> expects exactly 1 value argument",
+						target.SealName,
+					),
+				)
+				return "0"
+			}
+
+			value := g.emitExpr(
+				args[0],
+				nil,
+			)
+
+			return fmt.Sprintf(
+				"((%s)(%s))",
+				target.Name,
+				value,
+			)
+		}
 
 	default:
-		g.error(id.Span(), fmt.Sprintf("unknown generic intrinsic %q", id.Name.Name))
+		g.error(
+			id.Span(),
+			fmt.Sprintf(
+				"unknown generic intrinsic %q",
+				id.Name.Name,
+			),
+		)
 		return "0"
 	}
 }
@@ -9736,7 +10101,20 @@ func (g *Generator) emitLenCall(
 		arg = g.emitExpr(e.Args[0], nil)
 	}
 
-	if argType.IsVariadic {
+	switch {
+	case argType.SealName == "string":
+		return fmt.Sprintf(
+			"seal_string_scalar_len(%s)",
+			arg,
+		)
+
+	case argType.SealName == "cstring":
+		return fmt.Sprintf(
+			"seal_cstring_scalar_len(%s)",
+			arg,
+		)
+
+	case argType.IsVariadic:
 		return fmt.Sprintf(
 			"((uintptr_t)(%s).len)",
 			arg,
@@ -10328,8 +10706,8 @@ func (g *Generator) emitTaskVariadicRuntimeTypes() {
 func (g *Generator) emitRuntimeSupport() {
 	g.line("typedef struct sealString {")
 	g.indent++
-	g.line("const unsigned char *data;")
-	g.line("size_t byte_len;")
+	g.line("const uint8_t *data;")
+	g.line("uintptr_t len;")
 	g.indent--
 	g.line("} sealString;")
 	g.line("")
@@ -10376,8 +10754,455 @@ func (g *Generator) emitRuntimeSupport() {
 
 	g.line("static inline void seal_panic_string(sealString message) {")
 	g.indent++
-	g.line(`fprintf(stderr, "panic: %.*s\n", (int)message.byte_len, (const char *)message.data);`)
+	g.line(`fputs("panic: ", stderr);`)
+	g.line("if (message.len != 0) {")
+	g.indent++
+	g.line("if (message.data == NULL) {")
+	g.indent++
+	g.line(`fputs("<invalid string>", stderr);`)
+	g.indent--
+	g.line("} else {")
+	g.indent++
+	g.line("fwrite(message.data, 1, (size_t)message.len, stderr);")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("}")
+	g.line(`fputc('\n', stderr);`)
 	g.line("abort();")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uint32_t seal_utf8_fail(void) {")
+	g.indent++
+	g.line(`seal_panic_cstring("invalid UTF-8 or string index out of bounds");`)
+	g.line("return 0;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uintptr_t seal_cstring_byte_len(const char *value) {")
+	g.indent++
+	g.line("if (value == NULL) {")
+	g.indent++
+	g.line("return 0;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("const uint8_t *bytes = (const uint8_t *)value;")
+	g.line("uintptr_t len = 0;")
+	g.line("")
+	g.line("while (bytes[len] != 0) {")
+	g.indent++
+	g.line("len++;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return len;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline bool seal_utf8_is_continuation(uint8_t byte) {")
+	g.indent++
+	g.line("return (byte & 0xC0u) == 0x80u;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uint32_t seal_utf8_decode_one(")
+	g.indent++
+	g.line("const uint8_t *data,")
+	g.line("uintptr_t byte_len,")
+	g.line("uintptr_t *offset")
+	g.indent--
+	g.line(") {")
+	g.indent++
+
+	g.line("if (data == NULL || offset == NULL || *offset >= byte_len) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("uintptr_t i = *offset;")
+	g.line("uint8_t b0 = data[i];")
+	g.line("")
+
+	g.line("if (b0 <= 0x7Fu) {")
+	g.indent++
+	g.line("*offset = i + 1;")
+	g.line("return (uint32_t)b0;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("if (b0 >= 0xC2u && b0 <= 0xDFu) {")
+	g.indent++
+	g.line("if (byte_len - i < 2) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("uint8_t b1 = data[i + 1];")
+	g.line("")
+	g.line("if (!seal_utf8_is_continuation(b1)) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("*offset = i + 2;")
+	g.line("")
+	g.line("return ((uint32_t)(b0 & 0x1Fu) << 6) |")
+	g.indent++
+	g.line("(uint32_t)(b1 & 0x3Fu);")
+	g.indent--
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("if (b0 >= 0xE0u && b0 <= 0xEFu) {")
+	g.indent++
+	g.line("if (byte_len - i < 3) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("uint8_t b1 = data[i + 1];")
+	g.line("uint8_t b2 = data[i + 2];")
+	g.line("")
+	g.line("if (!seal_utf8_is_continuation(b1) ||")
+	g.indent++
+	g.line("!seal_utf8_is_continuation(b2)) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("")
+	g.line("if (b0 == 0xE0u && b1 < 0xA0u) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (b0 == 0xEDu && b1 > 0x9Fu) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("*offset = i + 3;")
+	g.line("")
+	g.line("return ((uint32_t)(b0 & 0x0Fu) << 12) |")
+	g.indent++
+	g.line("((uint32_t)(b1 & 0x3Fu) << 6) |")
+	g.line("(uint32_t)(b2 & 0x3Fu);")
+	g.indent--
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("if (b0 >= 0xF0u && b0 <= 0xF4u) {")
+	g.indent++
+	g.line("if (byte_len - i < 4) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("uint8_t b1 = data[i + 1];")
+	g.line("uint8_t b2 = data[i + 2];")
+	g.line("uint8_t b3 = data[i + 3];")
+	g.line("")
+	g.line("if (!seal_utf8_is_continuation(b1) ||")
+	g.indent++
+	g.line("!seal_utf8_is_continuation(b2) ||")
+	g.line("!seal_utf8_is_continuation(b3)) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("")
+	g.line("if (b0 == 0xF0u && b1 < 0x90u) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (b0 == 0xF4u && b1 > 0x8Fu) {")
+	g.indent++
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("*offset = i + 4;")
+	g.line("")
+	g.line("return ((uint32_t)(b0 & 0x07u) << 18) |")
+	g.indent++
+	g.line("((uint32_t)(b1 & 0x3Fu) << 12) |")
+	g.line("((uint32_t)(b2 & 0x3Fu) << 6) |")
+	g.line("(uint32_t)(b3 & 0x3Fu);")
+	g.indent--
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("return seal_utf8_fail();")
+
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uintptr_t seal_utf8_scalar_count(")
+	g.indent++
+	g.line("const uint8_t *data,")
+	g.line("uintptr_t byte_len")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("uintptr_t offset = 0;")
+	g.line("uintptr_t count = 0;")
+	g.line("")
+	g.line("while (offset < byte_len) {")
+	g.indent++
+	g.line("(void)seal_utf8_decode_one(data, byte_len, &offset);")
+	g.line("count++;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return count;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uintptr_t seal_string_scalar_len(sealString value) {")
+	g.indent++
+	g.line("return seal_utf8_scalar_count(value.data, value.len);")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uintptr_t seal_cstring_scalar_len(const char *value) {")
+	g.indent++
+	g.line("uintptr_t byte_len = seal_cstring_byte_len(value);")
+	g.line("")
+	g.line("return seal_utf8_scalar_count(")
+	g.indent++
+	g.line("(const uint8_t *)value,")
+	g.line("byte_len")
+	g.indent--
+	g.line(");")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline intptr_t seal_utf8_normalize_index(")
+	g.indent++
+	g.line("intptr_t index,")
+	g.line("uintptr_t length")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("if (length > (uintptr_t)INTPTR_MAX) {")
+	g.indent++
+	g.line("return (intptr_t)seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("intptr_t normalized = index;")
+	g.line("")
+	g.line("if (normalized < 0) {")
+	g.indent++
+	g.line("normalized += (intptr_t)length;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (normalized < 0 ||")
+	g.indent++
+	g.line("(uintptr_t)normalized >= length) {")
+	g.indent++
+	g.line("return (intptr_t)seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("")
+	g.line("return normalized;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uint32_t seal_string_index(")
+	g.indent++
+	g.line("sealString value,")
+	g.line("intptr_t index")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("uintptr_t scalar_len = seal_string_scalar_len(value);")
+	g.line("intptr_t normalized =")
+	g.indent++
+	g.line("seal_utf8_normalize_index(index, scalar_len);")
+	g.indent--
+	g.line("")
+	g.line("uintptr_t offset = 0;")
+	g.line("uintptr_t current = 0;")
+	g.line("")
+	g.line("while (offset < value.len) {")
+	g.indent++
+	g.line("uint32_t scalar = seal_utf8_decode_one(")
+	g.indent++
+	g.line("value.data,")
+	g.line("value.len,")
+	g.line("&offset")
+	g.indent--
+	g.line(");")
+	g.line("")
+	g.line("if (current == (uintptr_t)normalized) {")
+	g.indent++
+	g.line("return scalar;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("current++;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline uint32_t seal_cstring_index(")
+	g.indent++
+	g.line("const char *value,")
+	g.line("intptr_t index")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("uintptr_t byte_len = seal_cstring_byte_len(value);")
+	g.line("uintptr_t scalar_len = seal_utf8_scalar_count(")
+	g.indent++
+	g.line("(const uint8_t *)value,")
+	g.line("byte_len")
+	g.indent--
+	g.line(");")
+	g.line("")
+	g.line("intptr_t normalized =")
+	g.indent++
+	g.line("seal_utf8_normalize_index(index, scalar_len);")
+	g.indent--
+	g.line("")
+	g.line("uintptr_t offset = 0;")
+	g.line("uintptr_t current = 0;")
+	g.line("")
+	g.line("while (offset < byte_len) {")
+	g.indent++
+	g.line("uint32_t scalar = seal_utf8_decode_one(")
+	g.indent++
+	g.line("(const uint8_t *)value,")
+	g.line("byte_len,")
+	g.line("&offset")
+	g.indent--
+	g.line(");")
+	g.line("")
+	g.line("if (current == (uintptr_t)normalized) {")
+	g.indent++
+	g.line("return scalar;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("current++;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return seal_utf8_fail();")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline bool seal_string_equal(")
+	g.indent++
+	g.line("sealString left,")
+	g.line("sealString right")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("if (left.len != right.len) {")
+	g.indent++
+	g.line("return false;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (left.len == 0) {")
+	g.indent++
+	g.line("return true;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (left.data == NULL || right.data == NULL) {")
+	g.indent++
+	g.line("return false;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("for (uintptr_t i = 0; i < left.len; i++) {")
+	g.indent++
+	g.line("if (left.data[i] != right.data[i]) {")
+	g.indent++
+	g.line("return false;")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return true;")
+	g.indent--
+	g.line("}")
+	g.line("")
+
+	g.line("static inline bool seal_cstring_equal(")
+	g.indent++
+	g.line("const char *left,")
+	g.line("const char *right")
+	g.indent--
+	g.line(") {")
+	g.indent++
+	g.line("if (left == right) {")
+	g.indent++
+	g.line("return true;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("if (left == NULL || right == NULL) {")
+	g.indent++
+	g.line("return false;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("const uint8_t *a = (const uint8_t *)left;")
+	g.line("const uint8_t *b = (const uint8_t *)right;")
+	g.line("uintptr_t i = 0;")
+	g.line("")
+	g.line("while (a[i] != 0 && b[i] != 0) {")
+	g.indent++
+	g.line("if (a[i] != b[i]) {")
+	g.indent++
+	g.line("return false;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("i++;")
+	g.indent--
+	g.line("}")
+	g.line("")
+	g.line("return a[i] == b[i];")
 	g.indent--
 	g.line("}")
 	g.line("")
@@ -14658,9 +15483,41 @@ func (g *Generator) error(span source.Span, message string) {
 	g.diags.Add(span, message)
 }
 
-func escapeCString(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	return s
+func quoteCByteString(value string) string {
+	var out strings.Builder
+
+	out.WriteByte('"')
+
+	for i := 0; i < len(value); i++ {
+		current := value[i]
+
+		switch current {
+		case '"':
+			out.WriteString(`\"`)
+
+		case '\\':
+			out.WriteString(`\\`)
+
+		default:
+			// Keep ordinary printable ASCII readable. Question marks are
+			// escaped to prevent old C11 trigraph processing from changing
+			// source bytes before tokenization.
+			if current >= 0x20 &&
+				current <= 0x7E &&
+				current != '?' {
+				out.WriteByte(current)
+				continue
+			}
+
+			fmt.Fprintf(
+				&out,
+				`\%03o`,
+				current,
+			)
+		}
+	}
+
+	out.WriteByte('"')
+
+	return out.String()
 }
