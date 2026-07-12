@@ -304,6 +304,14 @@ func generateWorkspaceCWithGenericRequests(
 					loadedPkg.SemanticInfo,
 				)
 
+			// The ordinary package map above intentionally contains only source-level
+			// dependencies. Generic requests may additionally carry a concrete type
+			// owned by a dependant package, so CGen also receives read-only metadata for
+			// the complete workspace.
+			g.SetWorkspacePackages(
+				codegenPackages,
+			)
+
 			if set :=
 				requestsByPackage[pkgName]; set != nil {
 				g.AddRequestedInstances(

@@ -2,6 +2,7 @@ package build
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -234,28 +235,95 @@ func LoadAndCheckPackageWithSemanticInfo(
 		nil
 }
 
-func CFiles(root string) ([]string, error) {
+func shouldSkipPackageDirectory(
+	root string,
+	path string,
+	entry os.DirEntry,
+) (bool, error) {
+	if entry == nil ||
+		!entry.IsDir() ||
+		path == root {
+		return false, nil
+	}
+
+	switch entry.Name() {
+	case ".git",
+		".seal",
+		"build",
+		"vendor":
+		return true, nil
+	}
+
+	manifestPath := filepath.Join(
+		path,
+		"seal.toml",
+	)
+
+	_, err := os.Stat(manifestPath)
+
+	switch {
+	case err == nil:
+		// This directory is the root of another Seal package.
+		return true, nil
+
+	case os.IsNotExist(err):
+		return false, nil
+
+	default:
+		return false, err
+	}
+}
+
+func CFiles(
+	root string,
+) ([]string, error) {
+	root = filepath.Clean(root)
+
 	var files []string
 
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		if entry.IsDir() {
-			switch filepath.Base(path) {
-			case ".git", ".seal", "build", "vendor":
-				return filepath.SkipDir
+	err := filepath.WalkDir(
+		root,
+		func(
+			path string,
+			entry os.DirEntry,
+			walkErr error,
+		) error {
+			if walkErr != nil {
+				return walkErr
 			}
+
+			if entry.IsDir() {
+				skip, err :=
+					shouldSkipPackageDirectory(
+						root,
+						path,
+						entry,
+					)
+
+				if err != nil {
+					return err
+				}
+
+				if skip {
+					return fs.SkipDir
+				}
+
+				return nil
+			}
+
+			if strings.HasSuffix(
+				entry.Name(),
+				".c",
+			) {
+				files = append(
+					files,
+					path,
+				)
+			}
+
 			return nil
-		}
-
-		if strings.HasSuffix(entry.Name(), ".c") {
-			files = append(files, path)
-		}
-
-		return nil
-	})
+		},
+	)
 
 	if err != nil {
 		return nil, err
@@ -325,6 +393,10 @@ func GeneratePackageCWithSemanticInfo(
 		semantic,
 	)
 
+	g.SetWorkspacePackages(
+		codegenPackages,
+	)
+
 	out := g.Generate(file)
 
 	if reporter.HasErrors() {
@@ -339,31 +411,56 @@ func GeneratePackageCWithSemanticInfo(
 	return out, info, nil
 }
 
-func SealFiles(root string) ([]string, error) {
+func SealFiles(
+	root string,
+) ([]string, error) {
+	root = filepath.Clean(root)
+
 	var files []string
 
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+	err := filepath.WalkDir(
+		root,
+		func(
+			path string,
+			entry os.DirEntry,
+			walkErr error,
+		) error {
+			if walkErr != nil {
+				return walkErr
+			}
 
-		if entry.IsDir() {
-			base := filepath.Base(path)
+			if entry.IsDir() {
+				skip, err :=
+					shouldSkipPackageDirectory(
+						root,
+						path,
+						entry,
+					)
 
-			switch base {
-			case ".git", ".seal", "build", "vendor":
-				return filepath.SkipDir
+				if err != nil {
+					return err
+				}
+
+				if skip {
+					return fs.SkipDir
+				}
+
+				return nil
+			}
+
+			if strings.HasSuffix(
+				entry.Name(),
+				".seal",
+			) {
+				files = append(
+					files,
+					path,
+				)
 			}
 
 			return nil
-		}
-
-		if strings.HasSuffix(entry.Name(), ".seal") {
-			files = append(files, path)
-		}
-
-		return nil
-	})
+		},
+	)
 
 	if err != nil {
 		return nil, err
