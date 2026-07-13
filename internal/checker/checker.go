@@ -6920,7 +6920,9 @@ func isUnicodeScalar(value rune) bool {
 func (c *Checker) checkStringLiteral(
 	e *ast.StringLitExpr,
 ) {
-	value, err := strconv.Unquote(e.Value)
+	value, err := unquoteSealLiteral(
+		e.Value,
+	)
 	if err != nil {
 		c.diags.Add(
 			e.Span(),
@@ -6952,8 +6954,9 @@ func (c *Checker) checkCStringLiteral(
 		return
 	}
 
-	// Remove the leading c and let strconv process the quoted part.
-	value, err := strconv.Unquote(e.Value[1:])
+	value, err := unquoteSealLiteral(
+		e.Value[1:],
+	)
 	if err != nil {
 		c.diags.Add(
 			e.Span(),
@@ -6983,7 +6986,9 @@ func (c *Checker) checkCStringLiteral(
 func (c *Checker) checkCharLiteral(
 	e *ast.CharLitExpr,
 ) {
-	value, err := strconv.Unquote(e.Value)
+	value, err := unquoteSealLiteral(
+		e.Value,
+	)
 	if err != nil {
 		c.diags.Add(
 			e.Span(),
@@ -7416,7 +7421,10 @@ func (c *Checker) builtinEqualityCompatible(
 
 	if c.isNumeric(a) &&
 		c.isNumeric(b) {
-		_, ok := c.numericResultType(a, b)
+		_, ok := c.numericResultType(
+			a,
+			b,
+		)
 		return ok
 	}
 
@@ -7425,7 +7433,7 @@ func (c *Checker) builtinEqualityCompatible(
 		return true
 	}
 
-	// Both comparisons are content comparisons, not pointer comparisons.
+	// String and cstring equality compare their contents.
 	if c.sameType(a, StringType) &&
 		c.sameType(b, StringType) {
 		return true
@@ -7443,12 +7451,34 @@ func (c *Checker) builtinEqualityCompatible(
 
 	if a.Kind == TypeEnum &&
 		b.Kind == TypeEnumLiteral {
-		return c.enumHasVariant(a, b.Name)
+		return c.enumHasVariant(
+			a,
+			b.Name,
+		)
 	}
 
 	if b.Kind == TypeEnum &&
 		a.Kind == TypeEnumLiteral {
-		return c.enumHasVariant(b, a.Name)
+		return c.enumHasVariant(
+			b,
+			a.Name,
+		)
+	}
+
+	// Raw pointers use address identity.
+	if a.Kind == TypeRawptr &&
+		b.Kind == TypeRawptr {
+		return true
+	}
+
+	// Typed pointers use address identity, but only pointers with compatible
+	// element types may be compared directly.
+	if a.Kind == TypePointer &&
+		b.Kind == TypePointer {
+		return c.sameType(
+			a,
+			b,
+		)
 	}
 
 	if a.Kind == TypePointer &&
@@ -10947,7 +10977,9 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 		}, true
 
 	case *ast.StringLitExpr:
-		value, err := strconv.Unquote(e.Value)
+		value, err := unquoteSealLiteral(
+			e.Value,
+		)
 		if err != nil {
 			return genericConstValue{}, false
 		}
@@ -11520,6 +11552,66 @@ func (c *Checker) evalPureTaskConstBody(scope *Scope, name string, span source.S
 	}
 
 	return genericConstValue{}, false
+}
+
+func normalizeSealQuotedLiteral(
+	literal string,
+) string {
+	var out strings.Builder
+	out.Grow(len(literal))
+
+	for i := 0; i < len(literal); {
+		if literal[i] != '\\' {
+			out.WriteByte(literal[i])
+			i++
+			continue
+		}
+
+		if i+1 >= len(literal) {
+			out.WriteByte(literal[i])
+			i++
+			continue
+		}
+
+		next := literal[i+1]
+
+		// Seal accepts the conventional short null escape:
+		//
+		//     "\0"
+		//
+		// strconv.Unquote follows Go syntax, where an octal escape must
+		// contain exactly three digits. Convert only the short form to
+		// Go's hexadecimal spelling. Preserve escapes such as \000.
+		if next == '0' {
+			hasFollowingOctalDigit :=
+				i+2 < len(literal) &&
+					literal[i+2] >= '0' &&
+					literal[i+2] <= '7'
+
+			if !hasFollowingOctalDigit {
+				out.WriteString(`\x00`)
+				i += 2
+				continue
+			}
+		}
+
+		// Copy the complete escape pair. Consuming both bytes is important
+		// for sequences such as "\\0", which denotes a backslash followed
+		// by the ordinary character '0', not a null byte.
+		out.WriteByte(literal[i])
+		out.WriteByte(literal[i+1])
+		i += 2
+	}
+
+	return out.String()
+}
+
+func unquoteSealLiteral(
+	literal string,
+) (string, error) {
+	return strconv.Unquote(
+		normalizeSealQuotedLiteral(literal),
+	)
 }
 
 func evalGenericConstBuiltinBinary(op token.Kind, left genericConstValue, right genericConstValue) (genericConstValue, bool) {

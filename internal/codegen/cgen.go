@@ -5486,12 +5486,22 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 	g.emittedGenericTasks[name] = true
 
 	decl := info.Decl
-	subst := genericTaskSubstForCGen(decl.GenericParams, info.Args)
+	subst := genericTaskSubstForCGen(
+		decl.GenericParams,
+		info.Args,
+	)
 
 	oldSubst := g.genericSubst
 	oldTask := g.currentTask
 	oldGenericTaskName := g.currentGenericTaskName
 	oldResults := g.currentResults
+	oldLoopStack := g.loopStack
+
+	g.loopStack = nil
+
+	defer func() {
+		g.loopStack = oldLoopStack
+	}()
 
 	g.genericSubst = subst
 	g.currentTask = decl
@@ -5499,10 +5509,19 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 	g.currentResults = nil
 
 	for _, result := range decl.Results {
-		g.currentResults = append(g.currentResults, g.cTypeFromAstWithGenericArgs(result, subst))
+		g.currentResults = append(
+			g.currentResults,
+			g.cTypeFromAstWithGenericArgs(
+				result,
+				subst,
+			),
+		)
 	}
 
-	g.linef("%s {", g.genericTaskSignature(info, true))
+	g.linef(
+		"%s {",
+		g.genericTaskSignature(info, true),
+	)
 	g.indent++
 
 	oldScope := g.scope
@@ -5512,8 +5531,15 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 	g.taskScope = g.scope
 
 	for _, param := range decl.Params {
-		paramType := g.cTypeFromAstWithGenericArgs(param.Type, subst)
-		g.scope.declare(param.Name.Name, paramType)
+		paramType := g.cTypeFromAstWithGenericArgs(
+			param.Type,
+			subst,
+		)
+
+		g.scope.declare(
+			param.Name.Name,
+			paramType,
+		)
 	}
 
 	g.emitBlockStatements(decl.Body)
@@ -5582,12 +5608,22 @@ func (g *Generator) emitTasks(file *ast.File) {
 func (g *Generator) emitTask(d *ast.TaskDecl) {
 	info := g.tasks[d.Name.Name]
 
+	oldLoopStack := g.loopStack
+	g.loopStack = nil
+
+	defer func() {
+		g.loopStack = oldLoopStack
+	}()
+
 	g.currentTask = d
 	g.currentResults = nil
 	g.currentGenericTaskName = ""
 
 	for _, result := range d.Results {
-		g.currentResults = append(g.currentResults, g.cTypeFromAst(result))
+		g.currentResults = append(
+			g.currentResults,
+			g.cTypeFromAst(result),
+		)
 	}
 
 	g.linef("%s {", g.taskSignature(d, true))
@@ -5603,19 +5639,23 @@ func (g *Generator) emitTask(d *ast.TaskDecl) {
 		if i < len(info.ParamTypes) {
 			paramType := info.ParamTypes[i]
 
-			if i < len(info.ParamIsVariadic) && info.ParamIsVariadic[i] {
+			if i < len(info.ParamIsVariadic) &&
+				info.ParamIsVariadic[i] {
 				paramType = g.variadicCType(paramType)
 			}
 
-			g.scope.declare(param.Name.Name, paramType)
+			g.scope.declare(
+				param.Name.Name,
+				paramType,
+			)
 		}
 	}
 
 	g.emitBlockStatements(d.Body)
-
 	g.emitActiveDefers()
 
-	if d.Name.Name == "Main" && len(d.Results) == 0 {
+	if d.Name.Name == "Main" &&
+		len(d.Results) == 0 {
 		g.line("return 0;")
 	}
 
@@ -5665,7 +5705,7 @@ func (g *Generator) emitDefersThroughScope(
 		}
 
 		if current == g.taskScope {
-			break
+			return false
 		}
 	}
 
@@ -7761,8 +7801,16 @@ func (g *Generator) emitForStmt(
 	s *ast.ForStmt,
 ) {
 	oldScope := g.scope
+	oldLoopStackLength := len(g.loopStack)
+
 	loopScope := newScope(oldScope)
 	g.scope = loopScope
+
+	defer func() {
+		g.scope = oldScope
+		g.loopStack =
+			g.loopStack[:oldLoopStackLength]
+	}()
 
 	init := ""
 	if s.Init != nil {
@@ -7845,11 +7893,6 @@ func (g *Generator) emitForStmt(
 
 	g.indent--
 	g.line("}")
-
-	g.loopStack =
-		g.loopStack[:len(g.loopStack)-1]
-
-	g.scope = oldScope
 
 	// A generated break jumps outside every intervening switch and exits the
 	// current for loop.
@@ -14220,6 +14263,13 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 	oldSubst := g.genericSubst
 	oldReturnStructOverride := g.currentReturnStructOverride
 	oldTypeContextPackage := g.typeContextPackage
+	oldLoopStack := g.loopStack
+
+	g.loopStack = nil
+
+	defer func() {
+		g.loopStack = oldLoopStack
+	}()
 
 	g.scope = newScope(oldScope)
 	g.taskScope = g.scope
@@ -14238,13 +14288,15 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 
 	if len(g.currentResults) > 1 {
 		wrapperReturnType := ret
-		g.currentReturnStructOverride = &wrapperReturnType
+		g.currentReturnStructOverride =
+			&wrapperReturnType
 	}
 
 	// Prevent an interface requirement named Main from being treated as the
 	// generated C entry point.
 	wrapperTask := *entry.Task
-	wrapperTask.Name.Name = "__seal_interface_wrapper"
+	wrapperTask.Name.Name =
+		"__seal_interface_wrapper"
 	g.currentTask = &wrapperTask
 
 	if len(entry.Task.Params) > 0 {
@@ -14263,7 +14315,10 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 			firstType.Name,
 		)
 
-		g.scope.declare(first.Name.Name, firstType)
+		g.scope.declare(
+			first.Name.Name,
+			firstType,
+		)
 	}
 
 	for i := 1; i < len(entry.Task.Params); i++ {
@@ -14276,7 +14331,10 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 				info.Subst,
 			)
 
-		sourceName := fmt.Sprintf("arg%d", i)
+		sourceName := fmt.Sprintf(
+			"arg%d",
+			i,
+		)
 
 		if param.Name.Name != sourceName {
 			g.linef(
@@ -14286,7 +14344,10 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 			)
 		}
 
-		g.scope.declare(param.Name.Name, paramType)
+		g.scope.declare(
+			param.Name.Name,
+			paramType,
+		)
 	}
 
 	g.emitBlockStatements(entry.Task.Body)
@@ -14297,8 +14358,10 @@ func (g *Generator) emitInlineInterfaceWrapperBody(
 	g.currentResults = oldResults
 	g.genericSubst = oldSubst
 	g.currentTask = oldTask
-	g.currentReturnStructOverride = oldReturnStructOverride
-	g.typeContextPackage = oldTypeContextPackage
+	g.currentReturnStructOverride =
+		oldReturnStructOverride
+	g.typeContextPackage =
+		oldTypeContextPackage
 }
 
 func (g *Generator) emitDelegatedInterfaceWrapperBody(
