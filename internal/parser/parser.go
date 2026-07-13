@@ -1581,7 +1581,8 @@ func (p *Parser) parseBlock() *ast.BlockStmt {
 func (p *Parser) parseStmt() ast.Stmt {
 	start := p.peek().Span.Start
 
-	if p.at(token.Ident) && p.peekNext().Kind == token.ColonColon {
+	if p.at(token.Ident) &&
+		p.peekNext().Kind == token.ColonColon {
 		decl := p.parseDecl()
 		if decl == nil {
 			return nil
@@ -1601,10 +1602,14 @@ func (p *Parser) parseStmt() ast.Stmt {
 	case p.match(token.KeywordReturn):
 		var values []ast.Expr
 
-		if !p.at(token.RBrace) && !p.at(token.EOF) {
+		if !p.at(token.RBrace) &&
+			!p.at(token.EOF) {
 			value := p.parseExpr(0)
 			if value != nil {
-				values = append(values, value)
+				values = append(
+					values,
+					value,
+				)
 
 				for p.match(token.Comma) {
 					next := p.parseExpr(0)
@@ -1612,7 +1617,10 @@ func (p *Parser) parseStmt() ast.Stmt {
 						break
 					}
 
-					values = append(values, next)
+					values = append(
+						values,
+						next,
+					)
 				}
 			}
 		}
@@ -1639,7 +1647,10 @@ func (p *Parser) parseStmt() ast.Stmt {
 
 			return &ast.DeferStmt{
 				Body: body,
-				Loc:  p.span(start, body.Span().End),
+				Loc: p.span(
+					start,
+					body.Span().End,
+				),
 			}
 		}
 
@@ -1647,35 +1658,66 @@ func (p *Parser) parseStmt() ast.Stmt {
 		//
 		//     defer Close(file)
 		//
-		// The parser accepts an expression here. The checker is responsible
-		// for requiring it to be a valid task call.
+		// The parser accepts an expression here. The checker is
+		// responsible for requiring it to be a valid task call.
 		call := p.parseExpr(0)
 		if call == nil {
-			p.errorHere("expected task call or block after defer")
+			p.errorHere(
+				"expected task call or block after defer",
+			)
+
 			return nil
 		}
 
 		return &ast.DeferStmt{
 			Call: call,
-			Loc:  p.span(start, call.Span().End),
+			Loc: p.span(
+				start,
+				call.Span().End,
+			),
 		}
 
 	case p.match(token.KeywordSeal):
 		target := p.parseExpr(0)
 		if target == nil {
-			p.errorHere("expected expression after seal")
+			p.errorHere(
+				"expected expression after seal",
+			)
+
 			return nil
 		}
 
 		return &ast.SealStmt{
 			Target: target,
-			Loc:    p.span(start, target.Span().End),
+			Loc: p.span(
+				start,
+				target.Span().End,
+			),
 		}
 
 	case p.match(token.KeywordIf):
-		cond := p.parseExpr(0)
+		// In an if condition, the first unparenthesized `{`
+		// begins the statement body.
+		//
+		// This prevents an identifier condition such as:
+		//
+		//     if success {
+		//
+		// or a unary identifier condition such as:
+		//
+		//     if !success {
+		//
+		// from being interpreted as a compound literal.
+		cond := p.parseExprUntil(
+			0,
+			token.LBrace,
+		)
+
 		if cond == nil {
-			p.errorHere("expected condition after if")
+			p.errorHere(
+				"expected condition after if",
+			)
+
 			return nil
 		}
 
@@ -1710,20 +1752,35 @@ func (p *Parser) parseStmt() ast.Stmt {
 		return p.parseForStmt(start)
 
 	case p.match(token.At):
-		dir := p.expectIdent("expected directive name after '@'")
+		dir := p.expectIdent(
+			"expected directive name after '@'",
+		)
+
 		if dir.Name != "partial" {
-			p.errorHere("expected 'partial' directive before switch")
+			p.errorHere(
+				"expected 'partial' directive before switch",
+			)
+
 			return nil
 		}
 
-		if !p.expect(token.KeywordSwitch, "expected 'switch' after @partial") {
+		if !p.expect(
+			token.KeywordSwitch,
+			"expected 'switch' after @partial",
+		) {
 			return nil
 		}
 
-		return p.parseSwitchStmt(start, true)
+		return p.parseSwitchStmt(
+			start,
+			true,
+		)
 
 	case p.match(token.KeywordSwitch):
-		return p.parseSwitchStmt(start, false)
+		return p.parseSwitchStmt(
+			start,
+			false,
+		)
 	}
 
 	return p.parseSimpleStmt()
@@ -2078,8 +2135,11 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 	return p.parseExprUntil(minPrec)
 }
 
-func (p *Parser) parseExprUntil(minPrec int, stops ...token.Kind) ast.Expr {
-	left := p.parsePrefix()
+func (p *Parser) parseExprUntil(
+	minPrec int,
+	stops ...token.Kind,
+) ast.Expr {
+	left := p.parsePrefixUntil(stops...)
 	if left == nil {
 		return nil
 	}
@@ -2089,13 +2149,18 @@ func (p *Parser) parseExprUntil(minPrec int, stops ...token.Kind) ast.Expr {
 			break
 		}
 
-		if p.at(token.Lt) && p.looksLikeGenericExpr(left) {
+		if p.at(token.Lt) &&
+			p.looksLikeGenericExpr(left) {
 			left = p.parseGenericExpr(left)
 			continue
 		}
 
-		// `{` is only postfix when the left side can become a type.
-		// Otherwise it belongs to an if/for/switch/block.
+		// `{` is only postfix when the left side can become a
+		// type and the current expression context does not use
+		// `{` as a terminating token.
+		//
+		// Control-flow conditions pass token.LBrace as a stop,
+		// so their body cannot be consumed as a compound literal.
 		if p.at(token.LBrace) {
 			if p.typeFromExprForLiteral(left) == nil {
 				break
@@ -2110,15 +2175,26 @@ func (p *Parser) parseExprUntil(minPrec int, stops ...token.Kind) ast.Expr {
 			continue
 		}
 
-		prec := p.binaryPrecedence(p.peek().Kind)
+		prec := p.binaryPrecedence(
+			p.peek().Kind,
+		)
+
 		if prec < minPrec {
 			break
 		}
 
 		op := p.advance()
-		right := p.parseExprUntil(prec+1, stops...)
+
+		right := p.parseExprUntil(
+			prec+1,
+			stops...,
+		)
+
 		if right == nil {
-			p.errorHere("expected expression after binary operator")
+			p.errorHere(
+				"expected expression after binary operator",
+			)
+
 			return left
 		}
 
@@ -2126,7 +2202,10 @@ func (p *Parser) parseExprUntil(minPrec int, stops ...token.Kind) ast.Expr {
 			Left:  left,
 			Op:    op.Kind,
 			Right: right,
-			Loc:   p.span(left.Span().Start, right.Span().End),
+			Loc: p.span(
+				left.Span().Start,
+				right.Span().End,
+			),
 		}
 	}
 
@@ -2144,10 +2223,17 @@ func (p *Parser) atAny(kinds ...token.Kind) bool {
 }
 
 func (p *Parser) parsePrefix() ast.Expr {
+	return p.parsePrefixUntil()
+}
+
+func (p *Parser) parsePrefixUntil(
+	stops ...token.Kind,
+) ast.Expr {
 	start := p.peek().Span.Start
 
 	switch {
-	case p.at(token.Ident) || p.at(token.KeywordSelf):
+	case p.at(token.Ident) ||
+		p.at(token.KeywordSelf):
 		tok := p.advance()
 
 		id := ast.Ident{
@@ -2155,7 +2241,9 @@ func (p *Parser) parsePrefix() ast.Expr {
 			Loc:  tok.Span,
 		}
 
-		return &ast.IdentExpr{Name: id}
+		return &ast.IdentExpr{
+			Name: id,
+		}
 
 	case p.match(token.IntLit):
 		return &ast.IntLitExpr{
@@ -2205,29 +2293,74 @@ func (p *Parser) parsePrefix() ast.Expr {
 		}
 
 	case p.match(token.Dot):
-		name := p.expectIdent("expected enum element after '.'")
+		name := p.expectIdent(
+			"expected enum element after '.'",
+		)
+
 		return &ast.DotIdentExpr{
 			Name: name,
-			Loc:  p.span(start, name.Span().End),
+			Loc: p.span(
+				start,
+				name.Span().End,
+			),
 		}
 
 	case p.match(token.LParen):
-		expr := p.parseExpr(0)
-		p.expect(token.RParen, "expected ')' after expression")
+		// Parentheses create their own expression boundary.
+		//
+		// In particular, they allow an otherwise ambiguous
+		// compound literal to appear in a control-flow
+		// condition:
+		//
+		//     if (Flags{Enabled = true}.Enabled) {
+		//
+		expr := p.parseExprUntil(
+			0,
+			token.RParen,
+		)
+
+		p.expect(
+			token.RParen,
+			"expected ')' after expression",
+		)
+
 		return expr
 
 	case p.isUnaryOp(p.peek().Kind):
 		op := p.advance()
-		expr := p.parseExpr(7)
+
+		// Propagate the enclosing expression stops into the
+		// unary operand.
+		//
+		// Without this, parsing:
+		//
+		//     if !success {
+		//
+		// causes the operand parser to interpret:
+		//
+		//     success {
+		//
+		// as the beginning of a compound literal.
+		expr := p.parseExprUntil(
+			7,
+			stops...,
+		)
+
 		if expr == nil {
-			p.errorHere("expected expression after unary operator")
+			p.errorHere(
+				"expected expression after unary operator",
+			)
+
 			return nil
 		}
 
 		return &ast.UnaryExpr{
 			Op:   op.Kind,
 			Expr: expr,
-			Loc:  p.span(start, expr.Span().End),
+			Loc: p.span(
+				start,
+				expr.Span().End,
+			),
 		}
 	}
 
@@ -3004,9 +3137,11 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 	//     switch err {
 	//     switch self {
 	//
-	// The normal expression parser sees `name { ... }` and may interpret it
-	// as a compound literal. In a switch head, `{` starts the switch body.
-	if p.at(token.Ident) || p.at(token.KeywordSelf) {
+	// The normal expression parser sees `name { ... }` and
+	// may interpret it as a compound literal. In a switch
+	// head, `{` starts the switch body.
+	if p.at(token.Ident) ||
+		p.at(token.KeywordSelf) {
 		tok := p.advance()
 
 		id := ast.Ident{
@@ -3014,16 +3149,21 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 			Loc:  tok.Span,
 		}
 
-		var expr ast.Expr = &ast.IdentExpr{Name: id}
+		var expr ast.Expr = &ast.IdentExpr{
+			Name: id,
+		}
 
 		for {
-			if p.at(token.Lt) && p.looksLikeGenericExpr(expr) {
+			if p.at(token.Lt) &&
+				p.looksLikeGenericExpr(expr) {
 				expr = p.parseGenericExpr(expr)
 				continue
 			}
 
 			switch p.peek().Kind {
-			case token.LParen, token.Dot, token.LBracket:
+			case token.LParen,
+				token.Dot,
+				token.LBracket:
 				expr = p.parsePostfix(expr)
 
 			default:
@@ -3032,8 +3172,13 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 		}
 	}
 
-	// Non-identifier expressions can use the normal parser.
-	expr := p.parseExpr(0)
+	// Non-identifier expressions use the normal Pratt parser,
+	// but `{` terminates the switch head.
+	expr := p.parseExprUntil(
+		0,
+		token.LBrace,
+	)
+
 	if expr == nil {
 		p.diags.Add(
 			source.NewSpan(

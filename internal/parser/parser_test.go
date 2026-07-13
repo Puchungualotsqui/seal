@@ -1617,3 +1617,364 @@ Main :: task(values Buffer) {
 		)
 	}
 }
+
+func TestParseMultiValueReturnStartingWithCompoundLiteral(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+TryToCString :: task() OwnedCString, bool {
+    return OwnedCString{
+        Data = nil,
+        ByteLength = 0,
+    }, false
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration is %T, expected *ast.TaskDecl",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Results) != 2 {
+		t.Fatalf(
+			"expected 2 result types, got %d",
+			len(task.Results),
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 body statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	ret, ok := task.Body.Stmts[0].(*ast.ReturnStmt)
+	if !ok {
+		t.Fatalf(
+			"statement is %T, expected *ast.ReturnStmt",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(ret.Values) != 2 {
+		t.Fatalf(
+			"expected 2 returned values, got %d",
+			len(ret.Values),
+		)
+	}
+
+	literal, ok :=
+		ret.Values[0].(*ast.CompoundLiteralExpr)
+	if !ok {
+		t.Fatalf(
+			"first return value is %T, expected *ast.CompoundLiteralExpr",
+			ret.Values[0],
+		)
+	}
+
+	if len(literal.Fields) != 2 {
+		t.Fatalf(
+			"expected 2 literal fields, got %d",
+			len(literal.Fields),
+		)
+	}
+
+	if literal.Fields[0].Name.Name != "Data" {
+		t.Fatalf(
+			"first field is %q, expected Data",
+			literal.Fields[0].Name.Name,
+		)
+	}
+
+	if literal.Fields[1].Name.Name != "ByteLength" {
+		t.Fatalf(
+			"second field is %q, expected ByteLength",
+			literal.Fields[1].Name.Name,
+		)
+	}
+
+	success, ok :=
+		ret.Values[1].(*ast.BoolLitExpr)
+	if !ok {
+		t.Fatalf(
+			"second return value is %T, expected *ast.BoolLitExpr",
+			ret.Values[1],
+		)
+	}
+
+	if success.Value {
+		t.Fatalf(
+			"expected returned bool to be false",
+		)
+	}
+}
+
+func TestParseNegatedIdentifierIfCondition(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+ToCString :: task(
+    result OwnedCString,
+    success bool,
+) OwnedCString {
+    if !success {
+        panic("strings.ToCString failed")
+    }
+
+    return result
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration is %T, expected *ast.TaskDecl",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 2 {
+		t.Fatalf(
+			"expected 2 body statements, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	ifStmt, ok :=
+		task.Body.Stmts[0].(*ast.IfStmt)
+	if !ok {
+		t.Fatalf(
+			"first statement is %T, expected *ast.IfStmt",
+			task.Body.Stmts[0],
+		)
+	}
+
+	unary, ok :=
+		ifStmt.Cond.(*ast.UnaryExpr)
+	if !ok {
+		t.Fatalf(
+			"condition is %T, expected *ast.UnaryExpr",
+			ifStmt.Cond,
+		)
+	}
+
+	operand, ok :=
+		unary.Expr.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"unary operand is %T, expected *ast.IdentExpr",
+			unary.Expr,
+		)
+	}
+
+	if operand.Name.Name != "success" {
+		t.Fatalf(
+			"unary operand is %q, expected success",
+			operand.Name.Name,
+		)
+	}
+
+	if ifStmt.Then == nil {
+		t.Fatalf("expected if body")
+	}
+
+	if len(ifStmt.Then.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement in if body, got %d",
+			len(ifStmt.Then.Stmts),
+		)
+	}
+
+	panicStmt, ok :=
+		ifStmt.Then.Stmts[0].(*ast.ExprStmt)
+	if !ok {
+		t.Fatalf(
+			"if body statement is %T, expected *ast.ExprStmt",
+			ifStmt.Then.Stmts[0],
+		)
+	}
+
+	if _, ok :=
+		panicStmt.Expr.(*ast.CallExpr); !ok {
+		t.Fatalf(
+			"if body expression is %T, expected *ast.CallExpr",
+			panicStmt.Expr,
+		)
+	}
+}
+
+func TestParseIdentifierIfCondition(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+UseResult :: task(
+    result OwnedCString,
+    success bool,
+) OwnedCString {
+    if success {
+        return result
+    }
+
+    return result
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration is %T, expected *ast.TaskDecl",
+			file.Decls[0],
+		)
+	}
+
+	ifStmt, ok :=
+		task.Body.Stmts[0].(*ast.IfStmt)
+	if !ok {
+		t.Fatalf(
+			"first statement is %T, expected *ast.IfStmt",
+			task.Body.Stmts[0],
+		)
+	}
+
+	condition, ok :=
+		ifStmt.Cond.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"condition is %T, expected *ast.IdentExpr",
+			ifStmt.Cond,
+		)
+	}
+
+	if condition.Name.Name != "success" {
+		t.Fatalf(
+			"condition is %q, expected success",
+			condition.Name.Name,
+		)
+	}
+}
+
+func TestParseNegatedCallIfCondition(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Main :: task(value string) {
+    if !HasNullByte(value) {
+        Continue()
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+	ifStmt := task.Body.Stmts[0].(*ast.IfStmt)
+
+	unary, ok :=
+		ifStmt.Cond.(*ast.UnaryExpr)
+	if !ok {
+		t.Fatalf(
+			"condition is %T, expected *ast.UnaryExpr",
+			ifStmt.Cond,
+		)
+	}
+
+	if _, ok :=
+		unary.Expr.(*ast.CallExpr); !ok {
+		t.Fatalf(
+			"unary operand is %T, expected *ast.CallExpr",
+			unary.Expr,
+		)
+	}
+}
+
+func TestParseParenthesizedCompoundLiteralIfCondition(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Main :: task() {
+    if (Flags{
+        Enabled = true,
+    }.Enabled) {
+        Continue()
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+	ifStmt := task.Body.Stmts[0].(*ast.IfStmt)
+
+	selector, ok :=
+		ifStmt.Cond.(*ast.SelectorExpr)
+	if !ok {
+		t.Fatalf(
+			"condition is %T, expected *ast.SelectorExpr",
+			ifStmt.Cond,
+		)
+	}
+
+	if selector.Name.Name != "Enabled" {
+		t.Fatalf(
+			"selected field is %q, expected Enabled",
+			selector.Name.Name,
+		)
+	}
+
+	if _, ok :=
+		selector.Left.(*ast.CompoundLiteralExpr); !ok {
+		t.Fatalf(
+			"selector receiver is %T, expected *ast.CompoundLiteralExpr",
+			selector.Left,
+		)
+	}
+}
