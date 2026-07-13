@@ -74,6 +74,12 @@ type valueInfo struct {
 	Type CType
 }
 
+type loopControl struct {
+	scope         *scope
+	breakLabel    string
+	continueLabel string
+}
+
 type deferredAction struct {
 	// Call contains a fully prepared C call. Call-form defer arguments are
 	// evaluated and captured when the defer statement is encountered.
@@ -336,6 +342,8 @@ type Generator struct {
 
 	scope     *scope
 	taskScope *scope
+
+	loopStack []loopControl
 
 	currentTask                 *ast.TaskDecl
 	currentGenericTaskName      string
@@ -5631,6 +5639,91 @@ func (g *Generator) emitActiveDefers() {
 	}
 }
 
+func (g *Generator) currentLoopControl() (
+	loopControl,
+	bool,
+) {
+	if len(g.loopStack) == 0 {
+		return loopControl{}, false
+	}
+
+	return g.loopStack[len(g.loopStack)-1], true
+}
+
+func (g *Generator) emitDefersThroughScope(
+	target *scope,
+) bool {
+	if target == nil {
+		return false
+	}
+
+	for current := g.scope; current != nil; current = current.parent {
+		g.emitDefersInScope(current)
+
+		if current == target {
+			return true
+		}
+
+		if current == g.taskScope {
+			break
+		}
+	}
+
+	return false
+}
+
+func (g *Generator) emitBreakStmt(
+	s *ast.BreakStmt,
+) {
+	control, ok := g.currentLoopControl()
+	if !ok {
+		g.error(
+			s.Span(),
+			"break is only valid inside a for loop",
+		)
+		return
+	}
+
+	if !g.emitDefersThroughScope(control.scope) {
+		g.error(
+			s.Span(),
+			"could not find the target for-loop scope while emitting break",
+		)
+		return
+	}
+
+	g.linef(
+		"goto %s;",
+		control.breakLabel,
+	)
+}
+
+func (g *Generator) emitContinueStmt(
+	s *ast.ContinueStmt,
+) {
+	control, ok := g.currentLoopControl()
+	if !ok {
+		g.error(
+			s.Span(),
+			"continue is only valid inside a for loop",
+		)
+		return
+	}
+
+	if !g.emitDefersThroughScope(control.scope) {
+		g.error(
+			s.Span(),
+			"could not find the target for-loop scope while emitting continue",
+		)
+		return
+	}
+
+	g.linef(
+		"goto %s;",
+		control.continueLabel,
+	)
+}
+
 func (g *Generator) emitDefersInScope(sc *scope) {
 	if sc == nil {
 		return
@@ -5668,6 +5761,15 @@ func (g *Generator) emitDeferredAction(
 	if action.Body == nil {
 		return
 	}
+
+	// A deferred block executes as an independent control-flow region.
+	// It must not inherit a surrounding for-loop target.
+	previousLoopStack := g.loopStack
+	g.loopStack = nil
+
+	defer func() {
+		g.loopStack = previousLoopStack
+	}()
 
 	// Give the deferred body its own lexical scope. This supports local
 	// variables and nested defers within the deferred body.
@@ -7439,6 +7541,12 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 	case *ast.ReturnStmt:
 		g.emitReturnStmt(s)
 
+	case *ast.BreakStmt:
+		g.emitBreakStmt(s)
+
+	case *ast.ContinueStmt:
+		g.emitContinueStmt(s)
+
 	case *ast.DeferStmt:
 		g.emitDeferStmt(s)
 
@@ -7649,32 +7757,12 @@ func (g *Generator) emitVarDeclStmt(
 	g.linef("%s;", typ.Decl(s.Name.Name))
 }
 
-func (g *Generator) emitForStmt(s *ast.ForStmt) {
+func (g *Generator) emitForStmt(
+	s *ast.ForStmt,
+) {
 	oldScope := g.scope
-	g.scope = newScope(oldScope)
-
-	if s.Init == nil && s.Cond == nil && s.Post == nil {
-		g.line("for (;;) {")
-		g.indent++
-		g.emitBlockStatements(s.Body)
-		g.emitDefersInScope(g.scope)
-		g.indent--
-		g.line("}")
-		g.scope = oldScope
-		return
-	}
-
-	if s.Init == nil && s.Post == nil {
-		cond := g.emitExpr(s.Cond, &CBool)
-		g.linef("for (; %s; ) {", cond)
-		g.indent++
-		g.emitBlockStatements(s.Body)
-		g.emitDefersInScope(g.scope)
-		g.indent--
-		g.line("}")
-		g.scope = oldScope
-		return
-	}
+	loopScope := newScope(oldScope)
+	g.scope = loopScope
 
 	init := ""
 	if s.Init != nil {
@@ -7683,7 +7771,10 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 
 	cond := ""
 	if s.Cond != nil {
-		cond = g.emitExpr(s.Cond, &CBool)
+		cond = g.emitExpr(
+			s.Cond,
+			&CBool,
+		)
 	}
 
 	post := ""
@@ -7691,14 +7782,81 @@ func (g *Generator) emitForStmt(s *ast.ForStmt) {
 		post = g.emitForPart(s.Post)
 	}
 
-	g.linef("for (%s; %s; %s) {", init, cond, post)
+	breakLabel := g.newTemp(
+		"loop_break",
+	)
+
+	continueLabel := g.newTemp(
+		"loop_continue",
+	)
+
+	control := loopControl{
+		scope:         loopScope,
+		breakLabel:    breakLabel,
+		continueLabel: continueLabel,
+	}
+
+	g.loopStack = append(
+		g.loopStack,
+		control,
+	)
+
+	switch {
+	case s.Init == nil &&
+		s.Cond == nil &&
+		s.Post == nil:
+		g.line("for (;;) {")
+
+	case s.Init == nil &&
+		s.Post == nil:
+		g.linef(
+			"for (; %s; ) {",
+			cond,
+		)
+
+	default:
+		g.linef(
+			"for (%s; %s; %s) {",
+			init,
+			cond,
+			post,
+		)
+	}
+
 	g.indent++
-	g.emitBlockStatements(s.Body)
-	g.emitDefersInScope(g.scope)
+
+	g.emitBlockStatements(
+		s.Body,
+	)
+
+	// Normal iteration completion exits the lexical body scope, so its
+	// deferred actions execute before the C for-loop post expression.
+	g.emitDefersInScope(
+		loopScope,
+	)
+
+	// A generated continue jumps here after explicitly running every defer
+	// belonging to the scopes it exits. Falling through this label causes C
+	// to execute the for-loop post expression and then recheck the condition.
+	g.linef(
+		"%s: ;",
+		continueLabel,
+	)
+
 	g.indent--
 	g.line("}")
 
+	g.loopStack =
+		g.loopStack[:len(g.loopStack)-1]
+
 	g.scope = oldScope
+
+	// A generated break jumps outside every intervening switch and exits the
+	// current for loop.
+	g.linef(
+		"%s: ;",
+		breakLabel,
+	)
 }
 
 func (g *Generator) emitForPart(

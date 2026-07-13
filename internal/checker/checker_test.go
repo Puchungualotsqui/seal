@@ -8853,3 +8853,579 @@ Main :: task() {
 		`no generic overload of "Process" matches generic arguments <16> and argument types (string)`,
 	)
 }
+
+func TestBreakInsideForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        break
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestContinueInsideForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        continue
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestBreakInsideConditionalInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        if true {
+            break
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestContinueInsideConditionalInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        if true {
+            continue
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestBreakInsideNestedForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        for {
+            break
+        }
+
+        break
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestContinueInsideNestedForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        for {
+            continue
+        }
+
+        continue
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectBreakOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    break
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"break is only valid inside a for loop",
+	)
+}
+
+func TestRejectContinueOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    continue
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"continue is only valid inside a for loop",
+	)
+}
+
+func TestRejectBreakInsideIfOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    if true {
+        break
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"break is only valid inside a for loop",
+	)
+}
+
+func TestRejectContinueInsideIfOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    if true {
+        continue
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"continue is only valid inside a for loop",
+	)
+}
+
+func TestRejectBreakInsideSwitchOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    status: Status = .Ready
+
+    switch status {
+    case .Ready:
+        break
+
+    case .Done:
+        assert(true)
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"break is only valid inside a for loop",
+	)
+}
+
+func TestRejectContinueInsideSwitchOutsideFor(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    status: Status = .Ready
+
+    switch status {
+    case .Ready:
+        continue
+
+    case .Done:
+        assert(true)
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"continue is only valid inside a for loop",
+	)
+}
+
+func TestBreakInsideSwitchNestedInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    status: Status = .Ready
+
+    for {
+        switch status {
+        case .Ready:
+            break
+
+        case .Done:
+            assert(true)
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"break inside a switch nested in a for must target the for loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestContinueInsideSwitchNestedInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Status :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    status: Status = .Ready
+
+    for {
+        switch status {
+        case .Ready:
+            continue
+
+        case .Done:
+            assert(true)
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"continue inside a switch nested in a for must target the for loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestBreakInsideNestedSwitchesInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Outer :: enum {
+    First
+    Second
+}
+
+Inner :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    outer: Outer = .First
+    inner: Inner = .Ready
+
+    for {
+        switch outer {
+        case .First:
+            switch inner {
+            case .Ready:
+                break
+
+            case .Done:
+                assert(true)
+            }
+
+        case .Second:
+            assert(true)
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"switch nesting must not hide the surrounding for loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestContinueInsideNestedSwitchesInForIsValid(t *testing.T) {
+	reporter := checkSource(t, `
+Outer :: enum {
+    First
+    Second
+}
+
+Inner :: enum {
+    Ready
+    Done
+}
+
+Main :: task() {
+    outer: Outer = .First
+    inner: Inner = .Ready
+
+    for {
+        switch outer {
+        case .First:
+            switch inner {
+            case .Ready:
+                continue
+
+            case .Done:
+                assert(true)
+            }
+
+        case .Second:
+            assert(true)
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"switch nesting must not hide the surrounding for loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectBreakInsideNestedTaskDeclaredInFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        Nested :: task() {
+            break
+        }
+
+        break
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"break is only valid inside a for loop",
+	)
+}
+
+func TestRejectContinueInsideNestedTaskDeclaredInFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        Nested :: task() {
+            continue
+        }
+
+        break
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"continue is only valid inside a for loop",
+	)
+}
+
+func TestNestedTaskCanUseItsOwnForBreak(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        Nested :: task() {
+            for {
+                break
+            }
+        }
+
+        break
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"nested task should be able to use break in its own loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestNestedTaskCanUseItsOwnForContinue(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        Nested :: task() {
+            for {
+                continue
+            }
+        }
+
+        break
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"nested task should be able to use continue in its own loop:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectBreakInsideDeferredBlockDeclaredInFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        defer {
+            break
+        }
+
+        break
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"break is only valid inside a for loop",
+	)
+}
+
+func TestRejectContinueInsideDeferredBlockDeclaredInFor(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    for {
+        defer {
+            continue
+        }
+
+        break
+    }
+}
+`)
+
+	assertCheckerDiagnosticContains(
+		t,
+		reporter,
+		"continue is only valid inside a for loop",
+	)
+}
+
+func TestBreakAndContinueRequireForLoop(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "top-level break",
+			input: `
+Main :: task() {
+    break
+}
+`,
+			want: "break is only valid inside a for loop",
+		},
+		{
+			name: "top-level continue",
+			input: `
+Main :: task() {
+    continue
+}
+`,
+			want: "continue is only valid inside a for loop",
+		},
+		{
+			name: "break in switch",
+			input: `
+State :: enum {
+    Active
+}
+
+Main :: task() {
+    state: State = .Active
+
+    switch state {
+    case .Active:
+        break
+    }
+}
+`,
+			want: "break is only valid inside a for loop",
+		},
+		{
+			name: "continue in switch",
+			input: `
+State :: enum {
+    Active
+}
+
+Main :: task() {
+    state: State = .Active
+
+    switch state {
+    case .Active:
+        continue
+    }
+}
+`,
+			want: "continue is only valid inside a for loop",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := checkSource(
+				t,
+				test.input,
+			)
+
+			assertCheckerDiagnosticContains(
+				t,
+				reporter,
+				test.want,
+			)
+		})
+	}
+}

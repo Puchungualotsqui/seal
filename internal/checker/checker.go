@@ -608,6 +608,13 @@ type Checker struct {
 
 	currentResults []*Type
 
+	// currentLoopDepth is greater than zero while checking the body of an
+	// enclosing for loop.
+	//
+	// It is reset when entering a nested task or deferred block because those
+	// constructs do not share the surrounding task's active loop context.
+	currentLoopDepth int
+
 	// currentDeferDepth is greater than zero while checking the contents of
 	// a deferred block:
 	//
@@ -4980,9 +4987,12 @@ func (c *Checker) checkInlineImplTask(
 	}
 
 	oldResults := c.currentResults
+	oldLoopDepth := c.currentLoopDepth
 	oldDeferDepth := c.currentDeferDepth
 
+	// An inline impl task has its own return, loop, and defer contexts.
 	c.currentResults = taskType.Results
+	c.currentLoopDepth = 0
 	c.currentDeferDepth = 0
 
 	c.checkBlockInScope(
@@ -4992,6 +5002,7 @@ func (c *Checker) checkInlineImplTask(
 	)
 
 	c.currentResults = oldResults
+	c.currentLoopDepth = oldLoopDepth
 	c.currentDeferDepth = oldDeferDepth
 }
 
@@ -5390,11 +5401,14 @@ func (c *Checker) checkTaskDecl(
 	}
 
 	oldResults := c.currentResults
+	oldLoopDepth := c.currentLoopDepth
 	oldDeferDepth := c.currentDeferDepth
 
-	// Every task starts a new return/defer context. This matters when a nested
-	// task declaration appears inside a deferred block.
+	// Every task starts independent return, loop, and defer contexts. This
+	// matters when a nested task declaration appears inside a loop or deferred
+	// block.
 	c.currentResults = taskType.Results
+	c.currentLoopDepth = 0
 	c.currentDeferDepth = 0
 
 	c.checkBlockInScope(
@@ -5404,6 +5418,7 @@ func (c *Checker) checkTaskDecl(
 	)
 
 	c.currentResults = oldResults
+	c.currentLoopDepth = oldLoopDepth
 	c.currentDeferDepth = oldDeferDepth
 }
 
@@ -6157,6 +6172,22 @@ func (c *Checker) checkStmt(
 			s,
 		)
 
+	case *ast.BreakStmt:
+		if c.currentLoopDepth == 0 {
+			c.diags.Add(
+				s.Span(),
+				"break is only valid inside a for loop",
+			)
+		}
+
+	case *ast.ContinueStmt:
+		if c.currentLoopDepth == 0 {
+			c.diags.Add(
+				s.Span(),
+				"continue is only valid inside a for loop",
+			)
+		}
+
 	case *ast.DeferStmt:
 		c.checkDeferStmt(
 			scope,
@@ -6248,11 +6279,16 @@ func (c *Checker) checkStmt(
 			)
 		}
 
+		oldLoopDepth := c.currentLoopDepth
+		c.currentLoopDepth = oldLoopDepth + 1
+
 		c.checkBlockInScope(
 			forScope,
 			s.Body,
 			true,
 		)
+
+		c.currentLoopDepth = oldLoopDepth
 
 	case *ast.SwitchStmt:
 		c.checkSwitchStmt(
@@ -6313,8 +6349,14 @@ func (c *Checker) checkDeferStmt(
 	}
 
 	if s.Body != nil {
-		oldDepth := c.currentDeferDepth
-		c.currentDeferDepth = oldDepth + 1
+		oldLoopDepth := c.currentLoopDepth
+		oldDeferDepth := c.currentDeferDepth
+
+		// A deferred block executes when leaving the task, not at its lexical
+		// declaration point. It therefore cannot break or continue a loop that
+		// lexically surrounds the defer statement.
+		c.currentLoopDepth = 0
+		c.currentDeferDepth = oldDeferDepth + 1
 
 		c.checkBlockInScope(
 			scope,
@@ -6322,7 +6364,8 @@ func (c *Checker) checkDeferStmt(
 			true,
 		)
 
-		c.currentDeferDepth = oldDepth
+		c.currentLoopDepth = oldLoopDepth
+		c.currentDeferDepth = oldDeferDepth
 	}
 }
 

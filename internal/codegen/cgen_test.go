@@ -5998,3 +5998,450 @@ Main :: task() {
 		)
 	}
 }
+
+func TestGenerateBreakAndContinueLoopControl(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+	sum := 0
+
+	for i := 0; i < 10; i += 1 {
+		if i == 2 {
+			continue
+		}
+
+		if i == 5 {
+			break
+		}
+
+		sum += i
+	}
+
+	assert(sum == 8)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"for (intptr_t i = 0; (i < 10); i += 1) {",
+		"goto __seal_loop_continue_",
+		"goto __seal_loop_break_",
+		"__seal_loop_continue_",
+		"__seal_loop_break_",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGeneratedContinueExecutesForPostStatement(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+	i := 0
+	iterations := 0
+
+	for i = 0; i < 5; i += 1 {
+		if i < 4 {
+			iterations += 1
+			continue
+		}
+
+		iterations += 1
+	}
+
+	assert(i == 5)
+	assert(iterations == 5)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	continueJump := strings.Index(
+		out,
+		"goto __seal_loop_continue_",
+	)
+
+	if continueJump < 0 {
+		t.Fatalf(
+			"expected continue to use a generated loop label, got:\n%s",
+			out,
+		)
+	}
+
+	continueLabel := strings.Index(
+		out[continueJump:],
+		": ;",
+	)
+
+	if continueLabel < 0 {
+		t.Fatalf(
+			"expected generated continue label, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"for (i = 0; (i < 5); i += 1) {",
+	) {
+		t.Fatalf(
+			"expected loop post expression to remain in the C for statement, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGeneratedBreakInsideSwitchExitsForLoop(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+LoopAction :: enum {
+	KeepGoing
+	Stop
+}
+
+Main :: task() {
+	result := 0
+
+	for i := 0; i < 10; i += 1 {
+		action: LoopAction = .KeepGoing
+
+		if i == 3 {
+			action = .Stop
+		}
+
+		switch action {
+		case .Stop:
+			break
+
+		case .KeepGoing:
+			result += 1
+		}
+	}
+
+	assert(result == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	switchIndex := strings.Index(
+		out,
+		"switch (action)",
+	)
+
+	breakJumpIndex := strings.Index(
+		out,
+		"goto __seal_loop_break_",
+	)
+
+	breakLabelIndex := strings.LastIndex(
+		out,
+		"__seal_loop_break_",
+	)
+
+	if switchIndex < 0 {
+		t.Fatalf(
+			"expected generated enum switch, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"case LoopAction_Stop:",
+	) {
+		t.Fatalf(
+			"expected Stop enum case, got:\n%s",
+			out,
+		)
+	}
+
+	if breakJumpIndex < 0 {
+		t.Fatalf(
+			"expected source-level break to jump to the for-loop break label, got:\n%s",
+			out,
+		)
+	}
+
+	if breakJumpIndex < switchIndex {
+		t.Fatalf(
+			"expected loop-break jump inside the generated switch, got:\n%s",
+			out,
+		)
+	}
+
+	if breakLabelIndex <= breakJumpIndex {
+		t.Fatalf(
+			"expected loop-break label after the generated switch and loop, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGeneratedNestedLoopControlTargetsInnermostLoop(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+	total := 0
+
+	for outer := 0; outer < 3; outer += 1 {
+		for inner := 0; inner < 5; inner += 1 {
+			if inner == 1 {
+				continue
+			}
+
+			if inner == 3 {
+				break
+			}
+
+			total += 1
+		}
+	}
+
+	assert(total == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if strings.Count(
+		out,
+		"goto __seal_loop_continue_",
+	) != 1 {
+		t.Fatalf(
+			"expected one source-level continue jump, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Count(
+		out,
+		"goto __seal_loop_break_",
+	) != 1 {
+		t.Fatalf(
+			"expected one source-level break jump, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Count(
+		out,
+		": ;",
+	) < 4 {
+		t.Fatalf(
+			"expected break and continue labels for both nested loops, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGeneratedLoopControlRunsDefersBeforeExit(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+	total := 0
+
+	for i := 0; i < 5; i += 1 {
+		defer {
+			total += 100
+		}
+
+		if i == 1 {
+			continue
+		}
+
+		total += 1
+
+		if i == 2 {
+			break
+		}
+	}
+
+	assert(total == 302)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	continueJump := strings.Index(
+		out,
+		"goto __seal_loop_continue_",
+	)
+
+	breakJump := strings.Index(
+		out,
+		"goto __seal_loop_break_",
+	)
+
+	if continueJump < 0 {
+		t.Fatalf(
+			"expected generated continue jump, got:\n%s",
+			out,
+		)
+	}
+
+	if breakJump < 0 {
+		t.Fatalf(
+			"expected generated break jump, got:\n%s",
+			out,
+		)
+	}
+
+	deferBeforeContinue := strings.LastIndex(
+		out[:continueJump],
+		"total += 100;",
+	)
+
+	if deferBeforeContinue < 0 {
+		t.Fatalf(
+			"expected loop defer before continue jump, got:\n%s",
+			out,
+		)
+	}
+
+	deferBeforeBreak := strings.LastIndex(
+		out[:breakJump],
+		"total += 100;",
+	)
+
+	if deferBeforeBreak < 0 {
+		t.Fatalf(
+			"expected loop defer before break jump, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGeneratedBreakFromNestedBlockRunsAllExitedDefers(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+	value := 0
+
+	for {
+		defer {
+			value += 10
+		}
+
+		{
+			defer {
+				value += 1
+			}
+
+			break
+		}
+	}
+
+	assert(value == 11)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	breakJump := strings.Index(
+		out,
+		"goto __seal_loop_break_",
+	)
+
+	if breakJump < 0 {
+		t.Fatalf(
+			"expected generated break jump, got:\n%s",
+			out,
+		)
+	}
+
+	beforeBreak := out[:breakJump]
+
+	innerDefer := strings.LastIndex(
+		beforeBreak,
+		"value += 1;",
+	)
+
+	loopDefer := strings.LastIndex(
+		beforeBreak,
+		"value += 10;",
+	)
+
+	if innerDefer < 0 {
+		t.Fatalf(
+			"expected nested block defer before break, got:\n%s",
+			out,
+		)
+	}
+
+	if loopDefer < 0 {
+		t.Fatalf(
+			"expected loop-scope defer before break, got:\n%s",
+			out,
+		)
+	}
+
+	if innerDefer >= loopDefer {
+		t.Fatalf(
+			"expected inner defer to execute before loop defer during break, got:\n%s",
+			out,
+		)
+	}
+
+	if loopDefer >= breakJump {
+		t.Fatalf(
+			"expected both exited-scope defers before the break jump, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
