@@ -1785,28 +1785,41 @@ func (p *Parser) parseStmt() ast.Stmt {
 }
 
 func (p *Parser) parseForStmt(start int) ast.Stmt {
+	// Infinite loop:
+	//
+	//     for {
+	//         ...
+	//     }
 	if p.at(token.LBrace) {
 		body := p.parseBlock()
+		if body == nil {
+			return nil
+		}
+
 		return &ast.ForStmt{
 			Body: body,
 			Loc:  p.span(start, body.Span().End),
 		}
 	}
 
-	first := p.parseSimpleStmt()
-
-	if p.match(token.Semi) {
-		var cond ast.Expr
-		var post ast.Stmt
-
-		if !p.at(token.Semi) {
-			cond = p.parseExpr(0)
-		}
-
-		p.expect(token.Semi, "expected ';' after for condition")
-
-		if !p.at(token.LBrace) {
-			post = p.parseSimpleStmt()
+	// Condition-only loop:
+	//
+	//     for condition {
+	//         ...
+	//     }
+	//
+	// A top-level semicolon before the loop body distinguishes the C-like
+	// form from the condition-only form.
+	if !p.forHeaderHasTopLevelSemi() {
+		cond := p.parseExprUntil(
+			0,
+			token.LBrace,
+		)
+		if cond == nil {
+			p.errorHere(
+				"expected condition after for",
+			)
+			return nil
 		}
 
 		body := p.parseBlock()
@@ -1815,18 +1828,80 @@ func (p *Parser) parseForStmt(start int) ast.Stmt {
 		}
 
 		return &ast.ForStmt{
-			Init: first,
 			Cond: cond,
-			Post: post,
 			Body: body,
 			Loc:  p.span(start, body.Span().End),
 		}
 	}
 
-	condStmt, ok := first.(*ast.ExprStmt)
-	if !ok {
-		p.errorHere("expected condition or C-like for statement")
+	// C-like loop:
+	//
+	//     for init; condition; post {
+	//         ...
+	//     }
+	//
+	// The initializer and condition may be omitted:
+	//
+	//     for ; condition; post {
+	//     }
+	//
+	//     for init; ; post {
+	//     }
+	var init ast.Stmt
+
+	if !p.at(token.Semi) {
+		init = p.parseSimpleStmtUntil(
+			token.Semi,
+		)
+		if init == nil {
+			p.errorHere(
+				"expected for-loop initializer",
+			)
+			return nil
+		}
+	}
+
+	if !p.expect(
+		token.Semi,
+		"expected ';' after for initializer",
+	) {
 		return nil
+	}
+
+	var cond ast.Expr
+
+	if !p.at(token.Semi) {
+		cond = p.parseExprUntil(
+			0,
+			token.Semi,
+		)
+		if cond == nil {
+			p.errorHere(
+				"expected for-loop condition",
+			)
+			return nil
+		}
+	}
+
+	if !p.expect(
+		token.Semi,
+		"expected ';' after for condition",
+	) {
+		return nil
+	}
+
+	var post ast.Stmt
+
+	if !p.at(token.LBrace) {
+		post = p.parseSimpleStmtUntil(
+			token.LBrace,
+		)
+		if post == nil {
+			p.errorHere(
+				"expected for-loop post statement",
+			)
+			return nil
+		}
 	}
 
 	body := p.parseBlock()
@@ -1835,10 +1910,75 @@ func (p *Parser) parseForStmt(start int) ast.Stmt {
 	}
 
 	return &ast.ForStmt{
-		Cond: condStmt.Expr,
+		Init: init,
+		Cond: cond,
+		Post: post,
 		Body: body,
 		Loc:  p.span(start, body.Span().End),
 	}
+}
+
+func (p *Parser) forHeaderHasTopLevelSemi() bool {
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+
+	for i := p.pos; i < len(p.tokens); i++ {
+		kind := p.tokens[i].Kind
+
+		switch kind {
+		case token.EOF:
+			return false
+
+		case token.LParen:
+			parenDepth++
+
+		case token.RParen:
+			if parenDepth > 0 {
+				parenDepth--
+			}
+
+		case token.LBracket:
+			bracketDepth++
+
+		case token.RBracket:
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+
+		case token.LBrace:
+			// At the top level, this is the for-loop body.
+			if parenDepth == 0 &&
+				bracketDepth == 0 &&
+				braceDepth == 0 {
+				return false
+			}
+
+			// A brace inside a call or parenthesized expression may belong
+			// to a compound literal.
+			braceDepth++
+
+		case token.RBrace:
+			if braceDepth > 0 {
+				braceDepth--
+				continue
+			}
+
+			if parenDepth == 0 &&
+				bracketDepth == 0 {
+				return false
+			}
+
+		case token.Semi:
+			if parenDepth == 0 &&
+				bracketDepth == 0 &&
+				braceDepth == 0 {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (p *Parser) parseSwitchStmt(start int, isPartial bool) ast.Stmt {
@@ -2019,16 +2159,26 @@ func (p *Parser) looksLikeMultiVarDeclStmt() bool {
 }
 
 func (p *Parser) parseSimpleStmt() ast.Stmt {
+	return p.parseSimpleStmtUntil()
+}
+
+func (p *Parser) parseSimpleStmtUntil(
+	stops ...token.Kind,
+) ast.Stmt {
 	start := p.peek().Span.Start
 
 	if p.looksLikeMultiVarDeclStmt() {
 		var names []ast.Ident
 
-		first := p.expectIdent("expected variable name")
+		first := p.expectIdent(
+			"expected variable name",
+		)
 		names = append(names, first)
 
 		for p.match(token.Comma) {
-			name := p.expectIdent("expected variable name after ','")
+			name := p.expectIdent(
+				"expected variable name after ','",
+			)
 			if name.Name == "" {
 				return nil
 			}
@@ -2036,27 +2186,51 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 			names = append(names, name)
 		}
 
-		p.expect(token.ColonEq, "expected ':='")
+		p.expect(
+			token.ColonEq,
+			"expected ':='",
+		)
 
-		value := p.parseExpr(0)
+		value := p.parseExprUntil(
+			0,
+			stops...,
+		)
 		if value == nil {
-			p.errorHere("expected value after ':='")
+			p.errorHere(
+				"expected value after ':='",
+			)
 			return nil
 		}
 
 		return &ast.MultiVarDeclStmt{
 			Names: names,
 			Value: value,
-			Loc:   p.span(start, value.Span().End),
+			Loc: p.span(
+				start,
+				value.Span().End,
+			),
 		}
 	}
 
-	if p.at(token.Ident) && p.peekNext().Kind == token.ColonEq {
-		name := p.expectIdent("expected variable name")
-		p.expect(token.ColonEq, "expected ':='")
-		value := p.parseExpr(0)
+	if p.at(token.Ident) &&
+		p.peekNext().Kind == token.ColonEq {
+		name := p.expectIdent(
+			"expected variable name",
+		)
+
+		p.expect(
+			token.ColonEq,
+			"expected ':='",
+		)
+
+		value := p.parseExprUntil(
+			0,
+			stops...,
+		)
 		if value == nil {
-			p.errorHere("expected value after ':='")
+			p.errorHere(
+				"expected value after ':='",
+			)
 			return nil
 		}
 
@@ -2064,16 +2238,29 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 			Name:     name,
 			Value:    value,
 			HasValue: true,
-			Loc:      p.span(start, value.Span().End),
+			Loc: p.span(
+				start,
+				value.Span().End,
+			),
 		}
 	}
 
-	if p.at(token.Ident) && p.peekNext().Kind == token.Colon {
-		name := p.expectIdent("expected variable name")
-		p.expect(token.Colon, "expected ':'")
+	if p.at(token.Ident) &&
+		p.peekNext().Kind == token.Colon {
+		name := p.expectIdent(
+			"expected variable name",
+		)
+
+		p.expect(
+			token.Colon,
+			"expected ':'",
+		)
+
 		t := p.parseType()
 		if t == nil {
-			p.errorHere("expected type after ':'")
+			p.errorHere(
+				"expected type after ':'",
+			)
 			return nil
 		}
 
@@ -2083,9 +2270,15 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 
 		if p.match(token.Assign) {
 			hasValue = true
-			value = p.parseExpr(0)
+
+			value = p.parseExprUntil(
+				0,
+				stops...,
+			)
 			if value == nil {
-				p.errorHere("expected value after '='")
+				p.errorHere(
+					"expected value after '='",
+				)
 				return nil
 			}
 
@@ -2102,16 +2295,25 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 		}
 	}
 
-	left := p.parseExpr(0)
+	left := p.parseExprUntil(
+		0,
+		stops...,
+	)
 	if left == nil {
 		return nil
 	}
 
 	if p.isAssignOp(p.peek().Kind) {
 		op := p.advance()
-		right := p.parseExpr(0)
+
+		right := p.parseExprUntil(
+			0,
+			stops...,
+		)
 		if right == nil {
-			p.errorHere("expected expression after assignment operator")
+			p.errorHere(
+				"expected expression after assignment operator",
+			)
 			return nil
 		}
 
@@ -2119,7 +2321,10 @@ func (p *Parser) parseSimpleStmt() ast.Stmt {
 			Left:  left,
 			Op:    op.Kind,
 			Right: right,
-			Loc:   p.span(start, right.Span().End),
+			Loc: p.span(
+				start,
+				right.Span().End,
+			),
 		}
 	}
 
@@ -2444,15 +2649,28 @@ genericDone:
 		p.tokens[i].Kind == token.ColonColon
 }
 
-func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
+func (p *Parser) looksLikeGenericExpr(
+	left ast.Expr,
+	stops ...token.Kind,
+) bool {
 	switch left.(type) {
-	case *ast.IdentExpr, *ast.SelectorExpr:
+	case *ast.IdentExpr,
+		*ast.SelectorExpr:
 	default:
 		return false
 	}
 
 	if !p.at(token.Lt) {
 		return false
+	}
+
+	stopAtLBrace := false
+
+	for _, stop := range stops {
+		if stop == token.LBrace {
+			stopAtLBrace = true
+			break
+		}
 	}
 
 	angleDepth := 0
@@ -2468,14 +2686,18 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 			angleDepth++
 
 		case token.Gt:
-			if parenDepth > 0 || bracketDepth > 0 || braceDepth > 0 {
+			if parenDepth > 0 ||
+				bracketDepth > 0 ||
+				braceDepth > 0 {
 				continue
 			}
 
 			angleDepth--
+
 			if angleDepth == 0 {
 				if i+1 < len(p.tokens) &&
-					(p.tokens[i+1].Kind == token.LParen || p.tokens[i+1].Kind == token.LBrace) {
+					(p.tokens[i+1].Kind == token.LParen ||
+						p.tokens[i+1].Kind == token.LBrace) {
 					return true
 				}
 
@@ -2489,6 +2711,7 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 			if parenDepth == 0 {
 				return false
 			}
+
 			parenDepth--
 
 		case token.LBracket:
@@ -2498,15 +2721,24 @@ func (p *Parser) looksLikeGenericExpr(left ast.Expr) bool {
 			if bracketDepth == 0 {
 				return false
 			}
+
 			bracketDepth--
 
 		case token.LBrace:
+			if stopAtLBrace &&
+				parenDepth == 0 &&
+				bracketDepth == 0 &&
+				braceDepth == 0 {
+				return false
+			}
+
 			braceDepth++
 
 		case token.RBrace:
 			if braceDepth == 0 {
 				return false
 			}
+
 			braceDepth--
 
 		case token.EOF:
