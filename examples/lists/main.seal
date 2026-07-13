@@ -1421,12 +1421,12 @@ TestQueueCapacityConstructors :: task() {
     )
 }
 
-TestStructElements :: task() {
-    Point :: struct {
+Point :: struct {
         X int
         Y int
     }
 
+TestStructElements :: task() {
     cAllocator := mem.NewCAllocator()
 
     allocator := cast<mem.Allocator>(
