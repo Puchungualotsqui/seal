@@ -1,22 +1,98 @@
 /*
+Clone creates an owned copy of value.
+*/
+Clone :: task(
+    allocator mem.Allocator,
+    value string,
+) OwnedString {
+    byteLength := size(value)
+
+    destination := _AllocateBytes(
+        allocator,
+        byteLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    if byteLength > 0 {
+        _CopyBytes(
+            destination,
+            cast<rawptr>(value),
+            byteLength,
+        )
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = byteLength,
+    }
+}
+
+/*
+CloneC creates an owned copy of value, including a new null terminator.
+*/
+CloneC :: task(
+    allocator mem.Allocator,
+    value cstring,
+) OwnedCString {
+    byteLength := size(value)
+
+    destination := _AllocateCStringBytes(
+        allocator,
+        byteLength,
+    )
+
+    if destination == nil {
+        return OwnedCString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    if byteLength > 0 {
+        _CopyBytes(
+            destination,
+            cast<rawptr>(value),
+            byteLength,
+        )
+    }
+
+    destination[cast<int>(byteLength)] = 0
+
+    return OwnedCString{
+        Data = destination,
+        ByteLength = byteLength,
+    }
+}
+
+/*
 BorrowString constructs a borrowed string view over a cstring.
 
-No allocation or copy is performed.
-The returned string has the same lifetime as value.
+No allocation or copy occurs.
 */
 BorrowString :: task(
     value cstring,
 ) string {
+    byteLength := size(value)
+
+    if byteLength == 0 {
+        return ""
+    }
+
     return cast<string>(
         cast<rawptr>(value),
-        size(value),
+        byteLength,
     )
 }
 
 /*
-HasNullByte reports whether a string contains an embedded null byte.
-
-This examines UTF-8 storage bytes rather than Unicode scalars.
+HasNullByte reports whether value's stored UTF-8 bytes contain a null
+byte.
 */
 HasNullByte :: task(
     value string,
@@ -24,19 +100,23 @@ HasNullByte :: task(
     data := cast<rawptr>(value)
     byteLength := size(value)
 
-    for i: uint = 0; i < byteLength; i += 1 {
-        if data[cast<int>(i)] == 0 {
+    index: uint = 0
+
+    for index < byteLength {
+        if data[cast<int>(index)] == 0 {
             return true
         }
+
+        index += 1
     }
 
     return false
 }
 
 /*
-TryToCString creates an owned null-terminated copy of value.
+TryToCString creates an owned null-terminated copy.
 
-It returns false when value contains an embedded null byte or when
+The conversion fails if value contains an embedded null byte or if
 allocation fails.
 */
 TryToCString :: task(
@@ -52,7 +132,7 @@ TryToCString :: task(
 
     byteLength := size(value)
 
-    destination := _AllocCStringBytes(
+    destination := _AllocateCStringBytes(
         allocator,
         byteLength,
     )
@@ -64,13 +144,13 @@ TryToCString :: task(
         }, false
     }
 
-    source := cast<rawptr>(value)
-
-    _CopyBytes(
-        destination,
-        source,
-        byteLength,
-    )
+    if byteLength > 0 {
+        _CopyBytes(
+            destination,
+            cast<rawptr>(value),
+            byteLength,
+        )
+    }
 
     destination[cast<int>(byteLength)] = 0
 
@@ -81,7 +161,7 @@ TryToCString :: task(
 }
 
 /*
-ToCString creates an owned null-terminated copy of value.
+ToCString creates an owned null-terminated copy.
 
 It panics if value contains an embedded null byte or allocation fails.
 */
@@ -95,45 +175,23 @@ ToCString :: task(
     )
 
     if !success {
-        panic("strings.ToCString failed")
+        panic("strings.ToCString: conversion failed")
     }
 
     return result
 }
 
 /*
-FromCString creates an owned Seal string copy of a cstring.
+FromCString creates an owned Seal string copy.
 
-The null terminator is not part of the resulting string.
+The C null terminator is not included.
 */
 FromCString :: task(
     allocator mem.Allocator,
     value cstring,
 ) OwnedString {
-    byteLength := size(value)
-
-    destination := _AllocBytes(
+    return Clone(
         allocator,
-        byteLength,
+        BorrowString(value),
     )
-
-    if destination == nil {
-        return OwnedString{
-            Data = nil,
-            ByteLength = 0,
-        }
-    }
-
-    source := cast<rawptr>(value)
-
-    _CopyBytes(
-        destination,
-        source,
-        byteLength,
-    )
-
-    return OwnedString{
-        Data = destination,
-        ByteLength = byteLength,
-    }
 }

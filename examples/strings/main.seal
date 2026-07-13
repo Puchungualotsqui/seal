@@ -244,9 +244,23 @@ TestPredicates :: task() {
     )
 
     assert(
+        strings.StartsWith(
+            value,
+            "",
+        ),
+    )
+
+    assert(
         strings.EndsWith(
             value,
             "language",
+        ),
+    )
+
+    assert(
+        strings.EndsWith(
+            value,
+            "",
         ),
     )
 
@@ -261,6 +275,13 @@ TestPredicates :: task() {
         strings.Contains(
             "mañana",
             "ñ",
+        ),
+    )
+
+    assert(
+        strings.Contains(
+            value,
+            "",
         ),
     )
 
@@ -306,6 +327,372 @@ TestEmptyValues :: task(
     assert(strings.CView(&cOwned) == c"")
     assert(cOwned.ByteLength == 0)
     assert(cOwned.Data[0] == 0)
+}
+
+TestByteOffsets :: task() {
+    value := "Añ😀Z"
+
+    /*
+    A  = 1 byte
+    ñ  = 2 bytes
+    😀 = 4 bytes
+    Z  = 1 byte
+    */
+    assert(size(value) == 8)
+    assert(len(value) == 4)
+
+    assert(
+        strings.ByteOffset(
+            value,
+            0,
+        ) == 0,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            1,
+        ) == 1,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            2,
+        ) == 3,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            3,
+        ) == 7,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            4,
+        ) == 8,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            -1,
+        ) == 7,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            -2,
+        ) == 3,
+    )
+
+    assert(
+        strings.ByteOffset(
+            value,
+            -4,
+        ) == 0,
+    )
+}
+
+TestBorrowSlice :: task() {
+    value := "Año 😀 Seal"
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            0,
+            3,
+        ) == "Año",
+    )
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            4,
+            5,
+        ) == "😀",
+    )
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            -4,
+            cast<int>(len(value)),
+        ) == "Seal",
+    )
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            2,
+            2,
+        ) == "",
+    )
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            0,
+            cast<int>(len(value)),
+        ) == value,
+    )
+
+    assert(
+        strings.BorrowSlice(
+            value,
+            -1,
+            cast<int>(len(value)),
+        ) == "l",
+    )
+}
+
+TestCloneSlice :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := "zero mañana final"
+
+    owned := strings.CloneSlice(
+        allocator,
+        source,
+        5,
+        11,
+    )
+
+    if owned.Data == nil {
+        panic("CloneSlice allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    result := strings.View(&owned)
+
+    assert(result == "mañana")
+    assert(size(result) == 7)
+    assert(len(result) == 6)
+
+    sourceData := cast<rawptr>(source)
+
+    assert(owned.Data != sourceData)
+}
+
+TestSearch :: task() {
+    value := "añ😀ñ seal ñ"
+
+    first, foundFirst := strings.IndexOf(
+        value,
+        "ñ",
+    )
+
+    assert(foundFirst)
+    assert(first == 1)
+
+    emoji, foundEmoji := strings.IndexOf(
+        value,
+        "😀",
+    )
+
+    assert(foundEmoji)
+    assert(emoji == 2)
+
+    word, foundWord := strings.IndexOf(
+        value,
+        "seal",
+    )
+
+    assert(foundWord)
+    assert(word == 5)
+
+    last, foundLast := strings.LastIndexOf(
+        value,
+        "ñ",
+    )
+
+    assert(foundLast)
+    assert(last == 10)
+
+    emptyFirst, foundEmptyFirst := strings.IndexOf(
+        value,
+        "",
+    )
+
+    assert(foundEmptyFirst)
+    assert(emptyFirst == 0)
+
+    emptyLast, foundEmptyLast := strings.LastIndexOf(
+        value,
+        "",
+    )
+
+    assert(foundEmptyLast)
+    assert(emptyLast == cast<int>(len(value)))
+
+    _, missing := strings.IndexOf(
+        value,
+        "compiler",
+    )
+
+    assert(!missing)
+
+    _, missingLast := strings.LastIndexOf(
+        value,
+        "compiler",
+    )
+
+    assert(!missingLast)
+
+    assert(
+        strings.Count(
+            "aaaa",
+            "aa",
+        ) == 2,
+    )
+
+    assert(
+        strings.Count(
+            "mañana mañana",
+            "mañana",
+        ) == 2,
+    )
+
+    assert(
+        strings.Count(
+            value,
+            "ñ",
+        ) == 3,
+    )
+
+    assert(
+        strings.Count(
+            value,
+            "",
+        ) == 0,
+    )
+}
+
+TestRepeat :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    owned := strings.Repeat(
+        allocator,
+        "ñ😀",
+        3,
+    )
+
+    if owned.Data == nil {
+        panic("Repeat allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    result := strings.View(&owned)
+
+    assert(result == "ñ😀ñ😀ñ😀")
+    assert(len(result) == 6)
+    assert(size(result) == 18)
+}
+
+TestRepeatEmpty :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    zeroCount := strings.Repeat(
+        allocator,
+        "Seal",
+        0,
+    )
+
+    if zeroCount.Data == nil {
+        panic("zero-count Repeat allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &zeroCount,
+    )
+
+    assert(strings.View(&zeroCount) == "")
+    assert(zeroCount.ByteLength == 0)
+
+    emptyValue := strings.Repeat(
+        allocator,
+        "",
+        10,
+    )
+
+    if emptyValue.Data == nil {
+        panic("empty-value Repeat allocation failed")
+    }
+
+    defer strings.Destroy(
+        deallocator,
+        &emptyValue,
+    )
+
+    assert(strings.View(&emptyValue) == "")
+    assert(emptyValue.ByteLength == 0)
+}
+
+TestDestroyTwice :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    owned := strings.Clone(
+        allocator,
+        "temporary",
+    )
+
+    if owned.Data == nil {
+        panic("Destroy test allocation failed")
+    }
+
+    strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    assert(owned.Data == nil)
+    assert(owned.ByteLength == 0)
+
+    strings.Destroy(
+        deallocator,
+        &owned,
+    )
+
+    assert(owned.Data == nil)
+    assert(owned.ByteLength == 0)
+
+    cOwned := strings.ToCString(
+        allocator,
+        "temporary",
+    )
+
+    strings.DestroyC(
+        deallocator,
+        &cOwned,
+    )
+
+    assert(cOwned.Data == nil)
+    assert(cOwned.ByteLength == 0)
+
+    strings.DestroyC(
+        deallocator,
+        &cOwned,
+    )
+
+    assert(cOwned.Data == nil)
+    assert(cOwned.ByteLength == 0)
 }
 
 Main :: task() {
@@ -359,6 +746,31 @@ Main :: task() {
     TestPredicates()
 
     TestEmptyValues(
+        allocator,
+        deallocator,
+    )
+
+    TestByteOffsets()
+    TestBorrowSlice()
+
+    TestCloneSlice(
+        allocator,
+        deallocator,
+    )
+
+    TestSearch()
+
+    TestRepeat(
+        allocator,
+        deallocator,
+    )
+
+    TestRepeatEmpty(
+        allocator,
+        deallocator,
+    )
+
+    TestDestroyTwice(
         allocator,
         deallocator,
     )

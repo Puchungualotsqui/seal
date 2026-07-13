@@ -1,0 +1,63 @@
+/*
+Repeat creates an owned string consisting of value repeated count
+times.
+*/
+Repeat :: task(
+    allocator mem.Allocator,
+    value string,
+    count uint,
+) OwnedString {
+    byteLength := size(value)
+
+    if count == 0 ||
+        byteLength == 0 {
+        return Clone(
+            allocator,
+            "",
+        )
+    }
+
+    totalLength := byteLength * count
+
+    if totalLength / count != byteLength {
+        panic("strings.Repeat: length overflow")
+    }
+
+    destination := _AllocateBytes(
+        allocator,
+        totalLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    source := cast<rawptr>(value)
+    repetition: uint = 0
+
+    for repetition < count {
+        destinationOffset := repetition * byteLength
+
+        repetitionDestination := cast<rawptr>(
+            &destination[
+                cast<int>(destinationOffset)
+            ]
+        )
+
+        _CopyBytes(
+            repetitionDestination,
+            source,
+            byteLength,
+        )
+
+        repetition += 1
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = totalLength,
+    }
+}

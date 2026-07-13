@@ -1,0 +1,114 @@
+/*
+_AllocateBytes allocates storage for a string byte sequence.
+
+An empty owned string still receives one allocated byte so that a
+successful empty allocation remains distinguishable from failure.
+*/
+_AllocateBytes :: task(
+    allocator mem.Allocator,
+    byteLength uint,
+) rawptr {
+    allocationSize := byteLength
+
+    if allocationSize == 0 {
+        allocationSize = 1
+    }
+
+    return mem.AllocWith(
+        allocator,
+        allocationSize,
+    )
+}
+
+/*
+_AllocateCStringBytes allocates text bytes and one null terminator.
+*/
+_AllocateCStringBytes :: task(
+    allocator mem.Allocator,
+    byteLength uint,
+) rawptr {
+    /*
+    Detect wrapping of byteLength + 1.
+    */
+    allocationSize := byteLength + 1
+
+    if allocationSize <= byteLength {
+        panic("strings: C string allocation size overflow")
+    }
+
+    return mem.AllocWith(
+        allocator,
+        allocationSize,
+    )
+}
+
+/*
+_CopyBytes copies exactly byteLength bytes.
+
+The source and destination ranges must not overlap.
+*/
+_CopyBytes :: task(
+    destination rawptr,
+    source rawptr,
+    byteLength uint,
+) {
+    index: uint = 0
+
+    for index < byteLength {
+        destination[
+            cast<int>(index)
+        ] = source[
+            cast<int>(index)
+        ]
+
+        index += 1
+    }
+}
+
+/*
+_BytesEqual compares two byte ranges.
+*/
+_BytesEqual :: task(
+    left rawptr,
+    right rawptr,
+    byteLength uint,
+) bool {
+    index: uint = 0
+
+    for index < byteLength {
+        if left[cast<int>(index)] !=
+            right[cast<int>(index)] {
+            return false
+        }
+
+        index += 1
+    }
+
+    return true
+}
+
+/*
+_BytesEqualAt compares needle with a range beginning at startByte.
+*/
+_BytesEqualAt :: task(
+    valueData rawptr,
+    startByte uint,
+    needleData rawptr,
+    needleLength uint,
+) bool {
+    index: uint = 0
+
+    for index < needleLength {
+        if valueData[
+            cast<int>(startByte + index)
+        ] != needleData[
+            cast<int>(index)
+        ] {
+            return false
+        }
+
+        index += 1
+    }
+
+    return true
+}

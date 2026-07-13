@@ -1,0 +1,176 @@
+/*
+_IndexOfByte returns the first matching UTF-8 byte offset.
+*/
+_IndexOfByte :: task(
+    value string,
+    needle string,
+) uint, bool {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    if needleLength == 0 {
+        return 0, true
+    }
+
+    if needleLength > valueLength {
+        return 0, false
+    }
+
+    valueData := cast<rawptr>(value)
+    needleData := cast<rawptr>(needle)
+
+    finalStart := valueLength - needleLength
+    startByte: uint = 0
+
+    for startByte <= finalStart {
+        if _BytesEqualAt(
+            valueData,
+            startByte,
+            needleData,
+            needleLength,
+        ) {
+            return startByte, true
+        }
+
+        startByte += 1
+    }
+
+    return 0, false
+}
+
+/*
+_LastIndexOfByte returns the final matching UTF-8 byte offset.
+*/
+_LastIndexOfByte :: task(
+    value string,
+    needle string,
+) uint, bool {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    if needleLength == 0 {
+        return valueLength, true
+    }
+
+    if needleLength > valueLength {
+        return 0, false
+    }
+
+    valueData := cast<rawptr>(value)
+    needleData := cast<rawptr>(needle)
+
+    startByte := valueLength - needleLength
+
+    for {
+        if _BytesEqualAt(
+            valueData,
+            startByte,
+            needleData,
+            needleLength,
+        ) {
+            return startByte, true
+        }
+
+        if startByte == 0 {
+            break
+        }
+
+        startByte -= 1
+    }
+
+    return 0, false
+}
+
+/*
+IndexOf returns the Unicode-scalar index of the first occurrence of
+needle.
+*/
+IndexOf :: task(
+    value string,
+    needle string,
+) int, bool {
+    byteOffset, found := _IndexOfByte(
+        value,
+        needle,
+    )
+
+    if !found {
+        return 0, false
+    }
+
+    scalarIndex := _ScalarIndexAtByteOffset(
+        value,
+        byteOffset,
+    )
+
+    return scalarIndex, true
+}
+
+/*
+LastIndexOf returns the Unicode-scalar index of the final occurrence of
+needle.
+
+An empty needle is found at len(value).
+*/
+LastIndexOf :: task(
+    value string,
+    needle string,
+) int, bool {
+    byteOffset, found := _LastIndexOfByte(
+        value,
+        needle,
+    )
+
+    if !found {
+        return 0, false
+    }
+
+    scalarIndex := _ScalarIndexAtByteOffset(
+        value,
+        byteOffset,
+    )
+
+    return scalarIndex, true
+}
+
+/*
+Count reports the number of non-overlapping occurrences of needle.
+
+An empty needle returns zero because an unbounded empty-match model is
+not useful for this low-level API.
+*/
+Count :: task(
+    value string,
+    needle string,
+) uint {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    if needleLength == 0 ||
+        needleLength > valueLength {
+        return 0
+    }
+
+    valueData := cast<rawptr>(value)
+    needleData := cast<rawptr>(needle)
+
+    matches: uint = 0
+    startByte: uint = 0
+    finalStart := valueLength - needleLength
+
+    for startByte <= finalStart {
+        if _BytesEqualAt(
+            valueData,
+            startByte,
+            needleData,
+            needleLength,
+        ) {
+            matches += 1
+            startByte += needleLength
+        } else {
+            startByte += 1
+        }
+    }
+
+    return matches
+}

@@ -1,0 +1,236 @@
+/*
+_IsContinuationByte reports whether value is a UTF-8 continuation byte.
+*/
+_IsContinuationByte :: task(
+    value u8,
+) bool {
+    return value >= 0x80 &&
+        value <= 0xBF
+}
+
+/*
+_Utf8WidthAt validates and returns the width of the UTF-8 scalar
+beginning at byteOffset.
+
+byteOffset must be less than byteLength.
+*/
+_Utf8WidthAt :: task(
+    data rawptr,
+    byteLength uint,
+    byteOffset uint,
+) uint {
+    if byteOffset >= byteLength {
+        panic("strings: UTF-8 byte offset out of bounds")
+    }
+
+    first := data[cast<int>(byteOffset)]
+
+    if first <= 0x7F {
+        return 1
+    }
+
+    if first >= 0xC2 &&
+        first <= 0xDF {
+        scalarWidth: uint = 2
+
+        if scalarWidth > byteLength - byteOffset {
+            panic("strings: truncated UTF-8")
+        }
+
+        second := data[
+            cast<int>(byteOffset + 1)
+        ]
+
+        if !_IsContinuationByte(second) {
+            panic("strings: invalid UTF-8")
+        }
+
+        return scalarWidth
+    }
+
+    if first >= 0xE0 &&
+        first <= 0xEF {
+        scalarWidth: uint = 3
+
+        if scalarWidth > byteLength - byteOffset {
+            panic("strings: truncated UTF-8")
+        }
+
+        second := data[
+            cast<int>(byteOffset + 1)
+        ]
+
+        third := data[
+            cast<int>(byteOffset + 2)
+        ]
+
+        if !_IsContinuationByte(second) ||
+            !_IsContinuationByte(third) {
+            panic("strings: invalid UTF-8")
+        }
+
+        /*
+        Reject overlong three-byte sequences.
+        */
+        if first == 0xE0 &&
+            second < 0xA0 {
+            panic("strings: invalid UTF-8")
+        }
+
+        /*
+        Reject UTF-16 surrogate values U+D800 through U+DFFF.
+        */
+        if first == 0xED &&
+            second > 0x9F {
+            panic("strings: invalid UTF-8")
+        }
+
+        return scalarWidth
+    }
+
+    if first >= 0xF0 &&
+        first <= 0xF4 {
+        scalarWidth: uint = 4
+
+        if scalarWidth > byteLength - byteOffset {
+            panic("strings: truncated UTF-8")
+        }
+
+        second := data[
+            cast<int>(byteOffset + 1)
+        ]
+
+        third := data[
+            cast<int>(byteOffset + 2)
+        ]
+
+        fourth := data[
+            cast<int>(byteOffset + 3)
+        ]
+
+        if !_IsContinuationByte(second) ||
+            !_IsContinuationByte(third) ||
+            !_IsContinuationByte(fourth) {
+            panic("strings: invalid UTF-8")
+        }
+
+        /*
+        Reject overlong four-byte sequences.
+        */
+        if first == 0xF0 &&
+            second < 0x90 {
+            panic("strings: invalid UTF-8")
+        }
+
+        /*
+        Reject scalar values above U+10FFFF.
+        */
+        if first == 0xF4 &&
+            second > 0x8F {
+            panic("strings: invalid UTF-8")
+        }
+
+        return scalarWidth
+    }
+
+    panic("strings: invalid UTF-8")
+
+    return 0
+}
+
+/*
+ByteOffset returns the UTF-8 byte offset corresponding to a
+Unicode-scalar position.
+
+The position may equal len(value), in which case size(value) is
+returned.
+
+Negative positions are interpreted relative to the scalar length.
+*/
+ByteOffset :: task(
+    value string,
+    scalarIndex int,
+) uint {
+    scalarLength := cast<int>(len(value))
+    normalized := scalarIndex
+
+    if normalized < 0 {
+        normalized += scalarLength
+    }
+
+    if normalized < 0 ||
+        normalized > scalarLength {
+        panic("strings.ByteOffset: index out of bounds")
+    }
+
+    if normalized == scalarLength {
+        return size(value)
+    }
+
+    data := cast<rawptr>(value)
+    byteLength := size(value)
+
+    byteOffset: uint = 0
+    currentScalar: int = 0
+
+    for byteOffset < byteLength {
+        if currentScalar == normalized {
+            return byteOffset
+        }
+
+        scalarWidth := _Utf8WidthAt(
+            data,
+            byteLength,
+            byteOffset,
+        )
+
+        byteOffset += scalarWidth
+        currentScalar += 1
+    }
+
+    panic("strings.ByteOffset: invalid scalar position")
+
+    return 0
+}
+
+/*
+_ScalarIndexAtByteOffset returns the scalar index corresponding to a
+known UTF-8 scalar boundary.
+
+byteOffset may equal size(value).
+*/
+_ScalarIndexAtByteOffset :: task(
+    value string,
+    targetByteOffset uint,
+) int {
+    data := cast<rawptr>(value)
+    byteLength := size(value)
+
+    if targetByteOffset > byteLength {
+        panic("strings: byte offset out of bounds")
+    }
+
+    byteOffset: uint = 0
+    scalarIndex: int = 0
+
+    for byteOffset < targetByteOffset {
+        scalarWidth := _Utf8WidthAt(
+            data,
+            byteLength,
+            byteOffset,
+        )
+
+        if scalarWidth > targetByteOffset - byteOffset {
+            panic("strings: byte offset is not a scalar boundary")
+        }
+
+        byteOffset += scalarWidth
+        scalarIndex += 1
+    }
+
+    if byteOffset != targetByteOffset {
+        panic("strings: byte offset is not a scalar boundary")
+    }
+
+    return scalarIndex
+}

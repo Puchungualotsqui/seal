@@ -1,11 +1,10 @@
 /*
-OwnedString owns a block of UTF-8 bytes.
+OwnedString owns a block containing UTF-8 bytes.
 
-It does not store a trailing null byte as part of its contract.
-Use View to construct a borrowed string view.
+ByteLength is the number of text bytes in Data.
 
-OwnedString values must not be copied and destroyed independently.
-Exactly one logical owner must release the allocation.
+OwnedString is manually managed. Copying the struct does not duplicate
+the allocation, so copied owners must not be destroyed independently.
 */
 OwnedString :: struct {
     Data rawptr
@@ -16,10 +15,9 @@ OwnedString :: struct {
 OwnedCString owns a null-terminated UTF-8 byte sequence.
 
 ByteLength excludes the terminating null byte.
-Use CView to construct a borrowed cstring view.
 
-OwnedCString values must not be copied and destroyed independently.
-Exactly one logical owner must release the allocation.
+OwnedCString is manually managed. Copying the struct does not duplicate
+the allocation, so copied owners must not be destroyed independently.
 */
 OwnedCString :: struct {
     Data rawptr
@@ -27,13 +25,21 @@ OwnedCString :: struct {
 }
 
 /*
-View returns a borrowed string view into an OwnedString.
+View returns a borrowed string view over an OwnedString.
 
-The returned view must not outlive the owner or be used after Destroy.
+The view becomes invalid when owner is destroyed.
 */
 View :: task(
     owner *OwnedString,
 ) string {
+    if owner.Data == nil {
+        return ""
+    }
+
+    if owner.ByteLength == 0 {
+        return ""
+    }
+
     return cast<string>(
         owner.Data,
         owner.ByteLength,
@@ -41,14 +47,17 @@ View :: task(
 }
 
 /*
-CView returns a borrowed cstring view into an OwnedCString.
+CView returns a borrowed cstring view over an OwnedCString.
 
-The runtime verifies that Data[ByteLength] is null.
-The returned view must not outlive the owner or be used after DestroyC.
+The view becomes invalid when owner is destroyed.
 */
 CView :: task(
     owner *OwnedCString,
 ) cstring {
+    if owner.Data == nil {
+        panic("strings.CView: owner has no allocation")
+    }
+
     return cast<cstring>(
         owner.Data,
         owner.ByteLength,
@@ -58,7 +67,7 @@ CView :: task(
 /*
 Destroy releases an OwnedString allocation.
 
-All views derived from owner become invalid.
+Destroy may safely be called more than once on the same owner.
 */
 Destroy :: task(
     deallocator mem.Deallocator,
@@ -80,7 +89,7 @@ Destroy :: task(
 /*
 DestroyC releases an OwnedCString allocation.
 
-All views derived from owner become invalid.
+DestroyC may safely be called more than once on the same owner.
 */
 DestroyC :: task(
     deallocator mem.Deallocator,

@@ -1,0 +1,135 @@
+/*
+Concat creates an owned string containing left followed by right.
+*/
+Concat :: task(
+    allocator mem.Allocator,
+    left string,
+    right string,
+) OwnedString {
+    leftLength := size(left)
+    rightLength := size(right)
+
+    totalLength := leftLength + rightLength
+
+    if totalLength < leftLength {
+        panic("strings.Concat: length overflow")
+    }
+
+    destination := _AllocateBytes(
+        allocator,
+        totalLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    if leftLength > 0 {
+        _CopyBytes(
+            destination,
+            cast<rawptr>(left),
+            leftLength,
+        )
+    }
+
+    if rightLength > 0 {
+        rightDestination := cast<rawptr>(
+            &destination[
+                cast<int>(leftLength)
+            ]
+        )
+
+        _CopyBytes(
+            rightDestination,
+            cast<rawptr>(right),
+            rightLength,
+        )
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = totalLength,
+    }
+}
+
+/*
+Concat3 creates an owned string containing first, second, and third.
+*/
+Concat3 :: task(
+    allocator mem.Allocator,
+    first string,
+    second string,
+    third string,
+) OwnedString {
+    firstLength := size(first)
+    secondLength := size(second)
+    thirdLength := size(third)
+
+    firstAndSecond := firstLength + secondLength
+
+    if firstAndSecond < firstLength {
+        panic("strings.Concat3: length overflow")
+    }
+
+    totalLength := firstAndSecond + thirdLength
+
+    if totalLength < firstAndSecond {
+        panic("strings.Concat3: length overflow")
+    }
+
+    destination := _AllocateBytes(
+        allocator,
+        totalLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    if firstLength > 0 {
+        _CopyBytes(
+            destination,
+            cast<rawptr>(first),
+            firstLength,
+        )
+    }
+
+    if secondLength > 0 {
+        secondDestination := cast<rawptr>(
+            &destination[
+                cast<int>(firstLength)
+            ]
+        )
+
+        _CopyBytes(
+            secondDestination,
+            cast<rawptr>(second),
+            secondLength,
+        )
+    }
+
+    if thirdLength > 0 {
+        thirdDestination := cast<rawptr>(
+            &destination[
+                cast<int>(firstAndSecond)
+            ]
+        )
+
+        _CopyBytes(
+            thirdDestination,
+            cast<rawptr>(third),
+            thirdLength,
+        )
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = totalLength,
+    }
+}

@@ -1,0 +1,69 @@
+/*
+BorrowSlice returns a borrowed view containing the Unicode scalars in
+[start, end).
+
+Negative indexes are interpreted relative to len(value).
+
+The returned string points into value's backing storage and must not
+outlive that storage.
+
+Empty results are represented by the ordinary empty string.
+*/
+BorrowSlice :: task(
+    value string,
+    start int,
+    end int,
+) string {
+    startByte := ByteOffset(
+        value,
+        start,
+    )
+
+    endByte := ByteOffset(
+        value,
+        end,
+    )
+
+    if endByte < startByte {
+        panic("strings.BorrowSlice: end precedes start")
+    }
+
+    byteLength := endByte - startByte
+
+    if byteLength == 0 {
+        return ""
+    }
+
+    data := cast<rawptr>(value)
+
+    substringData := cast<rawptr>(
+        &data[cast<int>(startByte)]
+    )
+
+    return cast<string>(
+        substringData,
+        byteLength,
+    )
+}
+
+/*
+CloneSlice creates an owned copy of the Unicode-scalar range
+[start, end).
+*/
+CloneSlice :: task(
+    allocator mem.Allocator,
+    value string,
+    start int,
+    end int,
+) OwnedString {
+    view := BorrowSlice(
+        value,
+        start,
+        end,
+    )
+
+    return Clone(
+        allocator,
+        view,
+    )
+}
