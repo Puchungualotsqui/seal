@@ -210,40 +210,137 @@ func (l *Lexer) lexIdentifier(start int) token.Token {
 }
 
 func (l *Lexer) lexNumber(start int) token.Token {
+	// Hexadecimal integer:
+	//
+	//     0x80
+	//     0XFF
+	//     0x10_FFFF
+	//
+	// The initial `0` has already been consumed by Next().
+	if l.text[start] == '0' &&
+		!l.isAtEnd() &&
+		(l.peek() == 'x' || l.peek() == 'X') {
+		l.advance() // Consume x or X.
+
+		hasDigit := false
+		previousUnderscore := false
+
+		for !l.isAtEnd() {
+			ch := l.peek()
+
+			switch {
+			case isHexDigit(ch):
+				hasDigit = true
+				previousUnderscore = false
+				l.advance()
+
+			case ch == '_':
+				if !hasDigit || previousUnderscore {
+					l.errorAt(
+						start,
+						l.pos+1,
+						"invalid underscore in hexadecimal literal",
+					)
+				}
+
+				previousUnderscore = true
+				l.advance()
+
+			default:
+				goto hexadecimalDone
+			}
+		}
+
+	hexadecimalDone:
+		if !hasDigit {
+			l.errorAt(
+				start,
+				l.pos,
+				"expected hexadecimal digit after '0x'",
+			)
+
+			return l.makeToken(
+				token.Invalid,
+				start,
+				l.pos,
+			)
+		}
+
+		if previousUnderscore {
+			l.errorAt(
+				start,
+				l.pos,
+				"hexadecimal literal cannot end with underscore",
+			)
+
+			return l.makeToken(
+				token.Invalid,
+				start,
+				l.pos,
+			)
+		}
+
+		return l.makeToken(
+			token.IntLit,
+			start,
+			l.pos,
+		)
+	}
+
 	kind := token.IntLit
 
-	for !l.isAtEnd() && isDigitOrUnderscore(l.peek()) {
+	for !l.isAtEnd() &&
+		isDigitOrUnderscore(l.peek()) {
 		l.advance()
 	}
 
-	if !l.isAtEnd() && l.peek() == '.' && l.peekNextIsDigit() {
+	if !l.isAtEnd() &&
+		l.peek() == '.' &&
+		l.peekNextIsDigit() {
 		kind = token.FloatLit
 		l.advance()
 
-		for !l.isAtEnd() && isDigitOrUnderscore(l.peek()) {
+		for !l.isAtEnd() &&
+			isDigitOrUnderscore(l.peek()) {
 			l.advance()
 		}
 	}
 
-	if !l.isAtEnd() && (l.peek() == 'e' || l.peek() == 'E') {
+	if !l.isAtEnd() &&
+		(l.peek() == 'e' || l.peek() == 'E') {
 		kind = token.FloatLit
 		l.advance()
 
-		if !l.isAtEnd() && (l.peek() == '+' || l.peek() == '-') {
+		if !l.isAtEnd() &&
+			(l.peek() == '+' || l.peek() == '-') {
 			l.advance()
 		}
 
 		if l.isAtEnd() || !isDigit(l.peek()) {
-			l.errorAt(start, l.pos, "expected digit after exponent")
-			return l.makeToken(token.Invalid, start, l.pos)
+			l.errorAt(
+				start,
+				l.pos,
+				"expected digit after exponent",
+			)
+
+			return l.makeToken(
+				token.Invalid,
+				start,
+				l.pos,
+			)
 		}
 
-		for !l.isAtEnd() && isDigitOrUnderscore(l.peek()) {
+		for !l.isAtEnd() &&
+			isDigitOrUnderscore(l.peek()) {
 			l.advance()
 		}
 	}
 
-	return l.makeToken(kind, start, l.pos)
+	return l.makeToken(
+		kind,
+		start,
+		l.pos,
+	)
 }
 
 func (l *Lexer) lexString(start int) token.Token {
@@ -454,6 +551,12 @@ func isIdentContinue(ch byte) bool {
 
 func isDigit(ch byte) bool {
 	return ch >= '0' && ch <= '9'
+}
+
+func isHexDigit(ch byte) bool {
+	return isDigit(ch) ||
+		(ch >= 'a' && ch <= 'f') ||
+		(ch >= 'A' && ch <= 'F')
 }
 
 func isDigitOrUnderscore(ch byte) bool {

@@ -2,4 +2,6 @@
 **/.seal/
 compiler
 main
+main.exe
 seal
+seal.exe

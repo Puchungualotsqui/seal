@@ -3531,25 +3531,35 @@ func (g *Generator) cTypeFromGenericArgWithGenericArgs(arg ast.GenericArg, subst
 	return CInvalid
 }
 
-func (g *Generator) constExprWithGenericArgs(expr ast.Expr, subst map[string]ast.GenericArg) string {
+func (g *Generator) constExprWithGenericArgs(
+	expr ast.Expr,
+	subst map[string]ast.GenericArg,
+) string {
 	if expr == nil {
 		return ""
 	}
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		if arg, ok := subst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr {
-			if genericArgIsSingleNameForCGen(arg, e.Name.Name) {
+		if arg, ok := subst[e.Name.Name]; ok &&
+			arg.Kind == ast.GenericArgExpr {
+			if genericArgIsSingleNameForCGen(
+				arg,
+				e.Name.Name,
+			) {
 				return e.Name.Name
 			}
 
-			return g.constExprWithGenericArgs(arg.Expr, subst)
+			return g.constExprWithGenericArgs(
+				arg.Expr,
+				subst,
+			)
 		}
 
 		return e.Name.Name
 
 	case *ast.IntLitExpr:
-		return e.Value
+		return normalizeCIntegerLiteral(e.Value)
 
 	case *ast.BoolLitExpr:
 		if e.Value {
@@ -3559,17 +3569,37 @@ func (g *Generator) constExprWithGenericArgs(expr ast.Expr, subst map[string]ast
 		return "false"
 
 	case *ast.UnaryExpr:
-		return fmt.Sprintf("(%s%s)", g.cUnaryOp(e.Op), g.constExprWithGenericArgs(e.Expr, subst))
+		return fmt.Sprintf(
+			"(%s%s)",
+			g.cUnaryOp(e.Op),
+			g.constExprWithGenericArgs(
+				e.Expr,
+				subst,
+			),
+		)
 
 	case *ast.BinaryExpr:
-		return fmt.Sprintf("(%s %s %s)",
-			g.constExprWithGenericArgs(e.Left, subst),
+		return fmt.Sprintf(
+			"(%s %s %s)",
+			g.constExprWithGenericArgs(
+				e.Left,
+				subst,
+			),
 			g.cBinaryOp(e.Op),
-			g.constExprWithGenericArgs(e.Right, subst),
+			g.constExprWithGenericArgs(
+				e.Right,
+				subst,
+			),
 		)
 	}
 
-	return g.emitExpr(g.substituteExprForCGen(expr, subst), nil)
+	return g.emitExpr(
+		g.substituteExprForCGen(
+			expr,
+			subst,
+		),
+		nil,
+	)
 }
 
 func typeNameFromAst(t ast.Type) string {
@@ -8858,7 +8888,7 @@ func (g *Generator) emitExpr(
 		return "0"
 
 	case *ast.IntLitExpr:
-		return e.Value
+		return normalizeCIntegerLiteral(e.Value)
 
 	case *ast.FloatLitExpr:
 		return e.Value
@@ -15473,6 +15503,10 @@ func genericValueArgCName(arg ast.GenericArg) string {
 	return "invalid"
 }
 
+func normalizeCIntegerLiteral(value string) string {
+	return strings.ReplaceAll(value, "_", "")
+}
+
 func exprCName(expr ast.Expr) string {
 	if expr == nil {
 		return "nil"
@@ -15483,22 +15517,40 @@ func exprCName(expr ast.Expr) string {
 		return e.Name.Name
 
 	case *ast.SelectorExpr:
-		return exprCName(e.Left) + "_" + e.Name.Name
+		return exprCName(e.Left) +
+			"_" +
+			e.Name.Name
 
 	case *ast.IntLitExpr:
-		return e.Value
+		return normalizeCIntegerLiteral(e.Value)
 
 	case *ast.FloatLitExpr:
-		return strings.ReplaceAll(e.Value, ".", "_")
+		return strings.ReplaceAll(
+			e.Value,
+			".",
+			"_",
+		)
 
 	case *ast.StringLitExpr:
-		return strings.Trim(e.Value, `"`)
+		return strings.Trim(
+			e.Value,
+			`"`,
+		)
 
 	case *ast.CStringLitExpr:
-		return strings.Trim(strings.TrimPrefix(e.Value, "c"), `"`)
+		return strings.Trim(
+			strings.TrimPrefix(
+				e.Value,
+				"c",
+			),
+			`"`,
+		)
 
 	case *ast.CharLitExpr:
-		return strings.Trim(e.Value, `'`)
+		return strings.Trim(
+			e.Value,
+			`'`,
+		)
 
 	case *ast.BoolLitExpr:
 		if e.Value {
@@ -15511,26 +15563,43 @@ func exprCName(expr ast.Expr) string {
 		return "nil"
 
 	case *ast.UnaryExpr:
-		return e.Op.String() + exprCName(e.Expr)
+		return e.Op.String() +
+			exprCName(e.Expr)
 
 	case *ast.BinaryExpr:
-		return exprCName(e.Left) + "_" + e.Op.String() + "_" + exprCName(e.Right)
+		return exprCName(e.Left) +
+			"_" +
+			e.Op.String() +
+			"_" +
+			exprCName(e.Right)
 
 	case *ast.CallExpr:
 		var args []string
+
 		for _, arg := range e.Args {
-			args = append(args, exprCName(arg))
+			args = append(
+				args,
+				exprCName(arg),
+			)
 		}
 
-		return exprCName(e.Callee) + "_" + strings.Join(args, "_")
+		return exprCName(e.Callee) +
+			"_" +
+			strings.Join(args, "_")
 
 	case *ast.GenericExpr:
 		var args []string
+
 		for _, arg := range e.Args {
-			args = append(args, genericValueArgCName(arg))
+			args = append(
+				args,
+				genericValueArgCName(arg),
+			)
 		}
 
-		return exprCName(e.Base) + "_" + strings.Join(args, "_")
+		return exprCName(e.Base) +
+			"_" +
+			strings.Join(args, "_")
 	}
 
 	return "expr"

@@ -2353,7 +2353,10 @@ func (p *Parser) parseExprUntil(
 		}
 
 		if p.at(token.Lt) &&
-			p.looksLikeGenericExpr(left) {
+			p.looksLikeGenericExpr(
+				left,
+				stops...,
+			) {
 			left = p.parseGenericExpr(left)
 			continue
 		}
@@ -3391,7 +3394,10 @@ func (p *Parser) parseSwitchHeadExpr() ast.Expr {
 
 		for {
 			if p.at(token.Lt) &&
-				p.looksLikeGenericExpr(expr) {
+				p.looksLikeGenericExpr(
+					expr,
+					token.LBrace,
+				) {
 				expr = p.parseGenericExpr(expr)
 				continue
 			}

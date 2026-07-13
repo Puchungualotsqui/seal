@@ -10014,13 +10014,32 @@ func (c *Checker) specializedTypeName(base string, args []ast.GenericArg) string
 	return fmt.Sprintf("%s<%s>", base, strings.Join(parts, ", "))
 }
 
-func genericArgDisplay(arg ast.GenericArg) string {
+func genericArgDisplay(
+	arg ast.GenericArg,
+) string {
 	switch arg.Kind {
 	case ast.GenericArgType:
-		return typeDisplay(arg.Type)
+		return typeDisplay(
+			arg.Type,
+		)
 
 	case ast.GenericArgExpr:
-		return exprDisplay(arg.Expr)
+		if literal, ok :=
+			arg.Expr.(*ast.IntLitExpr); ok {
+			value, err := parseSealIntLiteral(
+				literal.Value,
+			)
+			if err == nil {
+				return strconv.FormatInt(
+					value,
+					10,
+				)
+			}
+		}
+
+		return exprDisplay(
+			arg.Expr,
+		)
 	}
 
 	return "<invalid>"
@@ -10951,7 +10970,11 @@ func (c *Checker) evalGenericConstExpr(scope *Scope, expr ast.Expr) (genericCons
 	return c.evalGenericConstExprWithEnv(scope, expr, nil)
 }
 
-func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env map[string]genericConstValue) (genericConstValue, bool) {
+func (c *Checker) evalGenericConstExprWithEnv(
+	scope *Scope,
+	expr ast.Expr,
+	env map[string]genericConstValue,
+) (genericConstValue, bool) {
 	if expr == nil {
 		return genericConstValue{}, false
 	}
@@ -10965,7 +10988,9 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 		}, true
 
 	case *ast.IntLitExpr:
-		value, err := strconv.ParseInt(e.Value, 10, 64)
+		value, err := parseSealIntLiteral(
+			e.Value,
+		)
 		if err != nil {
 			return genericConstValue{}, false
 		}
@@ -10991,7 +11016,11 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 		}, true
 
 	case *ast.CompoundLiteralExpr:
-		return c.evalGenericConstCompoundLiteral(scope, e, env)
+		return c.evalGenericConstCompoundLiteral(
+			scope,
+			e,
+			env,
+		)
 
 	case *ast.IdentExpr:
 		if env != nil {
@@ -11001,22 +11030,37 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 		}
 
 		sym := scope.Lookup(e.Name.Name)
-		if sym == nil || sym.Kind != SymbolConst {
+		if sym == nil ||
+			sym.Kind != SymbolConst {
 			return genericConstValue{}, false
 		}
 
 		decl, ok := sym.Node.(*ast.ConstDecl)
-		if !ok || decl.Value == nil {
+		if !ok ||
+			decl.Value == nil {
 			return genericConstValue{}, false
 		}
 
-		return c.evalGenericConstExprWithEnv(scope, decl.Value, env)
+		return c.evalGenericConstExprWithEnv(
+			scope,
+			decl.Value,
+			env,
+		)
 
 	case *ast.SelectorExpr:
-		return c.evalGenericConstSelectorWithEnv(scope, e.Left, e.Name, env)
+		return c.evalGenericConstSelectorWithEnv(
+			scope,
+			e.Left,
+			e.Name,
+			env,
+		)
 
 	case *ast.UnaryExpr:
-		value, ok := c.evalGenericConstExprWithEnv(scope, e.Expr, env)
+		value, ok := c.evalGenericConstExprWithEnv(
+			scope,
+			e.Expr,
+			env,
+		)
 		if !ok {
 			return genericConstValue{}, false
 		}
@@ -11027,36 +11071,85 @@ func (c *Checker) evalGenericConstExprWithEnv(scope *Scope, expr ast.Expr, env m
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstBool, Type: BoolType, BoolValue: !value.BoolValue}, true
+			return genericConstValue{
+				Kind:      genericConstBool,
+				Type:      BoolType,
+				BoolValue: !value.BoolValue,
+			}, true
 
 		case token.Minus:
 			if value.Kind != genericConstInt {
 				return genericConstValue{}, false
 			}
 
-			return genericConstValue{Kind: genericConstInt, Type: value.Type, IntValue: -value.IntValue}, true
+			return genericConstValue{
+				Kind:     genericConstInt,
+				Type:     value.Type,
+				IntValue: -value.IntValue,
+			}, true
 		}
 
 		return genericConstValue{}, false
 
 	case *ast.BinaryExpr:
-		left, ok := c.evalGenericConstExprWithEnv(scope, e.Left, env)
+		left, ok := c.evalGenericConstExprWithEnv(
+			scope,
+			e.Left,
+			env,
+		)
 		if !ok {
 			return genericConstValue{}, false
 		}
 
-		right, ok := c.evalGenericConstExprWithEnv(scope, e.Right, env)
+		right, ok := c.evalGenericConstExprWithEnv(
+			scope,
+			e.Right,
+			env,
+		)
 		if !ok {
 			return genericConstValue{}, false
 		}
 
-		return c.evalGenericConstBinaryWithOverloads(scope, e.Op, left, right, e.Span())
+		return c.evalGenericConstBinaryWithOverloads(
+			scope,
+			e.Op,
+			left,
+			right,
+			e.Span(),
+		)
 
 	case *ast.CallExpr:
-		return c.evalGenericConstCall(scope, e, env)
+		return c.evalGenericConstCall(
+			scope,
+			e,
+			env,
+		)
 	}
 
 	return genericConstValue{}, false
+}
+
+func parseSealIntLiteral(
+	literal string,
+) (int64, error) {
+	normalized := strings.ReplaceAll(
+		literal,
+		"_",
+		"",
+	)
+
+	// Base 0 recognizes Seal's currently supported prefixes:
+	//
+	//     123
+	//     0x80
+	//     0X10FFFF
+	//
+	// Decimal literals without a prefix remain decimal.
+	return strconv.ParseInt(
+		normalized,
+		0,
+		64,
+	)
 }
 
 func genericConstEqual(left genericConstValue, right genericConstValue) (bool, bool) {
@@ -12789,7 +12882,9 @@ func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType 
 
 			key := switchCaseTypeKey(caseType) + ":" + swCase.Expr.Span().String()
 			if lit, ok := swCase.Expr.(*ast.IntLitExpr); ok {
-				key = "int:" + lit.Value
+				key = "int:" + integerLiteralIdentity(
+					lit.Value,
+				)
 			} else if lit, ok := swCase.Expr.(*ast.StringLitExpr); ok {
 				key = "string:" + lit.Value
 			} else if lit, ok := swCase.Expr.(*ast.BoolLitExpr); ok {
@@ -12815,6 +12910,22 @@ func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType 
 			c.checkStmt(caseScope, stmt)
 		}
 	}
+}
+
+func integerLiteralIdentity(
+	literal string,
+) string {
+	value, err := parseSealIntLiteral(
+		literal,
+	)
+	if err != nil {
+		return literal
+	}
+
+	return strconv.FormatInt(
+		value,
+		10,
+	)
 }
 
 func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
