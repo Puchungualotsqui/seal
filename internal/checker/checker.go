@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -228,6 +229,15 @@ type Type struct {
 	GenericArguments []GenericArgumentInfo
 
 	IsDynInterface bool
+
+	// IntConstant is non-nil only for compile-time integer expressions.
+	//
+	// It is primarily carried by TypeUntypedInt values, but may also be
+	// preserved temporarily while checking explicitly typed constant
+	// expressions.
+	//
+	// A separate *big.Int must be allocated whenever the value is changed.
+	IntConstant *big.Int
 }
 
 type EnumVariantInfo struct {
@@ -1885,12 +1895,16 @@ func (c *Checker) callScore(taskType *Type, argTypes []*Type) (int, bool) {
 	return score, true
 }
 
-func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
+func (c *Checker) conversionScore(
+	dst *Type,
+	src *Type,
+) (int, bool) {
 	if dst == nil || src == nil {
 		return 100, true
 	}
 
-	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
+	if dst.Kind == TypeInvalid ||
+		src.Kind == TypeInvalid {
 		return 100, true
 	}
 
@@ -1911,10 +1925,23 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 	}
 
 	if dst.Kind == TypeDistinct {
-		if src.Kind == TypeUntypedInt || src.Kind == TypeUntypedFloat {
-			if c.assignable(dst.Underlying, src) {
-				return 1, true
+		if src.Kind == TypeUntypedInt ||
+			src.Kind == TypeUntypedFloat {
+			if !c.assignable(
+				dst.Underlying,
+				src,
+			) {
+				return 0, false
 			}
+
+			if !integerConstantConversionAllowed(
+				dst.Underlying,
+				src,
+			) {
+				return 0, false
+			}
+
+			return 1, true
 		}
 
 		return 0, false
@@ -1924,8 +1951,12 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		return 0, false
 	}
 
-	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
-		if c.enumHasVariant(dst, src.Name) {
+	if dst.Kind == TypeEnum &&
+		src.Kind == TypeEnumLiteral {
+		if c.enumHasVariant(
+			dst,
+			src.Name,
+		) {
 			return 1, true
 		}
 
@@ -1946,11 +1977,21 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 
 	if src.Kind == TypeUntypedInt {
 		if c.isIntegerLike(dst) {
+			if !integerConstantConversionAllowed(
+				dst,
+				src,
+			) {
+				return 0, false
+			}
+
 			return 1, true
 		}
 
 		switch dst.Kind {
-		case TypeF32, TypeF64:
+		case TypeF32:
+			return 3, true
+
+		case TypeF64:
 			return 2, true
 		}
 	}
@@ -1959,6 +2000,7 @@ func (c *Checker) conversionScore(dst *Type, src *Type) (int, bool) {
 		switch dst.Kind {
 		case TypeF64:
 			return 1, true
+
 		case TypeF32:
 			return 2, true
 		}
@@ -3463,7 +3505,9 @@ func overloadExprSignatureKey(
 			e.Name.Name
 
 	case *ast.IntLitExpr:
-		return "int:" + e.Value
+		return "int:" + integerLiteralIdentity(
+			e.Value,
+		)
 
 	case *ast.FloatLitExpr:
 		return "float:" + e.Value
@@ -6883,6 +6927,30 @@ func (c *Checker) checkVarDeclStmt(
 				)
 				varType = InvalidType
 
+			case TypeUntypedInt:
+				if valueType.IntConstant != nil &&
+					!integerConstantFitsType(
+						valueType.IntConstant,
+						IntType,
+					) {
+					c.diags.Add(
+						s.Value.Span(),
+						fmt.Sprintf(
+							"integer constant %s cannot be inferred as int because it is outside the range %s; specify an explicit integer type",
+							valueType.IntConstant.String(),
+							integerRangeDescription(
+								IntType,
+							),
+						),
+					)
+
+					varType = InvalidType
+				} else {
+					varType = c.defaultType(
+						valueType,
+					)
+				}
+
 			default:
 				varType = c.defaultType(
 					valueType,
@@ -7072,7 +7140,23 @@ func (c *Checker) checkExpr(
 		return InvalidType
 
 	case *ast.IntLitExpr:
-		return UntypedIntType
+		value, err := parseSealBigIntLiteral(
+			e.Value,
+		)
+		if err != nil {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"invalid integer literal: %v",
+					err,
+				),
+			)
+			return InvalidType
+		}
+
+		return untypedIntConstantType(
+			value,
+		)
 
 	case *ast.FloatLitExpr:
 		return UntypedFloatType
@@ -7127,21 +7211,50 @@ func (c *Checker) checkExprWithExpected(
 	return c.checkExpr(scope, expr)
 }
 
-func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
-	typ := c.checkExpr(scope, e.Expr)
+func (c *Checker) checkUnaryExpr(
+	scope *Scope,
+	e *ast.UnaryExpr,
+) *Type {
+	typ := c.checkExpr(
+		scope,
+		e.Expr,
+	)
 
 	switch e.Op {
 	case token.Minus:
 		if !c.isNumeric(typ) {
-			c.diags.Add(e.Span(), fmt.Sprintf("operator '-' requires numeric type, got %s", typ.String()))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"operator '-' requires numeric type, got %s",
+					typ.String(),
+				),
+			)
 			return InvalidType
+		}
+
+		if typ.Kind == TypeUntypedInt &&
+			typ.IntConstant != nil {
+			value := new(big.Int).Neg(
+				typ.IntConstant,
+			)
+
+			return untypedIntConstantType(
+				value,
+			)
 		}
 
 		return typ
 
 	case token.Bang:
 		if !c.sameType(typ, BoolType) {
-			c.diags.Add(e.Span(), fmt.Sprintf("operator '!' requires bool, got %s", typ.String()))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"operator '!' requires bool, got %s",
+					typ.String(),
+				),
+			)
 			return InvalidType
 		}
 
@@ -7163,7 +7276,13 @@ func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
 
 	case token.Star:
 		if typ.Kind != TypePointer {
-			c.diags.Add(e.Span(), fmt.Sprintf("cannot dereference non-pointer type %s", typ.String()))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"cannot dereference non-pointer type %s",
+					typ.String(),
+				),
+			)
 			return InvalidType
 		}
 
@@ -7171,14 +7290,123 @@ func (c *Checker) checkUnaryExpr(scope *Scope, e *ast.UnaryExpr) *Type {
 
 	case token.Tilde:
 		if !c.isIntegerLike(typ) {
-			c.diags.Add(e.Span(), fmt.Sprintf("operator '~' requires integer type, got %s", typ.String()))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"operator '~' requires integer type, got %s",
+					typ.String(),
+				),
+			)
 			return InvalidType
+		}
+
+		if typ.Kind == TypeUntypedInt &&
+			typ.IntConstant != nil {
+			value := new(big.Int).Not(
+				typ.IntConstant,
+			)
+
+			return untypedIntConstantType(
+				value,
+			)
 		}
 
 		return typ
 	}
 
 	return InvalidType
+}
+
+func (c *Checker) integerBinaryResultType(
+	op token.Kind,
+	left *Type,
+	right *Type,
+	result *Type,
+	span source.Span,
+) *Type {
+	if result == nil ||
+		result.Kind != TypeUntypedInt ||
+		left == nil ||
+		right == nil ||
+		left.IntConstant == nil ||
+		right.IntConstant == nil {
+		return result
+	}
+
+	value := new(big.Int)
+
+	switch op {
+	case token.Plus:
+		value.Add(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Minus:
+		value.Sub(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Star:
+		value.Mul(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Slash:
+		if right.IntConstant.Sign() == 0 {
+			c.diags.Add(
+				span,
+				"integer division by zero",
+			)
+			return InvalidType
+		}
+
+		value.Quo(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Percent:
+		if right.IntConstant.Sign() == 0 {
+			c.diags.Add(
+				span,
+				"integer remainder by zero",
+			)
+			return InvalidType
+		}
+
+		value.Rem(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Amp:
+		value.And(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Pipe:
+		value.Or(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	case token.Caret:
+		value.Xor(
+			left.IntConstant,
+			right.IntConstant,
+		)
+
+	default:
+		return result
+	}
+
+	return untypedIntConstantType(
+		value,
+	)
 }
 
 func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
@@ -7194,11 +7422,23 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 				return InvalidType
 			}
 
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
@@ -7212,11 +7452,23 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 				return InvalidType
 			}
 
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires integer operands", e.Op.String()))
@@ -7230,11 +7482,23 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 				return InvalidType
 			}
 
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires integer operands", e.Op.String()))
@@ -7246,7 +7510,13 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, "==", []*Type{left, right}, e.Span(), true); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		c.diags.Add(e.Span(), fmt.Sprintf("cannot compare %s and %s", left.String(), right.String()))
@@ -7258,7 +7528,13 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, "!=", []*Type{left, right}, e.Span(), false); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, "==", []*Type{left, right}, e.Span(), false); ok {
@@ -7288,7 +7564,13 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 		}
 
 		if result, ok := c.checkOperatorOverload(scope, e.Op.String(), []*Type{left, right}, e.Span(), true); ok {
-			return result
+			return c.integerBinaryResultType(
+				e.Op,
+				left,
+				right,
+				result,
+				e.Span(),
+			)
 		}
 
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
@@ -8485,6 +8767,8 @@ func (c *Checker) checkCastIntrinsicCall(
 	argTypes []*Type,
 	span source.Span,
 ) *Type {
+	_ = scope
+
 	switch targetType.Kind {
 	case TypeString:
 		return c.checkStringLikeConstructorCast(
@@ -8518,8 +8802,11 @@ func (c *Checker) checkCastIntrinsicCall(
 	}
 
 	sourceType := argTypes[0]
+
 	if sourceType == nil ||
-		sourceType.Kind == TypeInvalid {
+		sourceType.Kind == TypeInvalid ||
+		targetType == nil ||
+		targetType.Kind == TypeInvalid {
 		return targetType
 	}
 
@@ -8555,42 +8842,9 @@ func (c *Checker) checkCastIntrinsicCall(
 		return targetType
 	}
 
-	// A char is a Unicode scalar. It may only be converted to or from an
-	// integer representation.
-	if sourceType.Kind == TypeChar {
-		if c.isCharCastIntegerType(targetType) {
-			return targetType
-		}
-
-		c.diags.Add(
-			args[0].Span(),
-			fmt.Sprintf(
-				"char may only be cast to an integer type, not %s",
-				targetType.String(),
-			),
-		)
-		return targetType
-	}
-
-	if targetType.Kind == TypeChar {
-		if c.isCharCastIntegerType(sourceType) {
-			return CharType
-		}
-
-		c.diags.Add(
-			args[0].Span(),
-			fmt.Sprintf(
-				"char can only be constructed from an integer type, got %s",
-				sourceType.String(),
-			),
-		)
-		return CharType
-	}
-
 	if sourceType.Kind == TypeNil &&
 		targetType.Kind != TypeInterface {
-		if targetType.Kind != TypeInvalid &&
-			!c.typeAcceptsNil(targetType) {
+		if !c.typeAcceptsNil(targetType) {
 			c.diags.Add(
 				args[0].Span(),
 				fmt.Sprintf(
@@ -8603,49 +8857,84 @@ func (c *Checker) checkCastIntrinsicCall(
 		return targetType
 	}
 
-	if targetType.Kind != TypeInterface {
+	// Interface construction remains a separate operation because it needs an
+	// implementation lookup and generated interface wrapper.
+	if targetType.Kind == TypeInterface {
+		if sourceType.Kind != TypePointer {
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"interface cast to %s requires a pointer to an implementing value, got %s",
+					targetType.String(),
+					sourceType.String(),
+				),
+			)
+			return targetType
+		}
+
+		concreteType := sourceType.Elem
+
+		resolution := c.resolveImplAt(
+			targetType,
+			concreteType,
+			args[0].Span(),
+			nil,
+			true,
+		)
+
+		switch resolution.Kind {
+		case ImplResolutionAmbiguous:
+			// resolveImplAt already emitted the ambiguity diagnostic.
+
+		case ImplResolutionNotFound:
+			c.diags.Add(
+				args[0].Span(),
+				fmt.Sprintf(
+					"cannot cast %s to %s: no matching implementation",
+					sourceType.String(),
+					targetType.String(),
+				),
+			)
+
+		case ImplResolutionFound:
+			// Cast is valid.
+		}
+
 		return targetType
 	}
 
-	if sourceType.Kind != TypePointer {
+	if sourceType.Kind == TypeInterface {
 		c.diags.Add(
 			args[0].Span(),
 			fmt.Sprintf(
-				"interface cast to %s requires a pointer to an implementing value, got %s",
-				targetType.String(),
+				"cannot directly cast interface %s to %s",
 				sourceType.String(),
+				targetType.String(),
 			),
 		)
 		return targetType
 	}
 
-	concreteType := sourceType.Elem
-
-	resolution := c.resolveImplAt(
+	if !c.primitiveCastAllowed(
 		targetType,
-		concreteType,
-		args[0].Span(),
-		nil,
-		true,
-	)
-
-	switch resolution.Kind {
-	case ImplResolutionAmbiguous:
-		// resolveImplAt already emitted the ambiguity diagnostic.
-
-	case ImplResolutionNotFound:
+		sourceType,
+	) {
 		c.diags.Add(
 			args[0].Span(),
 			fmt.Sprintf(
-				"cannot cast %s to %s: no matching implementation",
+				"cannot cast %s to %s",
 				sourceType.String(),
 				targetType.String(),
 			),
 		)
-
-	case ImplResolutionFound:
-		// Cast is valid.
+		return targetType
 	}
+
+	c.checkConstantCastRange(
+		targetType,
+		sourceType,
+		args[0].Span(),
+	)
 
 	return targetType
 }
@@ -10026,14 +10315,11 @@ func genericArgDisplay(
 	case ast.GenericArgExpr:
 		if literal, ok :=
 			arg.Expr.(*ast.IntLitExpr); ok {
-			value, err := parseSealIntLiteral(
+			value, err := parseSealBigIntLiteral(
 				literal.Value,
 			)
 			if err == nil {
-				return strconv.FormatInt(
-					value,
-					10,
-				)
+				return value.String()
 			}
 		}
 
@@ -11129,27 +11415,294 @@ func (c *Checker) evalGenericConstExprWithEnv(
 	return genericConstValue{}, false
 }
 
-func parseSealIntLiteral(
+func parseSealBigIntLiteral(
 	literal string,
-) (int64, error) {
+) (*big.Int, error) {
 	normalized := strings.ReplaceAll(
 		literal,
 		"_",
 		"",
 	)
 
-	// Base 0 recognizes Seal's currently supported prefixes:
-	//
-	//     123
-	//     0x80
-	//     0X10FFFF
-	//
-	// Decimal literals without a prefix remain decimal.
-	return strconv.ParseInt(
-		normalized,
-		0,
-		64,
+	if normalized == "" {
+		return nil, fmt.Errorf(
+			"empty integer literal",
+		)
+	}
+
+	base := 10
+	digits := normalized
+
+	if strings.HasPrefix(normalized, "0x") ||
+		strings.HasPrefix(normalized, "0X") {
+		base = 16
+		digits = normalized[2:]
+
+		if digits == "" {
+			return nil, fmt.Errorf(
+				"hexadecimal literal requires at least one digit",
+			)
+		}
+	}
+
+	value := new(big.Int)
+
+	if _, ok := value.SetString(digits, base); !ok {
+		return nil, fmt.Errorf(
+			"invalid base-%d integer literal %q",
+			base,
+			literal,
+		)
+	}
+
+	return value, nil
+}
+
+func parseSealIntLiteral(
+	literal string,
+) (int64, error) {
+	value, err := parseSealBigIntLiteral(
+		literal,
 	)
+	if err != nil {
+		return 0, err
+	}
+
+	if !value.IsInt64() {
+		return 0, fmt.Errorf(
+			"integer literal %q is outside the supported compile-time int64 range",
+			literal,
+		)
+	}
+
+	return value.Int64(), nil
+}
+
+func cloneBigInt(
+	value *big.Int,
+) *big.Int {
+	if value == nil {
+		return nil
+	}
+
+	return new(big.Int).Set(value)
+}
+
+func untypedIntConstantType(
+	value *big.Int,
+) *Type {
+	return &Type{
+		Kind:        TypeUntypedInt,
+		Name:        "untyped int",
+		IntConstant: cloneBigInt(value),
+	}
+}
+
+func signedIntegerBounds(
+	bits uint,
+) (*big.Int, *big.Int) {
+	limit := new(big.Int).Lsh(
+		big.NewInt(1),
+		bits-1,
+	)
+
+	minimum := new(big.Int).Neg(
+		new(big.Int).Set(limit),
+	)
+
+	maximum := new(big.Int).Sub(
+		new(big.Int).Set(limit),
+		big.NewInt(1),
+	)
+
+	return minimum, maximum
+}
+
+func unsignedIntegerBounds(
+	bits uint,
+) (*big.Int, *big.Int) {
+	minimum := big.NewInt(0)
+
+	maximum := new(big.Int).Sub(
+		new(big.Int).Lsh(
+			big.NewInt(1),
+			bits,
+		),
+		big.NewInt(1),
+	)
+
+	return minimum, maximum
+}
+
+func integerTypeBounds(
+	t *Type,
+) (*big.Int, *big.Int, bool) {
+	if t == nil {
+		return nil, nil, false
+	}
+
+	if t.Kind == TypeDistinct {
+		return integerTypeBounds(
+			t.Underlying,
+		)
+	}
+
+	switch t.Kind {
+	case TypeInt,
+		TypeI64:
+		minimum, maximum := signedIntegerBounds(64)
+		return minimum, maximum, true
+
+	case TypeI8:
+		minimum, maximum := signedIntegerBounds(8)
+		return minimum, maximum, true
+
+	case TypeI16:
+		minimum, maximum := signedIntegerBounds(16)
+		return minimum, maximum, true
+
+	case TypeI32:
+		minimum, maximum := signedIntegerBounds(32)
+		return minimum, maximum, true
+
+	case TypeUint,
+		TypeU64:
+		minimum, maximum := unsignedIntegerBounds(64)
+		return minimum, maximum, true
+
+	case TypeU8:
+		minimum, maximum := unsignedIntegerBounds(8)
+		return minimum, maximum, true
+
+	case TypeU16:
+		minimum, maximum := unsignedIntegerBounds(16)
+		return minimum, maximum, true
+
+	case TypeU32:
+		minimum, maximum := unsignedIntegerBounds(32)
+		return minimum, maximum, true
+
+	case TypeChar:
+		return big.NewInt(0),
+			big.NewInt(utf8.MaxRune),
+			true
+
+	default:
+		return nil, nil, false
+	}
+}
+
+func integerConstantFitsType(
+	value *big.Int,
+	dst *Type,
+) bool {
+	if value == nil || dst == nil {
+		return true
+	}
+
+	if dst.Kind == TypeDistinct {
+		return integerConstantFitsType(
+			value,
+			dst.Underlying,
+		)
+	}
+
+	minimum, maximum, ok := integerTypeBounds(
+		dst,
+	)
+	if !ok {
+		return false
+	}
+
+	if value.Cmp(minimum) < 0 ||
+		value.Cmp(maximum) > 0 {
+		return false
+	}
+
+	if dst.Kind == TypeChar {
+		if !value.IsInt64() {
+			return false
+		}
+
+		return isUnicodeScalar(
+			rune(value.Int64()),
+		)
+	}
+
+	return true
+}
+
+func integerRangeDescription(
+	t *Type,
+) string {
+	minimum, maximum, ok := integerTypeBounds(
+		t,
+	)
+	if !ok {
+		return t.String()
+	}
+
+	if t.Kind == TypeChar {
+		return "Unicode scalar values U+0000 through U+10FFFF, excluding U+D800 through U+DFFF"
+	}
+
+	return fmt.Sprintf(
+		"%s through %s",
+		minimum.String(),
+		maximum.String(),
+	)
+}
+
+func integerConstantConversionAllowed(
+	dst *Type,
+	src *Type,
+) bool {
+	if dst == nil ||
+		src == nil ||
+		src.IntConstant == nil {
+		return true
+	}
+
+	if !integerTypeAcceptsUntypedConstant(dst) {
+		return true
+	}
+
+	return integerConstantFitsType(
+		src.IntConstant,
+		dst,
+	)
+}
+
+func integerTypeAcceptsUntypedConstant(
+	t *Type,
+) bool {
+	if t == nil {
+		return false
+	}
+
+	if t.Kind == TypeDistinct {
+		return integerTypeAcceptsUntypedConstant(
+			t.Underlying,
+		)
+	}
+
+	switch t.Kind {
+	case TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
+		TypeChar:
+		return true
+
+	default:
+		return false
+	}
 }
 
 func genericConstEqual(left genericConstValue, right genericConstValue) (bool, bool) {
@@ -11883,7 +12436,27 @@ func (c *Checker) checkAssignable(
 		return
 	}
 
-	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
+	if dst.Kind == TypeInvalid ||
+		src.Kind == TypeInvalid {
+		return
+	}
+
+	if src.Kind == TypeUntypedInt &&
+		src.IntConstant != nil &&
+		integerTypeAcceptsUntypedConstant(dst) &&
+		!integerConstantFitsType(
+			src.IntConstant,
+			dst,
+		) {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"integer constant %s is outside the range of %s (%s)",
+				src.IntConstant.String(),
+				dst.String(),
+				integerRangeDescription(dst),
+			),
+		)
 		return
 	}
 
@@ -11910,15 +12483,29 @@ func (c *Checker) checkAssignable(
 		return
 	}
 
-	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
+	if dst.Kind == TypeEnum &&
+		src.Kind == TypeEnumLiteral {
 		if !c.enumHasVariant(dst, src.Name) {
-			c.diags.Add(span, fmt.Sprintf("enum %s has no variant .%s", dst.String(), src.Name))
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"enum %s has no variant .%s",
+					dst.String(),
+					src.Name,
+				),
+			)
 		}
 		return
 	}
 
 	if src.Kind == TypeEnumLiteral {
-		c.diags.Add(span, fmt.Sprintf("enum literal .%s needs contextual enum type", src.Name))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"enum literal .%s needs contextual enum type",
+				src.Name,
+			),
+		)
 		return
 	}
 
@@ -11951,18 +12538,165 @@ func (c *Checker) checkAssignable(
 		return
 	}
 
-	if src.Kind == TypeNil {
-		if dst.Kind == TypePointer || dst.Kind == TypeRawptr || dst.Kind == TypeInterface {
-			return
-		}
-
-		c.diags.Add(span, fmt.Sprintf("cannot assign nil to %s", dst.String()))
-		return
-	}
-
 	if !c.assignable(dst, src) {
-		c.diags.Add(span, fmt.Sprintf("cannot assign %s to %s", src.String(), dst.String()))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"cannot assign %s to %s",
+				src.String(),
+				dst.String(),
+			),
+		)
 	}
+}
+
+func (c *Checker) isConcreteIntegerType(
+	t *Type,
+) bool {
+	if t == nil {
+		return false
+	}
+
+	if t.Kind == TypeDistinct {
+		return c.isConcreteIntegerType(
+			t.Underlying,
+		)
+	}
+
+	switch t.Kind {
+	case TypeInt,
+		TypeUint,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
+		TypeChar:
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (c *Checker) isConcreteNumericType(
+	t *Type,
+) bool {
+	if t == nil {
+		return false
+	}
+
+	if t.Kind == TypeDistinct {
+		return c.isConcreteNumericType(
+			t.Underlying,
+		)
+	}
+
+	return c.isConcreteIntegerType(t) ||
+		t.Kind == TypeF32 ||
+		t.Kind == TypeF64
+}
+
+func (c *Checker) primitiveCastAllowed(
+	dst *Type,
+	src *Type,
+) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+
+	if dst.Kind == TypeInvalid ||
+		src.Kind == TypeInvalid {
+		return true
+	}
+
+	if c.sameType(dst, src) {
+		return true
+	}
+
+	dstBase := dst
+	if dstBase.Kind == TypeDistinct {
+		dstBase = dstBase.Underlying
+	}
+
+	srcBase := src
+	if srcBase.Kind == TypeDistinct {
+		srcBase = srcBase.Underlying
+	}
+
+	if dstBase == nil || srcBase == nil {
+		return false
+	}
+
+	if srcBase.Kind == TypeUntypedInt {
+		return c.isConcreteNumericType(dstBase)
+	}
+
+	if srcBase.Kind == TypeUntypedFloat {
+		return dstBase.Kind == TypeF32 ||
+			dstBase.Kind == TypeF64
+	}
+
+	if c.isConcreteNumericType(dstBase) &&
+		c.isConcreteNumericType(srcBase) {
+		return true
+	}
+
+	if dstBase.Kind == TypeBool &&
+		srcBase.Kind == TypeBool {
+		return true
+	}
+
+	if dstBase.Kind == TypeRawptr {
+		return srcBase.Kind == TypeRawptr ||
+			srcBase.Kind == TypePointer
+	}
+
+	if dstBase.Kind == TypePointer {
+		return srcBase.Kind == TypeRawptr ||
+			srcBase.Kind == TypePointer
+	}
+
+	return false
+}
+
+func (c *Checker) checkConstantCastRange(
+	targetType *Type,
+	sourceType *Type,
+	span source.Span,
+) bool {
+	if sourceType == nil ||
+		sourceType.IntConstant == nil {
+		return true
+	}
+
+	if !integerTypeAcceptsUntypedConstant(
+		targetType,
+	) {
+		return true
+	}
+
+	if integerConstantFitsType(
+		sourceType.IntConstant,
+		targetType,
+	) {
+		return true
+	}
+
+	c.diags.Add(
+		span,
+		fmt.Sprintf(
+			"integer constant %s is outside the range of %s (%s)",
+			sourceType.IntConstant.String(),
+			targetType.String(),
+			integerRangeDescription(targetType),
+		),
+	)
+
+	return false
 }
 
 func (c *Checker) typeAcceptsNil(t *Type) bool {
@@ -11982,12 +12716,16 @@ func (c *Checker) typeAcceptsNil(t *Type) bool {
 	}
 }
 
-func (c *Checker) assignable(dst *Type, src *Type) bool {
+func (c *Checker) assignable(
+	dst *Type,
+	src *Type,
+) bool {
 	if dst == nil || src == nil {
 		return true
 	}
 
-	if dst.Kind == TypeInvalid || src.Kind == TypeInvalid {
+	if dst.Kind == TypeInvalid ||
+		src.Kind == TypeInvalid {
 		return true
 	}
 
@@ -12004,8 +12742,22 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if dst.Kind == TypeDistinct {
-		if src.Kind == TypeUntypedInt || src.Kind == TypeUntypedFloat {
-			return c.assignable(dst.Underlying, src)
+		if src.Kind == TypeUntypedInt {
+			return c.assignable(
+				dst.Underlying,
+				src,
+			) &&
+				integerConstantConversionAllowed(
+					dst.Underlying,
+					src,
+				)
+		}
+
+		if src.Kind == TypeUntypedFloat {
+			return c.assignable(
+				dst.Underlying,
+				src,
+			)
 		}
 
 		return false
@@ -12015,8 +12767,12 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 		return false
 	}
 
-	if dst.Kind == TypeEnum && src.Kind == TypeEnumLiteral {
-		return c.enumHasVariant(dst, src.Name)
+	if dst.Kind == TypeEnum &&
+		src.Kind == TypeEnumLiteral {
+		return c.enumHasVariant(
+			dst,
+			src.Name,
+		)
 	}
 
 	if dst.Kind == TypeInterface {
@@ -12024,15 +12780,27 @@ func (c *Checker) assignable(dst *Type, src *Type) bool {
 	}
 
 	if dst.Kind == TypeUnion {
-		return c.unionHasMember(dst, src)
+		return c.unionHasMember(
+			dst,
+			src,
+		)
 	}
 
 	if src.Kind == TypeUntypedInt {
-		return c.isIntegerLike(dst) || dst.Kind == TypeF32 || dst.Kind == TypeF64
+		if c.isIntegerLike(dst) {
+			return integerConstantConversionAllowed(
+				dst,
+				src,
+			)
+		}
+
+		return dst.Kind == TypeF32 ||
+			dst.Kind == TypeF64
 	}
 
 	if src.Kind == TypeUntypedFloat {
-		return dst.Kind == TypeF32 || dst.Kind == TypeF64
+		return dst.Kind == TypeF32 ||
+			dst.Kind == TypeF64
 	}
 
 	return false
@@ -12136,20 +12904,34 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 	}
 }
 
-func (c *Checker) defaultType(t *Type) *Type {
+func (c *Checker) defaultType(
+	t *Type,
+) *Type {
 	if t == nil {
 		return InvalidType
 	}
 
 	switch t.Kind {
 	case TypeUntypedInt:
+		if t.IntConstant != nil &&
+			!integerConstantFitsType(
+				t.IntConstant,
+				IntType,
+			) {
+			return InvalidType
+		}
+
 		return IntType
+
 	case TypeUntypedFloat:
 		return F64Type
+
 	case TypeEnumLiteral:
 		return InvalidType
+
 	case TypeNil:
 		return InvalidType
+
 	default:
 		return t
 	}
@@ -12915,17 +13697,14 @@ func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType 
 func integerLiteralIdentity(
 	literal string,
 ) string {
-	value, err := parseSealIntLiteral(
+	value, err := parseSealBigIntLiteral(
 		literal,
 	)
 	if err != nil {
 		return literal
 	}
 
-	return strconv.FormatInt(
-		value,
-		10,
-	)
+	return value.String()
 }
 
 func (c *Checker) checkUnionSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
