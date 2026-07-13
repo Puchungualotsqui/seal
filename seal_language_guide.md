@@ -938,16 +938,76 @@ finished := false
 
 ### 10.2 Integers and floats
 
-```seal
-count := 10
-ratio := 3.14
+Decimal and hexadecimal integer literals are supported:
 
-small: i8 = 12
-large: u64 = 1000
-precise: f64 = 3.14159265
+```seal
+decimal := 255
+hexadecimal := 0xFF
+uppercase := 0X10FFFF
+
+mask: u8 = 0x80
+maximumByte: u8 = 0xFF
 ```
 
-Unsuffixed numeric literals begin as untyped numeric values and are checked against their context.
+Hexadecimal literals use the `0x` or `0X` prefix. Hexadecimal digits are case-insensitive:
+
+```seal
+0xABCD
+0xabcd
+```
+
+Underscores may separate digits for readability:
+
+```seal
+decimal := 1_000_000
+hexadecimal := 0x10_FFFF
+```
+
+Underscores do not affect the value. Equivalent spellings represent the same integer:
+
+```seal
+16
+0x10
+1_6
+0x1_0
+```
+
+Integer literals begin as untyped compile-time values. They must fit the type required by their context:
+
+```seal
+valid: u8 = 0xFF
+
+// Invalid: 256 is outside the range of u8.
+invalid: u8 = 0x100
+```
+
+When no explicit type is supplied, an integer literal is inferred as `int` and must fit its range:
+
+```seal
+count := 10
+```
+
+Use an explicit type when the value does not fit `int`:
+
+```seal
+large: u64 = 0xFFFF_FFFF_FFFF_FFFF
+```
+
+Negative values use the unary `-` operator:
+
+```seal
+minimum: i8 = -128
+
+// Invalid:
+negativeUnsigned: u8 = -1
+```
+
+Floating-point literals use decimal notation:
+
+```seal
+ratio := 3.14
+precise: f64 = 3.14159265
+```
 
 ### 10.3 Characters
 
@@ -3986,12 +4046,16 @@ This example demonstrates:
 Pi :: 3.14159265
 ```
 
-### Local variables
+### Local variables and numeric literals
 
 ```seal
 x := 10
 x: int = 10
 x: int
+
+byte: u8 = 0xFF
+scalar: u32 = 0x10_FFFF
+large: u64 = 0xFFFF_FFFF_FFFF_FFFF
 ```
 
 ### Character literal
