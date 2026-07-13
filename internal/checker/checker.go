@@ -2221,7 +2221,10 @@ func (c *Checker) declarePackages(scope *Scope) {
 	}
 }
 
-func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
+func (c *Checker) declareDecl(
+	scope *Scope,
+	decl ast.Decl,
+) {
 	switch d := decl.(type) {
 	case *ast.ConstDecl:
 		scope.Declare(&Symbol{
@@ -2239,6 +2242,10 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 			Type: &Type{
 				Kind: TypeStruct,
 				Name: d.Name.Name,
+				GenericParams: append(
+					[]ast.GenericParam(nil),
+					d.GenericParams...,
+				),
 			},
 			Span: d.Name.Span(),
 			Node: d,
@@ -2287,6 +2294,11 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 			Type: &Type{
 				Kind: TypeInterface,
 				Name: d.Name.Name,
+				GenericParams: append(
+					[]ast.GenericParam(nil),
+					d.GenericParams...,
+				),
+				IsDynInterface: d.IsDyn,
 			},
 			Span: d.Name.Span(),
 			Node: d,
@@ -2302,7 +2314,8 @@ func (c *Checker) declareDecl(scope *Scope, decl ast.Decl) {
 		})
 
 	case *ast.DirectiveDecl:
-		// c :: @c_import { ... } is codegen metadata, not a visible Seal symbol.
+		// c :: @c_import { ... } is codegen metadata, not a visible
+		// Seal symbol.
 		return
 
 	case *ast.ImplDecl:
@@ -2486,18 +2499,43 @@ func (c *Checker) prepareDistinctDecl(scope *Scope, d *ast.DistinctDecl) {
 	sym.Type.Underlying = underlying
 }
 
-func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
+func (c *Checker) prepareStructDecl(
+	parent *Scope,
+	d *ast.StructDecl,
+) {
 	sym := parent.LookupLocal(d.Name.Name)
 	if sym == nil || sym.Type == nil {
 		return
 	}
 
-	scope := c.scopeWithGenericParams(parent, d.GenericParams)
+	/*
+		Generic metadata must be available before resolving fields.
 
-	var fields []FieldInfo
+		This is also initialized by declareDecl, but assigning it here keeps
+		this function correct when it is used for a locally declared struct or
+		through any future preparation path.
+	*/
+	sym.Type.GenericParams = append(
+		[]ast.GenericParam(nil),
+		d.GenericParams...,
+	)
+
+	scope := c.scopeWithGenericParams(
+		parent,
+		d.GenericParams,
+	)
+
+	fields := make(
+		[]FieldInfo,
+		0,
+		len(d.Fields),
+	)
 
 	for _, field := range d.Fields {
-		fieldType := c.typeFromAst(scope, field.Type)
+		fieldType := c.typeFromAst(
+			scope,
+			field.Type,
+		)
 
 		fields = append(fields, FieldInfo{
 			Name:    field.Name.Name,
@@ -2508,7 +2546,6 @@ func (c *Checker) prepareStructDecl(parent *Scope, d *ast.StructDecl) {
 	}
 
 	sym.Type.Fields = fields
-	sym.Type.GenericParams = d.GenericParams
 }
 
 func (c *Checker) prepareInterfaceDecl(
@@ -2520,12 +2557,27 @@ func (c *Checker) prepareInterfaceDecl(
 		return
 	}
 
+	/*
+		Publish the generic signature before resolving requirements. Other
+		declarations may refer to this interface while declarations are still
+		being prepared.
+	*/
+	sym.Type.GenericParams = append(
+		[]ast.GenericParam(nil),
+		d.GenericParams...,
+	)
+	sym.Type.IsDynInterface = d.IsDyn
+
 	scope := c.scopeWithGenericParams(
 		parent,
 		d.GenericParams,
 	)
 
-	requirements := make([]InterfaceRequirementInfo, 0, len(d.Requirements))
+	requirements := make(
+		[]InterfaceRequirementInfo,
+		0,
+		len(d.Requirements),
+	)
 
 	for _, req := range d.Requirements {
 		info := InterfaceRequirementInfo{
@@ -2560,15 +2612,306 @@ func (c *Checker) prepareInterfaceDecl(
 			)
 		}
 
-		requirements = append(requirements, info)
+		requirements = append(
+			requirements,
+			info,
+		)
 	}
 
 	sym.Type.InterfaceRequirements = requirements
-	sym.Type.GenericParams = append(
-		[]ast.GenericParam(nil),
-		d.GenericParams...,
+}
+
+func (c *Checker) genericExprReferencesPlaceholder(
+	scope *Scope,
+	expr ast.Expr,
+) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+		if sym == nil {
+			return false
+		}
+
+		switch sym.Kind {
+		case SymbolType:
+			return sym.Type != nil &&
+				sym.Type.Kind == TypeTypeParam
+
+		case SymbolConst:
+			/*
+				Generic value parameters are represented as constants without
+				an originating ConstDecl node.
+
+				Ordinary source constants retain their declaration node and
+				can therefore be evaluated normally.
+			*/
+			return sym.Node == nil
+
+		case SymbolTask:
+			/*
+				A generic task parameter is represented as a task symbol
+				without a source task declaration.
+			*/
+			if sym.Node == nil {
+				return true
+			}
+
+			return sym.Type != nil &&
+				c.typeContainsGenericPlaceholder(sym.Type)
+
+		default:
+			return false
+		}
+
+	case *ast.SelectorExpr:
+		/*
+			A package-qualified constant or type is concrete. For an ordinary
+			value selector, only the receiver can carry a generic placeholder.
+		*/
+		if id, ok := e.Left.(*ast.IdentExpr); ok {
+			sym := scope.Lookup(id.Name.Name)
+			if sym != nil && sym.Kind == SymbolPackage {
+				return false
+			}
+		}
+
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Left,
+		)
+
+	case *ast.SpreadExpr:
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Expr,
+		)
+
+	case *ast.UnaryExpr:
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Expr,
+		)
+
+	case *ast.BinaryExpr:
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Left,
+		) ||
+			c.genericExprReferencesPlaceholder(
+				scope,
+				e.Right,
+			)
+
+	case *ast.CallExpr:
+		if c.genericExprReferencesPlaceholder(
+			scope,
+			e.Callee,
+		) {
+			return true
+		}
+
+		for _, arg := range e.Args {
+			if c.genericExprReferencesPlaceholder(
+				scope,
+				arg,
+			) {
+				return true
+			}
+		}
+
+		return false
+
+	case *ast.GenericExpr:
+		if c.genericExprReferencesPlaceholder(
+			scope,
+			e.Base,
+		) {
+			return true
+		}
+
+		for _, arg := range e.Args {
+			switch arg.Kind {
+			case ast.GenericArgType:
+				typ := c.typeFromAst(
+					scope,
+					arg.Type,
+				)
+
+				if c.typeContainsGenericPlaceholder(typ) {
+					return true
+				}
+
+			case ast.GenericArgExpr:
+				if c.genericExprReferencesPlaceholder(
+					scope,
+					arg.Expr,
+				) {
+					return true
+				}
+			}
+		}
+
+		return false
+
+	case *ast.IndexExpr:
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Left,
+		) ||
+			c.genericExprReferencesPlaceholder(
+				scope,
+				e.Index,
+			)
+
+	case *ast.CompoundLiteralExpr:
+		litType := c.typeFromAst(
+			scope,
+			e.Type,
+		)
+
+		if c.typeContainsGenericPlaceholder(litType) {
+			return true
+		}
+
+		for _, field := range e.Fields {
+			if c.genericExprReferencesPlaceholder(
+				scope,
+				field.Value,
+			) {
+				return true
+			}
+		}
+
+		for _, value := range e.Values {
+			if c.genericExprReferencesPlaceholder(
+				scope,
+				value,
+			) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	return false
+}
+
+func (c *Checker) typeContainsGenericPlaceholder(
+	typ *Type,
+) bool {
+	return c.typeContainsGenericPlaceholderSeen(
+		typ,
+		map[*Type]bool{},
 	)
-	sym.Type.IsDynInterface = d.IsDyn
+}
+
+func (c *Checker) typeContainsGenericPlaceholderSeen(
+	typ *Type,
+	seen map[*Type]bool,
+) bool {
+	if typ == nil {
+		return false
+	}
+
+	if seen[typ] {
+		return false
+	}
+
+	seen[typ] = true
+
+	switch typ.Kind {
+	case TypeTypeParam,
+		TypeValueParam:
+		return true
+
+	case TypePointer,
+		TypeVariadic:
+		return c.typeContainsGenericPlaceholderSeen(
+			typ.Elem,
+			seen,
+		)
+	}
+
+	for _, arg := range typ.GenericArguments {
+		if c.typeContainsGenericPlaceholderSeen(
+			arg.Type,
+			seen,
+		) {
+			return true
+		}
+	}
+
+	for _, field := range typ.Fields {
+		if c.typeContainsGenericPlaceholderSeen(
+			field.Type,
+			seen,
+		) {
+			return true
+		}
+	}
+
+	for _, member := range typ.Members {
+		if c.typeContainsGenericPlaceholderSeen(
+			member,
+			seen,
+		) {
+			return true
+		}
+	}
+
+	for _, param := range typ.Params {
+		if c.typeContainsGenericPlaceholderSeen(
+			param,
+			seen,
+		) {
+			return true
+		}
+	}
+
+	for _, result := range typ.Results {
+		if c.typeContainsGenericPlaceholderSeen(
+			result,
+			seen,
+		) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Checker) genericArgumentsContainPlaceholders(
+	scope *Scope,
+	args []ast.GenericArg,
+) bool {
+	for _, arg := range args {
+		switch arg.Kind {
+		case ast.GenericArgType:
+			typ := c.typeFromAst(
+				scope,
+				arg.Type,
+			)
+
+			if c.typeContainsGenericPlaceholder(typ) {
+				return true
+			}
+
+		case ast.GenericArgExpr:
+			if c.genericExprReferencesPlaceholder(
+				scope,
+				arg.Expr,
+			) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (c *Checker) scopeWithGenericParams(parent *Scope, params []ast.GenericParam) *Scope {
@@ -10867,27 +11210,87 @@ func (c *Checker) checkedGenericArguments(
 	return out
 }
 
-func (c *Checker) checkGenericArgsAgainstParams(scope *Scope, args []ast.GenericArg, params []ast.GenericParam, span source.Span) {
+func (c *Checker) checkGenericArgsAgainstParams(
+	scope *Scope,
+	args []ast.GenericArg,
+	params []ast.GenericParam,
+	span source.Span,
+) {
 	if len(params) == 0 {
 		if len(args) > 0 {
-			c.diags.Add(span, "non-generic symbol cannot receive generic arguments")
+			c.diags.Add(
+				span,
+				"non-generic symbol cannot receive generic arguments",
+			)
 		}
+
 		return
 	}
 
 	if len(args) != len(params) {
-		c.diags.Add(span, fmt.Sprintf("generic argument count mismatch: expected %d, got %d", len(params), len(args)))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"generic argument count mismatch: expected %d, got %d",
+				len(params),
+				len(args),
+			),
+		)
 		return
 	}
 
-	subst := genericArgSubst(params, args)
+	subst := genericArgSubst(
+		params,
+		args,
+	)
 
+	/*
+		Category and declared-type validation remains valid for symbolic
+		specializations such as:
+
+		    Slice<T>
+		    StaticArray<T, Size>
+
+		For example, T must still be a type argument and Size must still be an
+		integer value argument.
+	*/
 	for i := range args {
-		c.checkGenericArgAgainstParam(scope, args[i], params[i], subst)
+		c.checkGenericArgAgainstParam(
+			scope,
+			args[i],
+			params[i],
+			subst,
+		)
+	}
+
+	/*
+		A nested specialization can legitimately contain parameters belonging
+		to an enclosing generic declaration:
+
+		    Array<T>
+		    StaticArray<T, Size>
+		    Deque<T>
+
+		Its constraints cannot yet be evaluated because T and Size are
+		placeholders, not concrete specialization arguments.
+
+		The constraints will be checked again when the enclosing generic type
+		or task is instantiated with concrete arguments.
+	*/
+	if c.genericArgumentsContainPlaceholders(
+		scope,
+		args,
+	) {
+		return
 	}
 
 	for i := range args {
-		c.checkGenericArgConstraintsAgainstParam(scope, args[i], params[i], subst)
+		c.checkGenericArgConstraintsAgainstParam(
+			scope,
+			args[i],
+			params[i],
+			subst,
+		)
 	}
 }
 
@@ -11498,17 +11901,49 @@ func (c *Checker) taskSymbolFromGenericExprBase(scope *Scope, base ast.Expr) *Sy
 	}
 }
 
-func (c *Checker) checkGenericArgIsCompileTimeValue(scope *Scope, arg ast.GenericArg, param ast.GenericParam) {
-	if arg.Kind != ast.GenericArgExpr || arg.Expr == nil {
+func (c *Checker) checkGenericArgIsCompileTimeValue(
+	scope *Scope,
+	arg ast.GenericArg,
+	param ast.GenericParam,
+) {
+	if arg.Kind != ast.GenericArgExpr ||
+		arg.Expr == nil {
 		return
 	}
 
-	if _, ok := c.evalGenericConstExpr(scope, arg.Expr); ok {
+	/*
+		An enclosing generic value parameter is symbolically compile-time even
+		though it has no concrete value at this stage.
+
+		For example, Size in StaticArray<T, Size> is valid and will be replaced
+		with a concrete compile-time value when the enclosing declaration is
+		specialized.
+	*/
+	if c.genericExprReferencesPlaceholder(
+		scope,
+		arg.Expr,
+	) {
 		return
 	}
 
-	if !c.isCompileTimeGenericExpr(scope, arg.Expr) {
-		c.diags.Add(arg.Span(), fmt.Sprintf("generic parameter %q requires a compile-time value argument", param.Name.Name))
+	if _, ok := c.evalGenericConstExpr(
+		scope,
+		arg.Expr,
+	); ok {
+		return
+	}
+
+	if !c.isCompileTimeGenericExpr(
+		scope,
+		arg.Expr,
+	) {
+		c.diags.Add(
+			arg.Span(),
+			fmt.Sprintf(
+				"generic parameter %q requires a compile-time value argument",
+				param.Name.Name,
+			),
+		)
 	}
 }
 
