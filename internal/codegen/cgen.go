@@ -10147,27 +10147,33 @@ func (g *Generator) importedGenericTaskInfoFromTypeContext(
 	return packageName, name, info, true
 }
 
-func (g *Generator) importedGenericTaskInfoFromSelector(sel *ast.SelectorExpr) (string, string, TaskInfo, bool) {
+func (g *Generator) importedGenericTaskInfoFromSelector(
+	sel *ast.SelectorExpr,
+) (string, string, TaskInfo, bool) {
 	id, ok := sel.Left.(*ast.IdentExpr)
 	if !ok {
 		return "", "", TaskInfo{}, false
 	}
 
-	pkg := g.packages[id.Name.Name]
+	packageName := id.Name.Name
+
+	pkg := g.typePackageInfo(
+		packageName,
+	)
 	if pkg == nil {
 		return "", "", TaskInfo{}, false
 	}
 
 	info, ok := pkg.Tasks[sel.Name.Name]
-	if !ok {
+	if !ok ||
+		len(info.GenericParams) == 0 {
 		return "", "", TaskInfo{}, false
 	}
 
-	if len(info.GenericParams) == 0 {
-		return "", "", TaskInfo{}, false
-	}
-
-	return id.Name.Name, sel.Name.Name, info, true
+	return packageName,
+		sel.Name.Name,
+		info,
+		true
 }
 
 func (g *Generator) registerImportedGenericTaskInstance(
@@ -10855,7 +10861,9 @@ func (g *Generator) emitPackageTaskCall(
 	args []ast.Expr,
 	preparedArgs []string,
 ) string {
-	pkg := g.packages[packageName]
+	pkg := g.typePackageInfo(
+		packageName,
+	)
 	if pkg == nil {
 		g.error(
 			argsSpan(args),
@@ -10867,7 +10875,7 @@ func (g *Generator) emitPackageTaskCall(
 		return "0"
 	}
 
-	info, hasTask := pkg.Tasks[taskName]
+	rawInfo, hasTask := pkg.Tasks[taskName]
 	if !hasTask {
 		g.error(
 			argsSpan(args),
@@ -10880,10 +10888,10 @@ func (g *Generator) emitPackageTaskCall(
 		return "0"
 	}
 
-	info = g.taskInfoInPackageContext(
+	info := g.taskInfoInPackageContext(
 		packageName,
 		taskName,
-		info,
+		rawInfo,
 	)
 
 	name := cImportedTaskName(
@@ -10892,7 +10900,8 @@ func (g *Generator) emitPackageTaskCall(
 		info,
 	)
 
-	if info.IsVariadic && !info.IsExtern {
+	if info.IsVariadic &&
+		!info.IsExtern {
 		return g.emitSealVariadicTaskCall(
 			name,
 			info,
@@ -10926,7 +10935,10 @@ func (g *Generator) emitPackageTaskCall(
 
 		outArgs = append(
 			outArgs,
-			g.emitExpr(arg, expected),
+			g.emitExpr(
+				arg,
+				expected,
+			),
 		)
 	}
 
@@ -10954,7 +10966,6 @@ func (g *Generator) emitPackageTaskCall(
 			expected := info.ParamTypes[i]
 			value := ""
 
-			// The default expression belongs to the declaring package.
 			g.withTypeContext(
 				packageName,
 				func() {
@@ -12033,6 +12044,7 @@ func (g *Generator) inferCallExprType(
 
 			return info.ReturnType
 		}
+
 		if id, ok :=
 			gen.Base.(*ast.IdentExpr); ok {
 			if task, ok :=
@@ -12120,7 +12132,9 @@ func (g *Generator) inferCallExprType(
 				return CInvalid
 			}
 
-			return g.genericTaskReturnType(instance)
+			return g.genericTaskReturnType(
+				instance,
+			)
 		}
 
 		if selector, ok :=
@@ -12259,14 +12273,16 @@ func (g *Generator) inferCallExprType(
 			packageName := id.Name.Name
 
 			if pkg :=
-				g.packages[packageName]; pkg != nil {
-				if info, ok :=
+				g.typePackageInfo(
+					packageName,
+				); pkg != nil {
+				if rawInfo, ok :=
 					pkg.Tasks[selector.Name.Name]; ok {
-					info =
+					info :=
 						g.taskInfoInPackageContext(
 							packageName,
 							selector.Name.Name,
-							info,
+							rawInfo,
 						)
 
 					return info.ReturnType
@@ -12477,14 +12493,16 @@ func (g *Generator) inferExprType(
 			packageName := id.Name.Name
 
 			if pkg :=
-				g.packages[packageName]; pkg != nil {
-				if info, ok :=
+				g.typePackageInfo(
+					packageName,
+				); pkg != nil {
+				if rawInfo, ok :=
 					pkg.Tasks[e.Name.Name]; ok {
-					info =
+					info :=
 						g.taskInfoInPackageContext(
 							packageName,
 							e.Name.Name,
-							info,
+							rawInfo,
 						)
 
 					return info.ReturnType
@@ -12493,7 +12511,10 @@ func (g *Generator) inferExprType(
 		}
 
 		leftType :=
-			g.inferExprType(e.Left, nil)
+			g.inferExprType(
+				e.Left,
+				nil,
+			)
 
 		if leftType.SealName == "string" ||
 			leftType.SealName == "cstring" {
@@ -12818,31 +12839,64 @@ func (g *Generator) tryEmitInterfaceConversion(
 		return "", false
 	}
 
-	instance, ok := g.interfaceInstanceForCType(expected)
+	instance, ok :=
+		g.interfaceInstanceForCType(
+			expected,
+		)
 	if !ok {
 		return "", false
 	}
 
-	src := g.inferExprType(expr, nil)
+	src := g.inferExprType(
+		expr,
+		nil,
+	)
+
+	// Do not generate a misleading interface diagnostic after type inference
+	// has already failed. Returning false lets the original invalid-type
+	// diagnostic remain the primary error.
+	if isInvalidCType(src) {
+		return "", false
+	}
 
 	if src.SealName == expected.SealName {
 		return "", false
 	}
 
 	if src.SealName == "nil" {
-		return g.nilInterfaceValue(expected), true
+		return g.nilInterfaceValue(
+			expected,
+		), true
 	}
 
-	if !strings.HasPrefix(src.SealName, "*") {
+	if !strings.HasPrefix(
+		src.SealName,
+		"*",
+	) {
 		return "", false
 	}
 
 	concrete := CType{
-		Name:     strings.TrimSuffix(strings.TrimSpace(src.Name), "*"),
-		SealName: strings.TrimPrefix(src.SealName, "*"),
+		Name: strings.TrimSpace(
+			strings.TrimSuffix(
+				strings.TrimSpace(src.Name),
+				"*",
+			),
+		),
+		SealName: strings.TrimPrefix(
+			src.SealName,
+			"*",
+		),
 	}
 
-	impl := g.findResolvedImpl(instance, concrete)
+	if isInvalidCType(concrete) {
+		return "", false
+	}
+
+	impl := g.findResolvedImpl(
+		instance,
+		concrete,
+	)
 	if impl == nil {
 		g.error(
 			expr.Span(),
@@ -12853,10 +12907,15 @@ func (g *Generator) tryEmitInterfaceConversion(
 			),
 		)
 
-		return g.nilInterfaceValue(expected), true
+		return g.nilInterfaceValue(
+			expected,
+		), true
 	}
 
-	value := g.emitExpr(expr, nil)
+	value := g.emitExpr(
+		expr,
+		nil,
+	)
 
 	if instance.IsDyn {
 		return fmt.Sprintf(
@@ -12873,7 +12932,10 @@ func (g *Generator) tryEmitInterfaceConversion(
 	return fmt.Sprintf(
 		"(%s){.tag = %s, .data = (void *)%s}",
 		expected.Name,
-		interfaceImplTagName(instance, concrete),
+		interfaceImplTagName(
+			instance,
+			concrete,
+		),
 		value,
 	), true
 }

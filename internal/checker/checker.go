@@ -492,15 +492,52 @@ type GenericOverloadCallResolution struct {
 	GenericArguments []GenericArgumentInfo
 }
 
+type InterfaceConversionResolution struct {
+	// SourcePointer is the complete source type passed to cast, such as:
+	//
+	//     *mem.CAllocator
+	SourcePointer *Type
+
+	// Concrete is the implementation target after removing the pointer:
+	//
+	//     mem.CAllocator
+	Concrete *Type
+
+	// Interface is the destination interface:
+	//
+	//     mem.Allocator
+	Interface *Type
+
+	// Impl is the exact implementation selected by the checker.
+	Impl *ResolvedImpl
+}
+
 type SemanticInfo struct {
+	// ExprTypes contains the checker-resolved type of every expression.
+	//
+	// C codegen must prefer this information over attempting to infer the
+	// expression type again.
+	ExprTypes map[ast.Expr]*Type
+
 	IndexResolutions map[*ast.IndexExpr]IndexResolution
 	LenResolutions   map[*ast.CallExpr]LenResolution
 
 	GenericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
+
+	// InterfaceConversions records successful:
+	//
+	//     cast<SomeInterface>(&value)
+	//
+	// conversions. The key is the GenericExpr used as the call callee.
+	InterfaceConversions map[*ast.GenericExpr]InterfaceConversionResolution
 }
 
 func (c *Checker) SemanticInfo() SemanticInfo {
 	info := SemanticInfo{
+		ExprTypes: make(
+			map[ast.Expr]*Type,
+			len(c.exprTypes),
+		),
 		IndexResolutions: make(
 			map[*ast.IndexExpr]IndexResolution,
 			len(c.indexResolutions),
@@ -513,6 +550,14 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 			map[*ast.GenericExpr]GenericOverloadCallResolution,
 			len(c.genericOverloadCalls),
 		),
+		InterfaceConversions: make(
+			map[*ast.GenericExpr]InterfaceConversionResolution,
+			len(c.interfaceConversions),
+		),
+	}
+
+	for expr, typ := range c.exprTypes {
+		info.ExprTypes[expr] = typ
 	}
 
 	for expr, resolution := range c.indexResolutions {
@@ -531,6 +576,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		)
 
 		info.GenericOverloadCalls[expr] = cloned
+	}
+
+	for expr, resolution := range c.interfaceConversions {
+		info.InterfaceConversions[expr] = resolution
 	}
 
 	return info
@@ -618,22 +667,7 @@ type Checker struct {
 
 	currentResults []*Type
 
-	// currentLoopDepth is greater than zero while checking the body of an
-	// enclosing for loop.
-	//
-	// It is reset when entering a nested task or deferred block because those
-	// constructs do not share the surrounding task's active loop context.
-	currentLoopDepth int
-
-	// currentDeferDepth is greater than zero while checking the contents of
-	// a deferred block:
-	//
-	//     defer {
-	//         ...
-	//     }
-	//
-	// It is reset when entering a nested task because that task has its own
-	// independent return and defer context.
+	currentLoopDepth  int
 	currentDeferDepth int
 
 	preparingTasks map[*ast.TaskDecl]bool
@@ -641,10 +675,14 @@ type Checker struct {
 	preparingOverloads map[*ast.OverloadDecl]bool
 	preparedOverloads  map[*ast.OverloadDecl]bool
 
+	exprTypes map[ast.Expr]*Type
+
 	indexResolutions map[*ast.IndexExpr]IndexResolution
 	lenResolutions   map[*ast.CallExpr]LenResolution
 
 	genericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
+
+	interfaceConversions map[*ast.GenericExpr]InterfaceConversionResolution
 
 	options Options
 
@@ -663,20 +701,36 @@ func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Ch
 	return NewWithPackagesAndOptions(diags, packages, Options{})
 }
 
-func NewWithPackagesAndOptions(diags *diag.Reporter, packages map[string]*PackageInfo, options Options) *Checker {
+func NewWithPackagesAndOptions(
+	diags *diag.Reporter,
+	packages map[string]*PackageInfo,
+	options Options,
+) *Checker {
+	if packages == nil {
+		packages = map[string]*PackageInfo{}
+	}
+
 	c := &Checker{
-		diags:                diags,
-		packages:             packages,
-		specializedTypes:     map[string]*Type{},
-		preparingTasks:       map[*ast.TaskDecl]bool{},
-		preparingOverloads:   map[*ast.OverloadDecl]bool{},
-		preparedOverloads:    map[*ast.OverloadDecl]bool{},
-		indexResolutions:     map[*ast.IndexExpr]IndexResolution{},
-		lenResolutions:       map[*ast.CallExpr]LenResolution{},
+		diags:            diags,
+		packages:         packages,
+		specializedTypes: map[string]*Type{},
+
+		preparingTasks:     map[*ast.TaskDecl]bool{},
+		preparingOverloads: map[*ast.OverloadDecl]bool{},
+		preparedOverloads:  map[*ast.OverloadDecl]bool{},
+
+		exprTypes: map[ast.Expr]*Type{},
+
+		indexResolutions: map[*ast.IndexExpr]IndexResolution{},
+		lenResolutions:   map[*ast.CallExpr]LenResolution{},
+
 		genericOverloadCalls: map[*ast.GenericExpr]GenericOverloadCallResolution{},
-		options:              options,
-		packageScopes:        map[string]*Scope{},
-		implByDecl:           map[*ast.ImplDecl]*ImplInfo{},
+
+		interfaceConversions: map[*ast.GenericExpr]InterfaceConversionResolution{},
+
+		options:       options,
+		packageScopes: map[string]*Scope{},
+		implByDecl:    map[*ast.ImplDecl]*ImplInfo{},
 	}
 
 	c.global = NewScope(nil)
@@ -695,6 +749,28 @@ func (c *Checker) IndexResolutionFor(
 	}
 
 	resolution, ok := c.indexResolutions[expr]
+	return resolution, ok
+}
+
+func (c *Checker) ExprTypeFor(
+	expr ast.Expr,
+) (*Type, bool) {
+	if c == nil || expr == nil {
+		return nil, false
+	}
+
+	typ, ok := c.exprTypes[expr]
+	return typ, ok
+}
+
+func (c *Checker) InterfaceConversionFor(
+	expr *ast.GenericExpr,
+) (InterfaceConversionResolution, bool) {
+	if c == nil || expr == nil {
+		return InterfaceConversionResolution{}, false
+	}
+
+	resolution, ok := c.interfaceConversions[expr]
 	return resolution, ok
 }
 
@@ -7440,10 +7516,18 @@ func (c *Checker) checkCharLiteral(
 func (c *Checker) checkExpr(
 	scope *Scope,
 	expr ast.Expr,
-) *Type {
+) (result *Type) {
 	if expr == nil {
 		return InvalidType
 	}
+
+	defer func() {
+		if result == nil {
+			result = InvalidType
+		}
+
+		c.exprTypes[expr] = result
+	}()
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
@@ -7456,6 +7540,10 @@ func (c *Checker) checkExpr(
 					e.Name.Name,
 				),
 			)
+			return InvalidType
+		}
+
+		if sym.Type == nil {
 			return InvalidType
 		}
 
@@ -9347,13 +9435,12 @@ func (c *Checker) checkStringLikeConstructorCast(
 
 func (c *Checker) checkCastIntrinsicCall(
 	scope *Scope,
+	genericExpr *ast.GenericExpr,
 	targetType *Type,
 	args []ast.Expr,
 	argTypes []*Type,
 	span source.Span,
 ) *Type {
-	_ = scope
-
 	switch targetType.Kind {
 	case TypeString:
 		return c.checkStringLikeConstructorCast(
@@ -9392,6 +9479,27 @@ func (c *Checker) checkCastIntrinsicCall(
 		sourceType.Kind == TypeInvalid ||
 		targetType == nil ||
 		targetType.Kind == TypeInvalid {
+		return targetType
+	}
+
+	/*
+		A cast appearing inside an unspecialized generic declaration may use
+		a symbolic source or destination type:
+
+		    Wrap :: task<T type>(value int) T {
+		        return cast<T>(value)
+		    }
+
+		The primitive cast rules cannot decide whether this is valid until T
+		is replaced with a concrete specialization argument.
+
+		The cast expression nevertheless has the symbolic destination type,
+		which allows the surrounding generic task body and default parameter
+		expressions to be checked.
+	*/
+	if c.typeContainsGenericPlaceholder(targetType) ||
+		c.typeContainsGenericPlaceholder(sourceType) ||
+		c.genericExprReferencesPlaceholder(scope, args[0]) {
 		return targetType
 	}
 
@@ -9442,10 +9550,14 @@ func (c *Checker) checkCastIntrinsicCall(
 		return targetType
 	}
 
-	// Interface construction remains a separate operation because it needs an
-	// implementation lookup and generated interface wrapper.
+	/*
+		Interface construction requires a pointer to the concrete implementing
+		value. Record the exact checker-selected implementation so codegen does
+		not need to repeat type inference or implementation matching.
+	*/
 	if targetType.Kind == TypeInterface {
-		if sourceType.Kind != TypePointer {
+		if sourceType.Kind != TypePointer ||
+			sourceType.Elem == nil {
 			c.diags.Add(
 				args[0].Span(),
 				fmt.Sprintf(
@@ -9469,7 +9581,7 @@ func (c *Checker) checkCastIntrinsicCall(
 
 		switch resolution.Kind {
 		case ImplResolutionAmbiguous:
-			// resolveImplAt already emitted the ambiguity diagnostic.
+			// resolveImplAt emitted the ambiguity diagnostic.
 
 		case ImplResolutionNotFound:
 			c.diags.Add(
@@ -9482,7 +9594,15 @@ func (c *Checker) checkCastIntrinsicCall(
 			)
 
 		case ImplResolutionFound:
-			// Cast is valid.
+			if genericExpr != nil {
+				c.interfaceConversions[genericExpr] =
+					InterfaceConversionResolution{
+						SourcePointer: sourceType,
+						Concrete:      concreteType,
+						Interface:     targetType,
+						Impl:          resolution.Resolved,
+					}
+			}
 		}
 
 		return targetType
@@ -9633,6 +9753,7 @@ func (c *Checker) checkGenericIntrinsicCall(
 	case builtin.TaskCast:
 		return c.checkCastIntrinsicCall(
 			scope,
+			gen,
 			targetType,
 			args,
 			argTypes,
