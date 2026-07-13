@@ -100,3 +100,36 @@ func TestInterfaceKeywordStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupBreakAndContinueKeywords(
+	t *testing.T,
+) {
+	tests := []struct {
+		text string
+		want Kind
+	}{
+		{
+			text: "break",
+			want: KeywordBreak,
+		},
+		{
+			text: "continue",
+			want: KeywordContinue,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.text, func(t *testing.T) {
+			got := LookupIdent(test.text)
+
+			if got != test.want {
+				t.Fatalf(
+					"LookupIdent(%q) = %s, want %s",
+					test.text,
+					got.String(),
+					test.want.String(),
+				)
+			}
+		})
+	}
+}

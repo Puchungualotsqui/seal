@@ -1599,6 +1599,16 @@ func (p *Parser) parseStmt() ast.Stmt {
 	}
 
 	switch {
+	case p.match(token.KeywordBreak):
+		return &ast.BreakStmt{
+			Loc: p.previous().Span,
+		}
+
+	case p.match(token.KeywordContinue):
+		return &ast.ContinueStmt{
+			Loc: p.previous().Span,
+		}
+
 	case p.match(token.KeywordReturn):
 		var values []ast.Expr
 
@@ -1658,8 +1668,8 @@ func (p *Parser) parseStmt() ast.Stmt {
 		//
 		//     defer Close(file)
 		//
-		// The parser accepts an expression here. The checker is
-		// responsible for requiring it to be a valid task call.
+		// The checker is responsible for requiring the
+		// expression to be a valid task call.
 		call := p.parseExpr(0)
 		if call == nil {
 			p.errorHere(
@@ -1696,18 +1706,6 @@ func (p *Parser) parseStmt() ast.Stmt {
 		}
 
 	case p.match(token.KeywordIf):
-		// In an if condition, the first unparenthesized `{`
-		// begins the statement body.
-		//
-		// This prevents an identifier condition such as:
-		//
-		//     if success {
-		//
-		// or a unary identifier condition such as:
-		//
-		//     if !success {
-		//
-		// from being interpreted as a compound literal.
 		cond := p.parseExprUntil(
 			0,
 			token.LBrace,
@@ -3102,13 +3100,19 @@ func (p *Parser) synchronizeDeclBody() {
 }
 
 func (p *Parser) synchronizeStmt() {
-	for !p.at(token.EOF) && !p.at(token.RBrace) {
+	for !p.at(token.EOF) &&
+		!p.at(token.RBrace) {
 		switch p.peek().Kind {
 		case token.KeywordReturn,
+			token.KeywordBreak,
+			token.KeywordContinue,
 			token.KeywordDefer,
 			token.KeywordSeal,
 			token.KeywordIf,
 			token.KeywordFor,
+			token.KeywordSwitch,
+			token.At,
+			token.LBrace,
 			token.Ident:
 			return
 		}

@@ -764,6 +764,10 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 			r.resolveExpr(scope, value)
 		}
 
+	case *ast.BreakStmt,
+		*ast.ContinueStmt:
+		return
+
 	case *ast.DeferStmt:
 		if s.Call != nil {
 			r.resolveExpr(scope, s.Call)

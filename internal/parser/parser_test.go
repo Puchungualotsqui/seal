@@ -1978,3 +1978,201 @@ Main :: task() {
 		)
 	}
 }
+
+func TestParseBreakAndContinueStatements(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Main :: task() {
+    for i := 0; i < 10; i += 1 {
+        if i == 2 {
+            continue
+        }
+
+        if i == 8 {
+            break
+        }
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	mainDecl, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration is %T, expected *ast.TaskDecl",
+			file.Decls[0],
+		)
+	}
+
+	if len(mainDecl.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 main statement, got %d",
+			len(mainDecl.Body.Stmts),
+		)
+	}
+
+	loop, ok := mainDecl.Body.Stmts[0].(*ast.ForStmt)
+	if !ok {
+		t.Fatalf(
+			"main statement is %T, expected *ast.ForStmt",
+			mainDecl.Body.Stmts[0],
+		)
+	}
+
+	if len(loop.Body.Stmts) != 2 {
+		t.Fatalf(
+			"expected 2 loop statements, got %d",
+			len(loop.Body.Stmts),
+		)
+	}
+
+	continueIf, ok :=
+		loop.Body.Stmts[0].(*ast.IfStmt)
+	if !ok {
+		t.Fatalf(
+			"first loop statement is %T, expected *ast.IfStmt",
+			loop.Body.Stmts[0],
+		)
+	}
+
+	if len(continueIf.Then.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 continue-if body statement, got %d",
+			len(continueIf.Then.Stmts),
+		)
+	}
+
+	if _, ok :=
+		continueIf.Then.Stmts[0].(*ast.ContinueStmt); !ok {
+		t.Fatalf(
+			"continue-if statement is %T, expected *ast.ContinueStmt",
+			continueIf.Then.Stmts[0],
+		)
+	}
+
+	breakIf, ok :=
+		loop.Body.Stmts[1].(*ast.IfStmt)
+	if !ok {
+		t.Fatalf(
+			"second loop statement is %T, expected *ast.IfStmt",
+			loop.Body.Stmts[1],
+		)
+	}
+
+	if len(breakIf.Then.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 break-if body statement, got %d",
+			len(breakIf.Then.Stmts),
+		)
+	}
+
+	if _, ok :=
+		breakIf.Then.Stmts[0].(*ast.BreakStmt); !ok {
+		t.Fatalf(
+			"break-if statement is %T, expected *ast.BreakStmt",
+			breakIf.Then.Stmts[0],
+		)
+	}
+}
+
+func TestParseBreakInNestedStringSearchLoop(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Contains :: task(
+    value string,
+    needle string,
+) bool {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    finalStart := valueLength - needleLength
+
+    for start: uint = 0;
+        start <= finalStart;
+        start += 1 {
+        matches := true
+
+        for i: uint = 0;
+            i < needleLength;
+            i += 1 {
+            if value[start + i] != needle[i] {
+                matches = false
+                break
+            }
+        }
+
+        if matches {
+            return true
+        }
+    }
+
+    return false
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+
+	outerLoop, ok :=
+		task.Body.Stmts[3].(*ast.ForStmt)
+	if !ok {
+		t.Fatalf(
+			"statement is %T, expected outer *ast.ForStmt",
+			task.Body.Stmts[3],
+		)
+	}
+
+	innerLoop, ok :=
+		outerLoop.Body.Stmts[1].(*ast.ForStmt)
+	if !ok {
+		t.Fatalf(
+			"statement is %T, expected inner *ast.ForStmt",
+			outerLoop.Body.Stmts[1],
+		)
+	}
+
+	ifStmt, ok :=
+		innerLoop.Body.Stmts[0].(*ast.IfStmt)
+	if !ok {
+		t.Fatalf(
+			"inner statement is %T, expected *ast.IfStmt",
+			innerLoop.Body.Stmts[0],
+		)
+	}
+
+	if len(ifStmt.Then.Stmts) != 2 {
+		t.Fatalf(
+			"expected 2 if-body statements, got %d",
+			len(ifStmt.Then.Stmts),
+		)
+	}
+
+	if _, ok :=
+		ifStmt.Then.Stmts[1].(*ast.BreakStmt); !ok {
+		t.Fatalf(
+			"second if-body statement is %T, expected *ast.BreakStmt",
+			ifStmt.Then.Stmts[1],
+		)
+	}
+}

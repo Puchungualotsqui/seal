@@ -42,6 +42,8 @@ const (
 	KeywordIf
 	KeywordElse
 	KeywordFor
+	KeywordBreak
+	KeywordContinue
 	KeywordReturn
 	KeywordDefer
 	KeywordDyn
@@ -120,6 +122,8 @@ var keywordKinds = map[string]Kind{
 	"if":        KeywordIf,
 	"else":      KeywordElse,
 	"for":       KeywordFor,
+	"break":     KeywordBreak,
+	"continue":  KeywordContinue,
 	"return":    KeywordReturn,
 	"defer":     KeywordDefer,
 	"seal":      KeywordSeal,
@@ -197,6 +201,10 @@ func (k Kind) String() string {
 		return "else"
 	case KeywordFor:
 		return "for"
+	case KeywordBreak:
+		return "break"
+	case KeywordContinue:
+		return "continue"
 	case KeywordReturn:
 		return "return"
 	case KeywordDefer:

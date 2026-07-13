@@ -638,6 +638,26 @@ func (s *ReturnStmt) Span() source.Span {
 	return s.Loc
 }
 
+type BreakStmt struct {
+	Loc source.Span
+}
+
+func (*BreakStmt) stmtNode() {}
+
+func (s *BreakStmt) Span() source.Span {
+	return s.Loc
+}
+
+type ContinueStmt struct {
+	Loc source.Span
+}
+
+func (*ContinueStmt) stmtNode() {}
+
+func (s *ContinueStmt) Span() source.Span {
+	return s.Loc
+}
+
 type DeferStmt struct {
 	// Call is used by the call form:
 	//

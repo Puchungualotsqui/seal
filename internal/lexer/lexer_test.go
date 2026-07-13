@@ -498,3 +498,50 @@ Reader<T> :: impl <T type> Box<T> using inner
 		}
 	}
 }
+
+func TestLexBreakAndContinueKeywords(
+	t *testing.T,
+) {
+	file := source.NewFile(
+		"test.seal",
+		"break continue",
+	)
+
+	reporter := diag.NewReporter()
+	tokens := New(file, reporter).LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(tokens) != 3 {
+		t.Fatalf(
+			"expected 3 tokens including EOF, got %d",
+			len(tokens),
+		)
+	}
+
+	if tokens[0].Kind != token.KeywordBreak {
+		t.Fatalf(
+			"first token is %s, expected break",
+			tokens[0].Kind.String(),
+		)
+	}
+
+	if tokens[1].Kind != token.KeywordContinue {
+		t.Fatalf(
+			"second token is %s, expected continue",
+			tokens[1].Kind.String(),
+		)
+	}
+
+	if tokens[2].Kind != token.EOF {
+		t.Fatalf(
+			"final token is %s, expected EOF",
+			tokens[2].Kind.String(),
+		)
+	}
+}
