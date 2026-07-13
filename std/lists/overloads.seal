@@ -1,0 +1,34 @@
+/*
+Built-in-style indexing overloads.
+*/
+[] :: overload {
+    SliceAt
+    ArrayAt
+    StaticArrayAt
+    DynamicArrayAt
+    DequeAt
+}
+
+/*
+Built-in-style indexed assignment overloads.
+*/
+[]= :: overload {
+    SliceSet
+    ArraySet
+    StaticArraySet
+    DynamicArraySet
+    DequeSet
+}
+
+/*
+Built-in-style length overloads.
+*/
+len :: overload {
+    SliceLength
+    ArrayLength
+    StaticArrayLength
+    DynamicArrayLength
+    StackLength
+    DequeLength
+    QueueLength
+}

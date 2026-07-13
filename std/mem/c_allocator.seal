@@ -1,5 +1,6 @@
 c :: @c_import {
     include "stdlib.h"
+    include "string.h"
 }
 
 _Malloc :: extern("malloc") task(
@@ -14,6 +15,30 @@ _Calloc :: extern("calloc") task(
 _Free :: extern("free") task(
     ptr rawptr,
 )
+
+_Memcpy :: extern("memcpy") task(
+    destination rawptr,
+    source rawptr,
+    byteCount uint,
+) rawptr
+
+_Memmove :: extern("memmove") task(
+    destination rawptr,
+    source rawptr,
+    byteCount uint,
+) rawptr
+
+_Memcmp :: extern("memcmp") task(
+    left rawptr,
+    right rawptr,
+    byteCount uint,
+) int
+
+_Memset :: extern("memset") task(
+    destination rawptr,
+    value int,
+    byteCount uint,
+) rawptr
 
 /*
 CAllocator uses the C standard library allocation functions.
@@ -46,7 +71,10 @@ ZeroAllocator :: impl CAllocator {
         count uint,
         size uint,
     ) rawptr {
-        return _Calloc(count, size)
+        return _Calloc(
+            count,
+            size,
+        )
     }
 }
 
@@ -75,7 +103,10 @@ CallocC :: task(
     count uint,
     size uint,
 ) rawptr {
-    return _Calloc(count, size)
+    return _Calloc(
+        count,
+        size,
+    )
 }
 
 AllocTypeC :: task <T type>() *T {
@@ -86,7 +117,10 @@ AllocTypeC :: task <T type>() *T {
 
 NewC :: task <T type>() *T {
     return cast<*T>(
-        _Calloc(1, size(T)),
+        _Calloc(
+            1,
+            size(T),
+        ),
     )
 }
 
@@ -101,5 +135,91 @@ FreeTypeC :: task <T type>(
 ) {
     _Free(
         cast<rawptr>(ptr),
+    )
+}
+
+/*
+MemcpyC copies byteCount bytes.
+
+The source and destination ranges must not overlap.
+*/
+MemcpyC :: task(
+    destination rawptr,
+    source rawptr,
+    byteCount uint,
+) {
+    if byteCount == 0 {
+        return
+    }
+
+    _Memcpy(
+        destination,
+        source,
+        byteCount,
+    )
+}
+
+/*
+MemmoveC copies byteCount bytes.
+
+The source and destination ranges may overlap.
+*/
+MemmoveC :: task(
+    destination rawptr,
+    source rawptr,
+    byteCount uint,
+) {
+    if byteCount == 0 {
+        return
+    }
+
+    _Memmove(
+        destination,
+        source,
+        byteCount,
+    )
+}
+
+/*
+MemcmpC compares two byte ranges.
+
+It returns:
+
+    less than zero if left is smaller;
+    zero if the ranges are equal;
+    greater than zero if left is larger.
+*/
+MemcmpC :: task(
+    left rawptr,
+    right rawptr,
+    byteCount uint,
+) int {
+    if byteCount == 0 {
+        return 0
+    }
+
+    return _Memcmp(
+        left,
+        right,
+        byteCount,
+    )
+}
+
+/*
+MemsetC fills byteCount bytes with value converted to an unsigned byte.
+*/
+MemsetC :: task(
+    destination rawptr,
+    value int,
+    byteCount uint,
+) {
+    if byteCount == 0 {
+        return
+    }
+
+    _Memset(
+        destination,
+        value,
+        byteCount,
     )
 }

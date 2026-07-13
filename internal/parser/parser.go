@@ -2686,7 +2686,11 @@ func (p *Parser) looksLikeGenericExpr(
 
 		switch kind {
 		case token.Lt:
-			angleDepth++
+			if parenDepth == 0 &&
+				bracketDepth == 0 &&
+				braceDepth == 0 {
+				angleDepth++
+			}
 
 		case token.Gt:
 			if parenDepth > 0 ||
@@ -2695,16 +2699,41 @@ func (p *Parser) looksLikeGenericExpr(
 				continue
 			}
 
+			if angleDepth == 0 {
+				return false
+			}
+
 			angleDepth--
 
 			if angleDepth == 0 {
-				if i+1 < len(p.tokens) &&
-					(p.tokens[i+1].Kind == token.LParen ||
-						p.tokens[i+1].Kind == token.LBrace) {
+				if i+1 >= len(p.tokens) {
 					return true
 				}
 
-				return false
+				next := p.tokens[i+1].Kind
+
+				/*
+					A generic expression may be followed by a postfix
+					operation:
+
+					    Task<T>(value)
+					    Type<T>{...}
+					    value.Field<T>.Member
+					    value.Field<T>[index]
+
+					It may also be a complete expression by itself:
+
+					    size(_Slot<T>)
+					    inspect(Box<T>, other)
+					    result := Factory<T>
+
+					The latter requires accepting expression delimiters after
+					the closing '>'.
+				*/
+				return p.genericExprMayEndBefore(
+					next,
+					stops...,
+				)
 			}
 
 		case token.LParen:
@@ -2729,6 +2758,7 @@ func (p *Parser) looksLikeGenericExpr(
 
 		case token.LBrace:
 			if stopAtLBrace &&
+				angleDepth > 0 &&
 				parenDepth == 0 &&
 				bracketDepth == 0 &&
 				braceDepth == 0 {
@@ -2750,6 +2780,94 @@ func (p *Parser) looksLikeGenericExpr(
 	}
 
 	return false
+}
+
+func (p *Parser) genericExprMayEndBefore(
+	kind token.Kind,
+	stops ...token.Kind,
+) bool {
+	for _, stop := range stops {
+		if kind == stop {
+			return true
+		}
+	}
+
+	switch kind {
+	/*
+		Postfix continuations:
+
+		    Task<T>(...)
+		    Type<T>{...}
+		    value<T>.field
+		    value<T>[index]
+	*/
+	case token.LParen,
+		token.LBrace,
+		token.Dot,
+		token.LBracket:
+		return true
+
+	/*
+		Expression delimiters:
+
+		    size(Type<T>)
+		    Call(Type<T>, value)
+	*/
+	case token.RParen,
+		token.RBracket,
+		token.RBrace,
+		token.Comma,
+		token.Semi,
+		token.EOF:
+		return true
+
+	/*
+		Assignment operators:
+
+		    value := Factory<T>
+		    value = Factory<T>
+	*/
+	case token.Assign,
+		token.PlusEq,
+		token.MinusEq,
+		token.StarEq,
+		token.SlashEq,
+		token.PercentEq:
+		return true
+
+	/*
+		Binary operators. This permits a completed generic expression to
+		participate in a larger expression.
+
+		Relational ambiguity remains resolved conservatively: an identifier
+		immediately following '>' is not accepted here, so:
+
+		    a < b > c
+
+		continues to parse as comparisons rather than as a generic
+		specialization.
+	*/
+	case token.Plus,
+		token.Minus,
+		token.Star,
+		token.Slash,
+		token.Percent,
+		token.Amp,
+		token.Pipe,
+		token.Caret,
+		token.EqEq,
+		token.NotEq,
+		token.Lt,
+		token.LtEq,
+		token.Gt,
+		token.GtEq,
+		token.AndAnd,
+		token.OrOr:
+		return true
+
+	default:
+		return false
+	}
 }
 
 func (p *Parser) genericArgHasGenericSuffix() bool {

@@ -1,0 +1,140 @@
+/*
+Slice is a borrowed mutable view over contiguous elements.
+
+Slice does not allocate, own, or free its storage.
+It must not outlive the storage from which it was created.
+*/
+Slice :: struct <T type> {
+    _data rawptr
+    _length uint
+}
+
+/*
+SliceFromRaw constructs a borrowed slice from raw storage.
+
+The caller must guarantee that data points to at least length valid
+elements of T.
+*/
+SliceFromRaw :: task <T type>(
+    data rawptr,
+    length uint,
+) Slice<T> {
+    if data == nil &&
+        length > 0 {
+        panic("lists.SliceFromRaw: nil storage")
+    }
+
+    return Slice<T>{
+        _data = data,
+        _length = length,
+    }
+}
+
+/*
+SliceData returns the borrowed raw storage pointer.
+*/
+SliceData :: task <T type>(
+    values *Slice<T>,
+) rawptr {
+    return values._data
+}
+
+/*
+SliceLength returns the number of elements.
+*/
+SliceLength :: pure task <T type>(
+    values *Slice<T>,
+) uint {
+    return values._length
+}
+
+/*
+SliceAt returns one element by shallow copy.
+*/
+SliceAt :: pure task <T type>(
+    values *Slice<T>,
+    index int,
+) T {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    )
+}
+
+/*
+SliceSet replaces one element by shallow assignment.
+*/
+SliceSet :: task <T type>(
+    values *Slice<T>,
+    index int,
+    value T,
+) {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+}
+
+/*
+SliceRange returns a borrowed sub-slice containing [start, end).
+
+Negative boundaries are interpreted relative to the slice length.
+*/
+SliceRange :: task <T type>(
+    values *Slice<T>,
+    start int,
+    end int,
+) Slice<T> {
+    signedLength := cast<int>(values._length)
+
+    normalizedStart := start
+    normalizedEnd := end
+
+    if normalizedStart < 0 {
+        normalizedStart += signedLength
+    }
+
+    if normalizedEnd < 0 {
+        normalizedEnd += signedLength
+    }
+
+    if normalizedStart < 0 ||
+        normalizedEnd < normalizedStart ||
+        normalizedEnd > signedLength {
+        panic("lists.SliceRange: invalid range")
+    }
+
+    resultLength := cast<uint>(
+        normalizedEnd - normalizedStart,
+    )
+
+    if resultLength == 0 {
+        return Slice<T>{
+            _data = nil,
+            _length = 0,
+        }
+    }
+
+    resultData := cast<rawptr>(
+        _SlotPointer<T>(
+            values._data,
+            cast<uint>(normalizedStart),
+        ),
+    )
+
+    return Slice<T>{
+        _data = resultData,
+        _length = resultLength,
+    }
+}

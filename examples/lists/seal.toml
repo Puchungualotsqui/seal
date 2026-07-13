@@ -1,0 +1,32 @@
+[package]
+name = "listsExample"
+version = "0.1.1"
+kind = "executable"
+dependencies = [
+    "fmt",
+    "lists",
+]
+
+[build]
+compiler = "cc"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+
+[compiler.clang]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wconversion",
+]

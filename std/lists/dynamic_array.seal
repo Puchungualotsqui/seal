@@ -1,0 +1,594 @@
+/*
+DynamicArray owns resizable allocator-backed contiguous storage.
+
+Copying DynamicArray performs a shallow ownership copy and must be
+avoided.
+*/
+DynamicArray :: struct <T type> {
+    _data rawptr
+    _length uint
+    _capacity uint
+
+    _allocator mem.Allocator
+    _deallocator mem.Deallocator
+}
+
+/*
+NewDynamicArrayEmpty creates an empty array with no allocation.
+*/
+NewDynamicArrayEmpty :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) DynamicArray<T> {
+    return DynamicArray<T>{
+        _data = nil,
+        _length = 0,
+        _capacity = 0,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+DynamicArrayWithCapacity creates an empty array with runtime capacity.
+*/
+DynamicArrayWithCapacity :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    capacity uint,
+) DynamicArray<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        capacity,
+    )
+
+    return DynamicArray<T>{
+        _data = data,
+        _length = 0,
+        _capacity = capacity,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+DynamicArrayWithStaticCapacity creates an empty array whose initial
+capacity is supplied as a compile-time generic argument.
+*/
+DynamicArrayWithStaticCapacity :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) DynamicArray<T> {
+    return DynamicArrayWithCapacity<T>(
+        allocator,
+        deallocator,
+        cast<uint>(N),
+    )
+}
+
+/*
+DynamicArrayWithLength creates an array containing runtime length
+zero-filled elements.
+*/
+DynamicArrayWithLength :: task <T type>(
+    allocator mem.ZeroAllocator,
+    growthAllocator mem.Allocator,
+    deallocator mem.Deallocator,
+    length uint,
+) DynamicArray<T> {
+    data := _AllocateZeroed<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    return DynamicArray<T>{
+        _data = data,
+        _length = length,
+        _capacity = length,
+        _allocator = growthAllocator,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+DynamicArrayWithStaticLength creates a zero-filled array whose initial
+length is supplied as a compile-time argument.
+*/
+DynamicArrayWithStaticLength :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.ZeroAllocator,
+    growthAllocator mem.Allocator,
+    deallocator mem.Deallocator,
+) DynamicArray<T> {
+    return DynamicArrayWithLength<T>(
+        allocator,
+        growthAllocator,
+        deallocator,
+        cast<uint>(N),
+    )
+}
+
+/*
+DynamicArrayFilled creates an array with runtime length containing
+shallow copies of value.
+*/
+DynamicArrayFilled :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    length uint,
+    value T,
+) DynamicArray<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    index: uint = 0
+
+    for index < length {
+        _WriteSlot<T>(
+            data,
+            index,
+            value,
+        )
+
+        index += 1
+    }
+
+    return DynamicArray<T>{
+        _data = data,
+        _length = length,
+        _capacity = length,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+DynamicArrayStaticFilled creates an array whose length is a compile-time
+generic value.
+*/
+DynamicArrayStaticFilled :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value T,
+) DynamicArray<T> {
+    return DynamicArrayFilled<T>(
+        allocator,
+        deallocator,
+        cast<uint>(N),
+        value,
+    )
+}
+
+/*
+DynamicArrayFromSlice creates an owned dynamic copy.
+*/
+DynamicArrayFromSlice :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    source Slice<T>,
+) DynamicArray<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        source._length,
+    )
+
+    if source._length > 0 {
+        mem.MemcpyC(
+            data,
+            source._data,
+            _SlotByteCount<T>(source._length),
+        )
+    }
+
+    return DynamicArray<T>{
+        _data = data,
+        _length = source._length,
+        _capacity = source._length,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+NewDynamicArray :: overload {
+    NewDynamicArrayEmpty
+    DynamicArrayFromSlice
+    DynamicArrayFilled
+    DynamicArrayStaticFilled
+}
+
+/*
+DynamicArrayLength returns the number of initialized elements.
+*/
+DynamicArrayLength :: pure task <T type>(
+    values *DynamicArray<T>,
+) uint {
+    return values._length
+}
+
+/*
+DynamicArrayCapacity returns allocated element capacity.
+*/
+DynamicArrayCapacity :: pure task <T type>(
+    values *DynamicArray<T>,
+) uint {
+    return values._capacity
+}
+
+DynamicArrayAt :: pure task <T type>(
+    values *DynamicArray<T>,
+    index int,
+) T {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    )
+}
+
+DynamicArraySet :: task <T type>(
+    values *DynamicArray<T>,
+    index int,
+    value T,
+) {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+}
+
+/*
+ReserveDynamicArray guarantees at least requiredCapacity slots.
+*/
+ReserveDynamicArray :: task <T type>(
+    values *DynamicArray<T>,
+    requiredCapacity uint,
+) {
+    if requiredCapacity <= values._capacity {
+        return
+    }
+
+    newData := _Allocate<_Slot<T>>(
+        values._allocator,
+        requiredCapacity,
+    )
+
+    if values._length > 0 {
+        mem.MemcpyC(
+            newData,
+            values._data,
+            _SlotByteCount<T>(values._length),
+        )
+    }
+
+    _DestroyStorage(
+        values._deallocator,
+        values._data,
+    )
+
+    values._data = newData
+    values._capacity = requiredCapacity
+}
+
+/*
+_GrowDynamicArray ensures capacity for requiredLength.
+*/
+_GrowDynamicArray :: task <T type>(
+    values *DynamicArray<T>,
+    requiredLength uint,
+) {
+    if requiredLength <= values._capacity {
+        return
+    }
+
+    newCapacity := _GrowCapacity(
+        values._capacity,
+        requiredLength,
+    )
+
+    ReserveDynamicArray<T>(
+        values,
+        newCapacity,
+    )
+}
+
+/*
+Append adds one element by shallow assignment.
+*/
+Append :: task <T type>(
+    values *DynamicArray<T>,
+    value T,
+) {
+    requiredLength := values._length + 1
+
+    if requiredLength <= values._length {
+        panic("lists.Append: length overflow")
+    }
+
+    _GrowDynamicArray<T>(
+        values,
+        requiredLength,
+    )
+
+    _WriteSlot<T>(
+        values._data,
+        values._length,
+        value,
+    )
+
+    values._length = requiredLength
+}
+
+/*
+AppendSlice appends shallow copies of all source elements.
+*/
+AppendSlice :: task <T type>(
+    values *DynamicArray<T>,
+    source Slice<T>,
+) {
+    if source._length == 0 {
+        return
+    }
+
+    requiredLength := values._length + source._length
+
+    if requiredLength < values._length {
+        panic("lists.AppendSlice: length overflow")
+    }
+
+    /*
+    The source may refer into values. Save whether it aliases before
+    growth, because growth can invalidate the old storage.
+    */
+    aliases := source._data == values._data
+    sourceOffset: uint = 0
+
+    if aliases {
+        sourceOffset = 0
+    }
+
+    oldLength := values._length
+
+    _GrowDynamicArray<T>(
+        values,
+        requiredLength,
+    )
+
+    destination := cast<rawptr>(
+        _SlotPointer<T>(
+            values._data,
+            oldLength,
+        ),
+    )
+
+    sourceData := source._data
+
+    if aliases {
+        sourceData = cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                sourceOffset,
+            ),
+        )
+    }
+
+    mem.MemmoveC(
+        destination,
+        sourceData,
+        _SlotByteCount<T>(source._length),
+    )
+
+    values._length = requiredLength
+}
+
+/*
+Pop removes and returns the final element.
+
+It returns false when the array is empty.
+*/
+Pop :: task <T type>(
+    values *DynamicArray<T>,
+) T, bool {
+    if values._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    index := values._length - 1
+
+    result := _ReadSlot<T>(
+        values._data,
+        index,
+    )
+
+    _ZeroSlots<T>(
+        values._data,
+        index,
+        1,
+    )
+
+    values._length = index
+
+    return result, true
+}
+
+/*
+Insert inserts value before index.
+
+Index may equal len(values).
+*/
+Insert :: task <T type>(
+    values *DynamicArray<T>,
+    index int,
+    value T,
+) {
+    normalized := _NormalizeInsertIndex(
+        index,
+        values._length,
+    )
+
+    requiredLength := values._length + 1
+
+    if requiredLength <= values._length {
+        panic("lists.Insert: length overflow")
+    }
+
+    _GrowDynamicArray<T>(
+        values,
+        requiredLength,
+    )
+
+    moveCount := values._length - normalized
+
+    if moveCount > 0 {
+        source := cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                normalized,
+            ),
+        )
+
+        destination := cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                normalized + 1,
+            ),
+        )
+
+        mem.MemmoveC(
+            destination,
+            source,
+            _SlotByteCount<T>(moveCount),
+        )
+    }
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+
+    values._length = requiredLength
+}
+
+/*
+Remove removes and returns the element at index.
+*/
+Remove :: task <T type>(
+    values *DynamicArray<T>,
+    index int,
+) T {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    result := _ReadSlot<T>(
+        values._data,
+        normalized,
+    )
+
+    moveCount :=
+        values._length -
+        normalized -
+        1
+
+    if moveCount > 0 {
+        source := cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                normalized + 1,
+            ),
+        )
+
+        destination := cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                normalized,
+            ),
+        )
+
+        mem.MemmoveC(
+            destination,
+            source,
+            _SlotByteCount<T>(moveCount),
+        )
+    }
+
+    values._length -= 1
+
+    _ZeroSlots<T>(
+        values._data,
+        values._length,
+        1,
+    )
+
+    return result
+}
+
+/*
+Clear removes all logical elements without releasing capacity.
+
+It does not recursively destroy owning elements.
+*/
+Clear :: task <T type>(
+    values *DynamicArray<T>,
+) {
+    _ZeroSlots<T>(
+        values._data,
+        0,
+        values._length,
+    )
+
+    values._length = 0
+}
+
+/*
+DynamicArraySlice returns a borrowed view over initialized elements.
+*/
+DynamicArraySlice :: task <T type>(
+    values *DynamicArray<T>,
+) Slice<T> {
+    return Slice<T>{
+        _data = values._data,
+        _length = values._length,
+    }
+}
+
+/*
+DestroyDynamicArray releases storage.
+
+It does not recursively destroy owning elements.
+*/
+DestroyDynamicArray :: task <T type>(
+    values *DynamicArray<T>,
+) {
+    _DestroyStorage(
+        values._deallocator,
+        values._data,
+    )
+
+    values._data = nil
+    values._length = 0
+    values._capacity = 0
+}

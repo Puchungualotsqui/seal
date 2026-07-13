@@ -1,0 +1,185 @@
+/*
+Array owns fixed-length allocator-backed storage.
+
+The Array struct itself may be a local stack value, but its element
+storage is allocated through the supplied allocator.
+
+Copying Array performs a shallow ownership copy and must be avoided.
+*/
+Array :: struct <T type> {
+    _data rawptr
+    _length uint
+    _deallocator mem.Deallocator
+}
+
+/*
+NewArrayEmpty creates an empty fixed-length array.
+*/
+NewArrayEmpty :: task <T type>(
+    deallocator mem.Deallocator,
+) Array<T> {
+    return Array<T>{
+        _data = nil,
+        _length = 0,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+ArrayWithLength creates a zero-filled fixed-length array.
+*/
+ArrayWithLength :: task <T type>(
+    allocator mem.ZeroAllocator,
+    deallocator mem.Deallocator,
+    length uint,
+) Array<T> {
+    data := _AllocateZeroed<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    return Array<T>{
+        _data = data,
+        _length = length,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+ArrayFilled creates a fixed-length array whose elements are shallow
+copies of value.
+*/
+ArrayFilled :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    length uint,
+    value T,
+) Array<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    index: uint = 0
+
+    for index < length {
+        _WriteSlot<T>(
+            data,
+            index,
+            value,
+        )
+
+        index += 1
+    }
+
+    return Array<T>{
+        _data = data,
+        _length = length,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+ArrayFromSlice creates an owned fixed-length copy.
+*/
+ArrayFromSlice :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    source Slice<T>,
+) Array<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        source._length,
+    )
+
+    if source._length > 0 {
+        mem.MemcpyC(
+            data,
+            source._data,
+            _SlotByteCount<T>(source._length),
+        )
+    }
+
+    return Array<T>{
+        _data = data,
+        _length = source._length,
+        _deallocator = deallocator,
+    }
+}
+
+NewArray :: overload {
+    NewArrayEmpty
+    ArrayWithLength
+    ArrayFilled
+    ArrayFromSlice
+}
+
+/*
+ArrayLength returns the fixed runtime length.
+*/
+ArrayLength :: pure task <T type>(
+    values *Array<T>,
+) uint {
+    return values._length
+}
+
+ArrayAt :: pure task <T type>(
+    values *Array<T>,
+    index int,
+) T {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    )
+}
+
+ArraySet :: task <T type>(
+    values *Array<T>,
+    index int,
+    value T,
+) {
+    normalized := _NormalizeIndex(
+        index,
+        values._length,
+    )
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+}
+
+/*
+ArraySlice returns a borrowed view over the complete array.
+*/
+ArraySlice :: task <T type>(
+    values *Array<T>,
+) Slice<T> {
+    return Slice<T>{
+        _data = values._data,
+        _length = values._length,
+    }
+}
+
+/*
+DestroyArray releases the element storage.
+
+It does not recursively destroy owning elements.
+*/
+DestroyArray :: task <T type>(
+    values *Array<T>,
+) {
+    _DestroyStorage(
+        values._deallocator,
+        values._data,
+    )
+
+    values._data = nil
+    values._length = 0
+}

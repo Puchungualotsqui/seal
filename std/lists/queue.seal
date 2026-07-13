@@ -1,0 +1,94 @@
+/*
+Queue provides first-in, first-out behavior through an embedded Deque.
+*/
+Queue :: struct <T type> {
+    _deque Deque<T>
+}
+
+NewQueue :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Queue<T> {
+    return Queue<T>{
+        _deque = NewDeque<T>(
+            allocator,
+            deallocator,
+        ),
+    }
+}
+
+QueueWithCapacity :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    capacity uint,
+) Queue<T> {
+    return Queue<T>{
+        _deque = DequeWithCapacity<T>(
+            allocator,
+            deallocator,
+            capacity,
+        ),
+    }
+}
+
+QueueWithStaticCapacity :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Queue<T> {
+    return Queue<T>{
+        _deque =
+            DequeWithStaticCapacity<T, N>(
+                allocator,
+                deallocator,
+            ),
+    }
+}
+
+QueueLength :: pure task <T type>(
+    queue *Queue<T>,
+) uint {
+    return queue._deque._length
+}
+
+QueueIsEmpty :: pure task <T type>(
+    queue *Queue<T>,
+) bool {
+    return queue._deque._length == 0
+}
+
+Enqueue :: task <T type>(
+    queue *Queue<T>,
+    value T,
+) {
+    PushBack<T>(
+        &queue._deque,
+        value,
+    )
+}
+
+Dequeue :: task <T type>(
+    queue *Queue<T>,
+) T, bool {
+    return PopFront<T>(
+        &queue._deque,
+    )
+}
+
+QueueFront :: pure task <T type>(
+    queue *Queue<T>,
+) T {
+    return Front<T>(
+        &queue._deque,
+    )
+}
+
+DestroyQueue :: task <T type>(
+    queue *Queue<T>,
+) {
+    DestroyDeque<T>(
+        &queue._deque,
+    )
+}

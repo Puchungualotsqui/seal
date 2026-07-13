@@ -7883,21 +7883,55 @@ func (c *Checker) lookupInterfaceRequirement(ifaceType *Type, name string) *Inte
 	return nil
 }
 
-func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
-	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return c.checkGenericCallResultTypes(scope, gen, nil, nil, e.Args, e.Span())
+func (c *Checker) checkCallResultTypes(
+	scope *Scope,
+	e *ast.CallExpr,
+) []*Type {
+	/*
+		Handle size before ordinary argument checking for the same reason as
+		checkCallExpr: its argument may be a type expression rather than a
+		runtime value expression.
+	*/
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if kind, ok := c.primitiveTaskKind(
+			scope,
+			id.Name.Name,
+		); ok && kind == builtin.TaskSize {
+			return []*Type{
+				c.checkSizeCall(
+					scope,
+					e.Args,
+					e.Span(),
+				),
+			}
+		}
 	}
 
-	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return c.checkGenericCallResultTypes(
+			scope,
+			gen,
+			nil,
+			nil,
+			e.Args,
+			e.Span(),
+		)
+	}
+
+	argTypes, argSpans := c.checkCallArgumentTypes(
+		scope,
+		e.Args,
+	)
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if scope.Lookup(id.Name.Name) == nil {
-			if results, ok := c.checkInterfaceDispatchCallResultTypes(
-				scope,
-				e,
-				argTypes,
-				argSpans,
-			); ok {
+			if results, ok :=
+				c.checkInterfaceDispatchCallResultTypes(
+					scope,
+					e,
+					argTypes,
+					argSpans,
+				); ok {
 				return results
 			}
 		}
@@ -7919,22 +7953,61 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
-		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
+		if kind, ok := c.primitiveTaskKind(
+			scope,
+			id.Name.Name,
+		); ok {
 			switch kind {
 			case builtin.TaskSize:
-				return []*Type{c.checkSizeCall(e.Args, argTypes, e.Span())}
+				/*
+					Already handled before argument checking.
+					This remains as a defensive fallback.
+				*/
+				return []*Type{
+					c.checkSizeCall(
+						scope,
+						e.Args,
+						e.Span(),
+					),
+				}
 
 			case builtin.TaskAssert:
-				return []*Type{c.checkAssertCall(e.Args, argTypes, e.Span())}
+				return []*Type{
+					c.checkAssertCall(
+						e.Args,
+						argTypes,
+						e.Span(),
+					),
+				}
 
 			case builtin.TaskPanic:
-				return []*Type{c.checkPanicCall(e.Args, argTypes, e.Span())}
+				return []*Type{
+					c.checkPanicCall(
+						e.Args,
+						argTypes,
+						e.Span(),
+					),
+				}
 
 			case builtin.TaskTrap:
-				return []*Type{c.checkNoArgVoidPrimitive("trap", e.Args, argTypes, e.Span())}
+				return []*Type{
+					c.checkNoArgVoidPrimitive(
+						"trap",
+						e.Args,
+						argTypes,
+						e.Span(),
+					),
+				}
 
 			case builtin.TaskUnreachable:
-				return []*Type{c.checkNoArgVoidPrimitive("unreachable", e.Args, argTypes, e.Span())}
+				return []*Type{
+					c.checkNoArgVoidPrimitive(
+						"unreachable",
+						e.Args,
+						argTypes,
+						e.Span(),
+					),
+				}
 			}
 		}
 	}
@@ -7942,40 +8015,93 @@ func (c *Checker) checkCallResultTypes(scope *Scope, e *ast.CallExpr) []*Type {
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		sym := scope.Lookup(id.Name.Name)
 		if sym == nil {
-			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
-			return []*Type{InvalidType}
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"undefined symbol %q",
+					id.Name.Name,
+				),
+			)
+			return []*Type{
+				InvalidType,
+			}
 		}
 
 		switch sym.Kind {
 		case SymbolTask:
-			return c.checkDirectTaskCallResultTypes(sym, argTypes, argSpans, e.Span())
+			return c.checkDirectTaskCallResultTypes(
+				sym,
+				argTypes,
+				argSpans,
+				e.Span(),
+			)
 
 		case SymbolOverload:
-			return c.checkOverloadCallResultTypes(sym, argTypes, argSpans, e.Span())
+			return c.checkOverloadCallResultTypes(
+				sym,
+				argTypes,
+				argSpans,
+				e.Span(),
+			)
 
 		default:
-			c.diags.Add(id.Span(), fmt.Sprintf("cannot call non-task symbol %q", id.Name.Name))
-			return []*Type{InvalidType}
-		}
-	}
-
-	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
-		if id, ok := selector.Left.(*ast.IdentExpr); ok {
-			pkgSym := scope.Lookup(id.Name.Name)
-			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
-				return c.checkPackageCallResultTypes(pkgSym, selector, argTypes, argSpans, e.Span())
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"cannot call non-task symbol %q",
+					id.Name.Name,
+				),
+			)
+			return []*Type{
+				InvalidType,
 			}
 		}
 	}
 
-	calleeType := c.checkExpr(scope, e.Callee)
+	if selector, ok :=
+		e.Callee.(*ast.SelectorExpr); ok {
+		if id, ok :=
+			selector.Left.(*ast.IdentExpr); ok {
+			pkgSym := scope.Lookup(id.Name.Name)
 
-	if calleeType.Kind != TypeTask {
-		c.diags.Add(e.Callee.Span(), fmt.Sprintf("cannot call non-task type %s", calleeType.String()))
-		return []*Type{InvalidType}
+			if pkgSym != nil &&
+				pkgSym.Kind == SymbolPackage {
+				return c.checkPackageCallResultTypes(
+					pkgSym,
+					selector,
+					argTypes,
+					argSpans,
+					e.Span(),
+				)
+			}
+		}
 	}
 
-	c.checkTaskTypeCallArguments(calleeType, argTypes, argSpans, e.Span())
+	calleeType := c.checkExpr(
+		scope,
+		e.Callee,
+	)
+
+	if calleeType.Kind != TypeTask {
+		c.diags.Add(
+			e.Callee.Span(),
+			fmt.Sprintf(
+				"cannot call non-task type %s",
+				calleeType.String(),
+			),
+		)
+		return []*Type{
+			InvalidType,
+		}
+	}
+
+	c.checkTaskTypeCallArguments(
+		calleeType,
+		argTypes,
+		argSpans,
+		e.Span(),
+	)
+
 	return calleeType.Results
 }
 
@@ -8457,12 +8583,55 @@ func (c *Checker) checkGenericVariadicSpreadArgument(
 	)
 }
 
-func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
-	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
-		return c.checkGenericCallExpr(scope, gen, nil, nil, e.Args, e.Span())
+func (c *Checker) checkCallExpr(
+	scope *Scope,
+	e *ast.CallExpr,
+) *Type {
+	/*
+		Handle size before ordinary call-argument checking.
+
+		A size argument may be either a value expression:
+
+		    size(value)
+
+		or a type expression:
+
+		    size(T)
+		    size(_Slot<T>)
+		    size(pkg.Container<T>)
+
+		Generic type expressions are represented by ast.GenericExpr and are
+		not valid runtime values, so they must not pass through
+		checkCallArgumentTypes.
+	*/
+	if id, ok := e.Callee.(*ast.IdentExpr); ok {
+		if kind, ok := c.primitiveTaskKind(
+			scope,
+			id.Name.Name,
+		); ok && kind == builtin.TaskSize {
+			return c.checkSizeCall(
+				scope,
+				e.Args,
+				e.Span(),
+			)
+		}
 	}
 
-	argTypes, argSpans := c.checkCallArgumentTypes(scope, e.Args)
+	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
+		return c.checkGenericCallExpr(
+			scope,
+			gen,
+			nil,
+			nil,
+			e.Args,
+			e.Span(),
+		)
+	}
+
+	argTypes, argSpans := c.checkCallArgumentTypes(
+		scope,
+		e.Args,
+	)
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		if scope.Lookup(id.Name.Name) == nil {
@@ -8491,22 +8660,52 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	}
 
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
-		if kind, ok := c.primitiveTaskKind(scope, id.Name.Name); ok {
+		if kind, ok := c.primitiveTaskKind(
+			scope,
+			id.Name.Name,
+		); ok {
 			switch kind {
 			case builtin.TaskSize:
-				return c.checkSizeCall(e.Args, argTypes, e.Span())
+				/*
+					Already handled before argument checking.
+					This case remains defensive in case the control flow is
+					changed later.
+				*/
+				return c.checkSizeCall(
+					scope,
+					e.Args,
+					e.Span(),
+				)
 
 			case builtin.TaskAssert:
-				return c.checkAssertCall(e.Args, argTypes, e.Span())
+				return c.checkAssertCall(
+					e.Args,
+					argTypes,
+					e.Span(),
+				)
 
 			case builtin.TaskPanic:
-				return c.checkPanicCall(e.Args, argTypes, e.Span())
+				return c.checkPanicCall(
+					e.Args,
+					argTypes,
+					e.Span(),
+				)
 
 			case builtin.TaskTrap:
-				return c.checkNoArgVoidPrimitive("trap", e.Args, argTypes, e.Span())
+				return c.checkNoArgVoidPrimitive(
+					"trap",
+					e.Args,
+					argTypes,
+					e.Span(),
+				)
 
 			case builtin.TaskUnreachable:
-				return c.checkNoArgVoidPrimitive("unreachable", e.Args, argTypes, e.Span())
+				return c.checkNoArgVoidPrimitive(
+					"unreachable",
+					e.Args,
+					argTypes,
+					e.Span(),
+				)
 			}
 		}
 	}
@@ -8514,19 +8713,41 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	if id, ok := e.Callee.(*ast.IdentExpr); ok {
 		sym := scope.Lookup(id.Name.Name)
 		if sym == nil {
-			c.diags.Add(id.Span(), fmt.Sprintf("undefined symbol %q", id.Name.Name))
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"undefined symbol %q",
+					id.Name.Name,
+				),
+			)
 			return InvalidType
 		}
 
 		switch sym.Kind {
 		case SymbolTask:
-			return c.checkDirectTaskCall(sym, argTypes, argSpans, e.Span())
+			return c.checkDirectTaskCall(
+				sym,
+				argTypes,
+				argSpans,
+				e.Span(),
+			)
 
 		case SymbolOverload:
-			return c.checkOverloadCall(sym, argTypes, argSpans, e.Span())
+			return c.checkOverloadCall(
+				sym,
+				argTypes,
+				argSpans,
+				e.Span(),
+			)
 
 		default:
-			c.diags.Add(id.Span(), fmt.Sprintf("cannot call non-task symbol %q", id.Name.Name))
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"cannot call non-task symbol %q",
+					id.Name.Name,
+				),
+			)
 			return InvalidType
 		}
 	}
@@ -8534,20 +8755,41 @@ func (c *Checker) checkCallExpr(scope *Scope, e *ast.CallExpr) *Type {
 	if selector, ok := e.Callee.(*ast.SelectorExpr); ok {
 		if id, ok := selector.Left.(*ast.IdentExpr); ok {
 			pkgSym := scope.Lookup(id.Name.Name)
-			if pkgSym != nil && pkgSym.Kind == SymbolPackage {
-				return c.checkPackageCall(pkgSym, selector, argTypes, argSpans, e.Span())
+			if pkgSym != nil &&
+				pkgSym.Kind == SymbolPackage {
+				return c.checkPackageCall(
+					pkgSym,
+					selector,
+					argTypes,
+					argSpans,
+					e.Span(),
+				)
 			}
 		}
 	}
 
-	calleeType := c.checkExpr(scope, e.Callee)
+	calleeType := c.checkExpr(
+		scope,
+		e.Callee,
+	)
 
 	if calleeType.Kind != TypeTask {
-		c.diags.Add(e.Callee.Span(), fmt.Sprintf("cannot call non-task type %s", calleeType.String()))
+		c.diags.Add(
+			e.Callee.Span(),
+			fmt.Sprintf(
+				"cannot call non-task type %s",
+				calleeType.String(),
+			),
+		)
 		return InvalidType
 	}
 
-	return c.checkTaskTypeCall(calleeType, argTypes, argSpans, e.Span())
+	return c.checkTaskTypeCall(
+		calleeType,
+		argTypes,
+		argSpans,
+		e.Span(),
+	)
 }
 
 func (c *Checker) checkNoArgVoidPrimitive(name string, args []ast.Expr, argTypes []*Type, span source.Span) *Type {
@@ -9066,25 +9308,143 @@ func (c *Checker) checkGenericIntrinsicCall(
 	}
 }
 
-func (c *Checker) checkSizeCall(args []ast.Expr, argTypes []*Type, span source.Span) *Type {
-	if len(argTypes) != 1 {
-		c.diags.Add(span, fmt.Sprintf("size expects 1 argument, got %d", len(argTypes)))
+func (c *Checker) checkSizeCall(
+	scope *Scope,
+	args []ast.Expr,
+	span source.Span,
+) *Type {
+	if len(args) != 1 {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"size expects 1 argument, got %d",
+				len(args),
+			),
+		)
+
+		/*
+			Check additional arguments normally so independent diagnostics,
+			such as undefined symbols, are still reported.
+		*/
+		for _, arg := range args {
+			c.checkExpr(
+				scope,
+				arg,
+			)
+		}
+
 		return UintType
 	}
 
-	t := argTypes[0]
-	if t == nil || t.Kind == TypeInvalid {
+	arg := args[0]
+
+	/*
+		First try to interpret the argument syntactically as a type.
+
+		This supports:
+
+		    size(T)
+		    size(int)
+		    size(_Slot<T>)
+		    size(lists.Array<int>)
+		    size(*Node)
+
+		Identifier expressions are intentionally considered type expressions
+		only when they resolve to SymbolType. This preserves size(value) for
+		ordinary variables.
+	*/
+	var typ *Type
+
+	switch e := arg.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(
+			e.Name.Name,
+		)
+
+		if sym != nil &&
+			sym.Kind == SymbolType {
+			typ = sym.Type
+		}
+
+	case *ast.SelectorExpr:
+		typeAst := typeAstFromExpr(e)
+
+		if typeAst != nil {
+			/*
+				Only treat a selector as a type when its leading identifier
+				names a package and the selected package member is a type.
+				Otherwise it remains an ordinary value selector.
+			*/
+			if packageIdent, ok :=
+				e.Left.(*ast.IdentExpr); ok {
+				packageSymbol := scope.Lookup(
+					packageIdent.Name.Name,
+				)
+
+				if packageSymbol != nil &&
+					packageSymbol.Kind ==
+						SymbolPackage &&
+					packageSymbol.Package != nil {
+					member :=
+						packageSymbol.Package.Symbols[e.Name.Name]
+
+					if member != nil &&
+						member.Kind == SymbolType {
+						typ = c.typeFromAst(
+							scope,
+							typeAst,
+						)
+					}
+				}
+			}
+		}
+
+	case *ast.GenericExpr:
+		typeAst := typeAstFromExpr(e)
+
+		if typeAst == nil {
+			c.diags.Add(
+				e.Span(),
+				"size generic argument must form a valid instantiated type",
+			)
+			return UintType
+		}
+
+		typ = c.typeFromAst(
+			scope,
+			typeAst,
+		)
+	}
+
+	/*
+		If it was not syntactically and semantically recognized as a type,
+		treat it as an ordinary value expression.
+	*/
+	if typ == nil {
+		typ = c.checkExpr(
+			scope,
+			arg,
+		)
+	}
+
+	if typ == nil ||
+		typ.Kind == TypeInvalid {
 		return UintType
 	}
 
-	switch t.Kind {
+	switch typ.Kind {
 	case TypeVoid,
 		TypeNil,
 		TypePackage,
 		TypeTask,
 		TypeEnumLiteral:
-		c.diags.Add(args[0].Span(), fmt.Sprintf("size does not support %s", t.String()))
-		return UintType
+		c.diags.Add(
+			arg.Span(),
+			fmt.Sprintf(
+				"size does not support %s",
+				typ.String(),
+			),
+		)
 	}
 
 	return UintType

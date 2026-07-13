@@ -2,6 +2,7 @@ package cgen
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -800,7 +801,9 @@ func checkerGenericArgumentToAst(
 			}
 		}
 
-		if _, err := strconv.ParseInt(arg.Key, 0, 64); err == nil {
+		if _, ok := parseSealIntegerLiteralForCGen(
+			arg.Key,
+		); ok {
 			return ast.GenericArg{
 				Kind: ast.GenericArgExpr,
 				Expr: &ast.IntLitExpr{
@@ -846,6 +849,74 @@ func checkerGenericArgumentToAst(
 			Name: ast.Ident{Name: arg.Key},
 		},
 	}
+}
+
+func parseSealIntegerLiteralForCGen(
+	value string,
+) (*big.Int, bool) {
+	normalized := strings.ReplaceAll(
+		strings.TrimSpace(value),
+		"_",
+		"",
+	)
+
+	if normalized == "" {
+		return nil, false
+	}
+
+	sign := 1
+
+	switch normalized[0] {
+	case '+':
+		normalized = normalized[1:]
+
+	case '-':
+		sign = -1
+		normalized = normalized[1:]
+	}
+
+	if normalized == "" {
+		return nil, false
+	}
+
+	base := 10
+	digits := normalized
+
+	if len(normalized) >= 2 &&
+		normalized[0] == '0' {
+		switch normalized[1] {
+		case 'x', 'X':
+			base = 16
+			digits = normalized[2:]
+
+		case 'b', 'B':
+			base = 2
+			digits = normalized[2:]
+
+		case 'o', 'O':
+			base = 8
+			digits = normalized[2:]
+		}
+	}
+
+	if digits == "" {
+		return nil, false
+	}
+
+	result := new(big.Int)
+
+	if _, ok := result.SetString(
+		digits,
+		base,
+	); !ok {
+		return nil, false
+	}
+
+	if sign < 0 {
+		result.Neg(result)
+	}
+
+	return result, true
 }
 
 func (g *Generator) semanticTaskSelection(
@@ -15503,8 +15574,45 @@ func genericValueArgCName(arg ast.GenericArg) string {
 	return "invalid"
 }
 
-func normalizeCIntegerLiteral(value string) string {
-	return strings.ReplaceAll(value, "_", "")
+func normalizeCIntegerLiteral(
+	value string,
+) string {
+	integer, ok := parseSealIntegerLiteralForCGen(
+		value,
+	)
+	if !ok {
+		// The checker should already have diagnosed malformed literals.
+		// Removing separators still gives the C compiler a useful fallback
+		// rather than emitting Seal-specific underscore syntax.
+		return strings.ReplaceAll(
+			value,
+			"_",
+			"",
+		)
+	}
+
+	// Values representable by int64 can be emitted as ordinary decimal C
+	// constants. Decimal emission also prevents literals such as 0123 from
+	// being interpreted as legacy C octal.
+	if integer.IsInt64() {
+		return integer.String()
+	}
+
+	// The checker guarantees that accepted positive integer constants fit
+	// their destination type. Values above INT64_MAX but within u64 require
+	// an explicitly unsigned 64-bit C constant.
+	if integer.Sign() >= 0 &&
+		integer.BitLen() <= 64 {
+		return fmt.Sprintf(
+			"UINT64_C(%s)",
+			integer.String(),
+		)
+	}
+
+	// This path should only be reached after an earlier checker diagnostic.
+	// Keep the exact decimal value in the generated output so the backend
+	// does not silently truncate or wrap it.
+	return integer.String()
 }
 
 func exprCName(expr ast.Expr) string {

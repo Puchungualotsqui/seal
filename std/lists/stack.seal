@@ -1,0 +1,101 @@
+/*
+Stack provides last-in, first-out behavior.
+
+Its storage is owned by the embedded DynamicArray.
+*/
+Stack :: struct <T type> {
+    _values DynamicArray<T>
+}
+
+NewStack :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Stack<T> {
+    return Stack<T>{
+        _values = NewDynamicArrayEmpty<T>(
+            allocator,
+            deallocator,
+        ),
+    }
+}
+
+StackWithCapacity :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    capacity uint,
+) Stack<T> {
+    return Stack<T>{
+        _values = DynamicArrayWithCapacity<T>(
+            allocator,
+            deallocator,
+            capacity,
+        ),
+    }
+}
+
+StackWithStaticCapacity :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Stack<T> {
+    return Stack<T>{
+        _values =
+            DynamicArrayWithStaticCapacity<T, N>(
+                allocator,
+                deallocator,
+            ),
+    }
+}
+
+StackLength :: pure task <T type>(
+    stack *Stack<T>,
+) uint {
+    return stack._values._length
+}
+
+StackIsEmpty :: pure task <T type>(
+    stack *Stack<T>,
+) bool {
+    return stack._values._length == 0
+}
+
+Push :: task <T type>(
+    stack *Stack<T>,
+    value T,
+) {
+    Append<T>(
+        &stack._values,
+        value,
+    )
+}
+
+StackPop :: task <T type>(
+    stack *Stack<T>,
+) T, bool {
+    return Pop<T>(
+        &stack._values,
+    )
+}
+
+Peek :: pure task <T type>(
+    stack *Stack<T>,
+) T {
+    if stack._values._length == 0 {
+        panic("lists.Peek: empty stack")
+    }
+
+    return _ReadSlot<T>(
+        stack._values._data,
+        stack._values._length - 1,
+    )
+}
+
+DestroyStack :: task <T type>(
+    stack *Stack<T>,
+) {
+    DestroyDynamicArray<T>(
+        &stack._values,
+    )
+}

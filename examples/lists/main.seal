@@ -1,0 +1,1604 @@
+TestSlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        4,
+        0,
+    )
+
+    defer lists.DestroyArray<int>(
+        &values,
+    )
+
+    values[0] = 10
+    values[1] = 20
+    values[2] = 30
+    values[3] = 40
+
+    slice := lists.ArraySlice<int>(
+        &values,
+    )
+
+    assert(len(slice) == 4)
+
+    assert(slice[0] == 10)
+    assert(slice[1] == 20)
+    assert(slice[-1] == 40)
+    assert(slice[-2] == 30)
+
+    slice[1] = 25
+
+    assert(slice[1] == 25)
+    assert(values[1] == 25)
+
+    middle := lists.SliceRange<int>(
+        &slice,
+        1,
+        3,
+    )
+
+    assert(len(middle) == 2)
+    assert(middle[0] == 25)
+    assert(middle[1] == 30)
+
+    middle[0] = 26
+
+    assert(middle[0] == 26)
+    assert(values[1] == 26)
+
+    tail := lists.SliceRange<int>(
+        &slice,
+        -2,
+        cast<int>(len(slice)),
+    )
+
+    assert(len(tail) == 2)
+    assert(tail[0] == 30)
+    assert(tail[1] == 40)
+
+    empty := lists.SliceRange<int>(
+        &slice,
+        2,
+        2,
+    )
+
+    assert(len(empty) == 0)
+}
+
+TestRuntimeArray :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    zeroAllocator := cast<mem.ZeroAllocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.ArrayWithLength<int>(
+        zeroAllocator,
+        deallocator,
+        5,
+    )
+
+    defer lists.DestroyArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 5)
+
+    assert(values[0] == 0)
+    assert(values[1] == 0)
+    assert(values[-1] == 0)
+
+    values[0] = 11
+    values[2] = 33
+    values[-1] = 55
+
+    assert(values[0] == 11)
+    assert(values[2] == 33)
+    assert(values[4] == 55)
+    assert(values[-1] == 55)
+
+    filled := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        4,
+        7,
+    )
+
+    defer lists.DestroyArray<int>(
+        &filled,
+    )
+
+    assert(len(filled) == 4)
+    assert(filled[0] == 7)
+    assert(filled[1] == 7)
+    assert(filled[2] == 7)
+    assert(filled[3] == 7)
+
+    filled[2] = 100
+
+    assert(filled[2] == 100)
+}
+
+TestArrayFromSlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    source := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        3,
+        0,
+    )
+
+    defer lists.DestroyArray<int>(
+        &source,
+    )
+
+    source[0] = 10
+    source[1] = 20
+    source[2] = 30
+
+    sourceSlice := lists.ArraySlice<int>(
+        &source,
+    )
+
+    copied := lists.ArrayFromSlice<int>(
+        allocator,
+        deallocator,
+        sourceSlice,
+    )
+
+    defer lists.DestroyArray<int>(
+        &copied,
+    )
+
+    assert(len(copied) == 3)
+    assert(copied[0] == 10)
+    assert(copied[1] == 20)
+    assert(copied[2] == 30)
+
+    copied[0] = 999
+
+    assert(copied[0] == 999)
+    assert(source[0] == 10)
+}
+
+TestEmptyArray :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewArrayEmpty<int>(
+        deallocator,
+    )
+
+    assert(len(values) == 0)
+
+    lists.DestroyArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 0)
+}
+
+TestStaticArray :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    zeroAllocator := cast<mem.ZeroAllocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    zeroed :=
+        lists.NewStaticArrayZeroed<int, 5>(
+            zeroAllocator,
+            deallocator,
+        )
+
+    defer lists.DestroyStaticArray<int, 5>(
+        &zeroed,
+    )
+
+    assert(len(zeroed) == 5)
+
+    assert(zeroed[0] == 0)
+    assert(zeroed[4] == 0)
+    assert(zeroed[-1] == 0)
+
+    zeroed[0] = 5
+    zeroed[4] = 25
+
+    assert(zeroed[0] == 5)
+    assert(zeroed[-1] == 25)
+
+    filled :=
+        lists.NewStaticArrayFilled<int, 4>(
+            allocator,
+            deallocator,
+            9,
+        )
+
+    defer lists.DestroyStaticArray<int, 4>(
+        &filled,
+    )
+
+    assert(len(filled) == 4)
+
+    assert(filled[0] == 9)
+    assert(filled[1] == 9)
+    assert(filled[2] == 9)
+    assert(filled[3] == 9)
+
+    filled[1] = 18
+
+    assert(filled[1] == 18)
+
+    slice := lists.StaticArraySlice<int, 4>(
+        &filled,
+    )
+
+    assert(len(slice) == 4)
+    assert(slice[1] == 18)
+
+    slice[2] = 27
+
+    assert(filled[2] == 27)
+}
+
+TestDynamicArrayEmpty :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 0)
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 0,
+    )
+
+    lists.Append<int>(
+        &values,
+        10,
+    )
+
+    assert(len(values) == 1)
+    assert(values[0] == 10)
+
+    lists.Append<int>(
+        &values,
+        20,
+    )
+
+    lists.Append<int>(
+        &values,
+        30,
+    )
+
+    lists.Append<int>(
+        &values,
+        40,
+    )
+
+    assert(len(values) == 4)
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 30)
+    assert(values[3] == 40)
+    assert(values[-1] == 40)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) >= len(values),
+    )
+}
+
+TestDynamicArrayCapacityConstructors :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeCapacity :=
+        lists.DynamicArrayWithCapacity<int>(
+            allocator,
+            deallocator,
+            8,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &runtimeCapacity,
+    )
+
+    assert(len(runtimeCapacity) == 0)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &runtimeCapacity,
+        ) == 8,
+    )
+
+    staticCapacity :=
+        lists.DynamicArrayWithStaticCapacity<
+            int,
+            12,
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &staticCapacity,
+    )
+
+    assert(len(staticCapacity) == 0)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &staticCapacity,
+        ) == 12,
+    )
+}
+
+TestDynamicArrayLengthConstructors :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    zeroAllocator := cast<mem.ZeroAllocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeLength :=
+        lists.DynamicArrayWithLength<int>(
+            zeroAllocator,
+            allocator,
+            deallocator,
+            5,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &runtimeLength,
+    )
+
+    assert(len(runtimeLength) == 5)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &runtimeLength,
+        ) == 5,
+    )
+
+    assert(runtimeLength[0] == 0)
+    assert(runtimeLength[-1] == 0)
+
+    runtimeLength[2] = 50
+
+    assert(runtimeLength[2] == 50)
+
+    staticLength :=
+        lists.DynamicArrayWithStaticLength<
+            int,
+            4,
+        >(
+            zeroAllocator,
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &staticLength,
+    )
+
+    assert(len(staticLength) == 4)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &staticLength,
+        ) == 4,
+    )
+
+    assert(staticLength[0] == 0)
+    assert(staticLength[3] == 0)
+}
+
+TestDynamicArrayFilled :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeFilled :=
+        lists.DynamicArrayFilled<int>(
+            allocator,
+            deallocator,
+            5,
+            12,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &runtimeFilled,
+    )
+
+    assert(len(runtimeFilled) == 5)
+
+    assert(runtimeFilled[0] == 12)
+    assert(runtimeFilled[1] == 12)
+    assert(runtimeFilled[2] == 12)
+    assert(runtimeFilled[3] == 12)
+    assert(runtimeFilled[4] == 12)
+
+    staticFilled :=
+        lists.DynamicArrayStaticFilled<
+            int,
+            3,
+        >(
+            allocator,
+            deallocator,
+            21,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &staticFilled,
+    )
+
+    assert(len(staticFilled) == 3)
+
+    assert(staticFilled[0] == 21)
+    assert(staticFilled[1] == 21)
+    assert(staticFilled[2] == 21)
+}
+
+TestDynamicArrayReserve :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 1)
+    lists.Append<int>(&values, 2)
+    lists.Append<int>(&values, 3)
+
+    lists.ReserveDynamicArray<int>(
+        &values,
+        20,
+    )
+
+    assert(len(values) == 3)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 20,
+    )
+
+    assert(values[0] == 1)
+    assert(values[1] == 2)
+    assert(values[2] == 3)
+
+    lists.ReserveDynamicArray<int>(
+        &values,
+        5,
+    )
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 20,
+    )
+}
+
+TestDynamicArrayInsert :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 10)
+    lists.Append<int>(&values, 30)
+    lists.Append<int>(&values, 40)
+
+    lists.Insert<int>(
+        &values,
+        1,
+        20,
+    )
+
+    assert(len(values) == 4)
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 30)
+    assert(values[3] == 40)
+
+    lists.Insert<int>(
+        &values,
+        0,
+        5,
+    )
+
+    assert(len(values) == 5)
+
+    assert(values[0] == 5)
+    assert(values[1] == 10)
+
+    lists.Insert<int>(
+        &values,
+        cast<int>(len(values)),
+        50,
+    )
+
+    assert(len(values) == 6)
+    assert(values[-1] == 50)
+
+    lists.Insert<int>(
+        &values,
+        -1,
+        45,
+    )
+
+    assert(len(values) == 7)
+
+    assert(values[5] == 45)
+    assert(values[6] == 50)
+}
+
+TestDynamicArrayRemove :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 10)
+    lists.Append<int>(&values, 20)
+    lists.Append<int>(&values, 30)
+    lists.Append<int>(&values, 40)
+    lists.Append<int>(&values, 50)
+
+    removedMiddle := lists.Remove<int>(
+        &values,
+        2,
+    )
+
+    assert(removedMiddle == 30)
+    assert(len(values) == 4)
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 40)
+    assert(values[3] == 50)
+
+    removedFirst := lists.Remove<int>(
+        &values,
+        0,
+    )
+
+    assert(removedFirst == 10)
+    assert(len(values) == 3)
+    assert(values[0] == 20)
+
+    removedLast := lists.Remove<int>(
+        &values,
+        -1,
+    )
+
+    assert(removedLast == 50)
+    assert(len(values) == 2)
+
+    assert(values[0] == 20)
+    assert(values[1] == 40)
+}
+
+TestDynamicArrayPop :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    emptyValue, foundEmpty := lists.Pop<int>(
+        &values,
+    )
+
+    assert(!foundEmpty)
+    assert(emptyValue == 0)
+
+    lists.Append<int>(&values, 10)
+    lists.Append<int>(&values, 20)
+    lists.Append<int>(&values, 30)
+
+    third, foundThird := lists.Pop<int>(
+        &values,
+    )
+
+    assert(foundThird)
+    assert(third == 30)
+    assert(len(values) == 2)
+
+    second, foundSecond := lists.Pop<int>(
+        &values,
+    )
+
+    assert(foundSecond)
+    assert(second == 20)
+    assert(len(values) == 1)
+
+    first, foundFirst := lists.Pop<int>(
+        &values,
+    )
+
+    assert(foundFirst)
+    assert(first == 10)
+    assert(len(values) == 0)
+}
+
+TestDynamicArrayFromSlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    source := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        4,
+        0,
+    )
+
+    defer lists.DestroyArray<int>(
+        &source,
+    )
+
+    source[0] = 2
+    source[1] = 4
+    source[2] = 6
+    source[3] = 8
+
+    sourceSlice := lists.ArraySlice<int>(
+        &source,
+    )
+
+    values := lists.DynamicArrayFromSlice<int>(
+        allocator,
+        deallocator,
+        sourceSlice,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 4)
+
+    assert(values[0] == 2)
+    assert(values[1] == 4)
+    assert(values[2] == 6)
+    assert(values[3] == 8)
+
+    values[0] = 100
+
+    assert(source[0] == 2)
+    assert(values[0] == 100)
+}
+
+TestDynamicArrayAppendSlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    destination :=
+        lists.NewDynamicArrayEmpty<int>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &destination,
+    )
+
+    lists.Append<int>(&destination, 1)
+    lists.Append<int>(&destination, 2)
+
+    source := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        3,
+        0,
+    )
+
+    defer lists.DestroyArray<int>(
+        &source,
+    )
+
+    source[0] = 3
+    source[1] = 4
+    source[2] = 5
+
+    sourceSlice := lists.ArraySlice<int>(
+        &source,
+    )
+
+    lists.AppendSlice<int>(
+        &destination,
+        sourceSlice,
+    )
+
+    assert(len(destination) == 5)
+
+    assert(destination[0] == 1)
+    assert(destination[1] == 2)
+    assert(destination[2] == 3)
+    assert(destination[3] == 4)
+    assert(destination[4] == 5)
+}
+
+TestDynamicArrayClear :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.DynamicArrayWithCapacity<int>(
+            allocator,
+            deallocator,
+            8,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 1)
+    lists.Append<int>(&values, 2)
+    lists.Append<int>(&values, 3)
+
+    originalCapacity :=
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        )
+
+    lists.Clear<int>(
+        &values,
+    )
+
+    assert(len(values) == 0)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == originalCapacity,
+    )
+
+    lists.Append<int>(
+        &values,
+        100,
+    )
+
+    assert(len(values) == 1)
+    assert(values[0] == 100)
+}
+
+TestDynamicArraySlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.NewDynamicArrayEmpty<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 10)
+    lists.Append<int>(&values, 20)
+    lists.Append<int>(&values, 30)
+
+    slice := lists.DynamicArraySlice<int>(
+        &values,
+    )
+
+    assert(len(slice) == 3)
+    assert(slice[0] == 10)
+    assert(slice[1] == 20)
+    assert(slice[2] == 30)
+
+    slice[1] = 200
+
+    assert(slice[1] == 200)
+    assert(values[1] == 200)
+}
+
+TestStack :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    stack := lists.NewStack<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyStack<int>(
+        &stack,
+    )
+
+    assert(len(stack) == 0)
+    assert(lists.StackIsEmpty<int>(&stack))
+
+    lists.Push<int>(&stack, 10)
+    lists.Push<int>(&stack, 20)
+    lists.Push<int>(&stack, 30)
+
+    assert(len(stack) == 3)
+    assert(!lists.StackIsEmpty<int>(&stack))
+    assert(lists.Peek<int>(&stack) == 30)
+
+    third, foundThird := lists.StackPop<int>(
+        &stack,
+    )
+
+    assert(foundThird)
+    assert(third == 30)
+    assert(lists.Peek<int>(&stack) == 20)
+
+    second, foundSecond := lists.StackPop<int>(
+        &stack,
+    )
+
+    assert(foundSecond)
+    assert(second == 20)
+
+    first, foundFirst := lists.StackPop<int>(
+        &stack,
+    )
+
+    assert(foundFirst)
+    assert(first == 10)
+
+    _, foundEmpty := lists.StackPop<int>(
+        &stack,
+    )
+
+    assert(!foundEmpty)
+    assert(lists.StackIsEmpty<int>(&stack))
+}
+
+TestStackCapacityConstructors :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeStack := lists.StackWithCapacity<int>(
+        allocator,
+        deallocator,
+        10,
+    )
+
+    defer lists.DestroyStack<int>(
+        &runtimeStack,
+    )
+
+    assert(len(runtimeStack) == 0)
+
+    staticStack :=
+        lists.StackWithStaticCapacity<int, 12>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyStack<int>(
+        &staticStack,
+    )
+
+    assert(len(staticStack) == 0)
+
+    lists.Push<int>(
+        &staticStack,
+        42,
+    )
+
+    assert(lists.Peek<int>(&staticStack) == 42)
+}
+
+TestDequeBasic :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    deque := lists.NewDeque<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    assert(len(deque) == 0)
+    assert(lists.DequeIsEmpty<int>(&deque))
+
+    lists.PushBack<int>(&deque, 20)
+    lists.PushBack<int>(&deque, 30)
+    lists.PushFront<int>(&deque, 10)
+
+    assert(len(deque) == 3)
+    assert(!lists.DequeIsEmpty<int>(&deque))
+
+    assert(lists.Front<int>(&deque) == 10)
+    assert(lists.Back<int>(&deque) == 30)
+
+    assert(deque[0] == 10)
+    assert(deque[1] == 20)
+    assert(deque[2] == 30)
+    assert(deque[-1] == 30)
+
+    deque[1] = 25
+
+    assert(deque[1] == 25)
+
+    front, foundFront := lists.PopFront<int>(
+        &deque,
+    )
+
+    assert(foundFront)
+    assert(front == 10)
+
+    back, foundBack := lists.PopBack<int>(
+        &deque,
+    )
+
+    assert(foundBack)
+    assert(back == 30)
+
+    assert(len(deque) == 1)
+    assert(lists.Front<int>(&deque) == 25)
+    assert(lists.Back<int>(&deque) == 25)
+
+    remaining, foundRemaining :=
+        lists.PopFront<int>(
+            &deque,
+        )
+
+    assert(foundRemaining)
+    assert(remaining == 25)
+    assert(len(deque) == 0)
+
+    _, foundEmptyFront :=
+        lists.PopFront<int>(
+            &deque,
+        )
+
+    assert(!foundEmptyFront)
+
+    _, foundEmptyBack :=
+        lists.PopBack<int>(
+            &deque,
+        )
+
+    assert(!foundEmptyBack)
+}
+
+TestDequeWrappingAndGrowth :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    deque := lists.DequeWithCapacity<int>(
+        allocator,
+        deallocator,
+        4,
+    )
+
+    defer lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    lists.PushBack<int>(&deque, 1)
+    lists.PushBack<int>(&deque, 2)
+    lists.PushBack<int>(&deque, 3)
+    lists.PushBack<int>(&deque, 4)
+
+    first, foundFirst := lists.PopFront<int>(
+        &deque,
+    )
+
+    assert(foundFirst)
+    assert(first == 1)
+
+    second, foundSecond := lists.PopFront<int>(
+        &deque,
+    )
+
+    assert(foundSecond)
+    assert(second == 2)
+
+    lists.PushBack<int>(&deque, 5)
+    lists.PushBack<int>(&deque, 6)
+
+    assert(len(deque) == 4)
+
+    assert(deque[0] == 3)
+    assert(deque[1] == 4)
+    assert(deque[2] == 5)
+    assert(deque[3] == 6)
+
+    /*
+    This append forces growth while the logical contents wrap around
+    the end of the original circular allocation.
+    */
+    lists.PushBack<int>(&deque, 7)
+
+    assert(len(deque) == 5)
+
+    assert(deque[0] == 3)
+    assert(deque[1] == 4)
+    assert(deque[2] == 5)
+    assert(deque[3] == 6)
+    assert(deque[4] == 7)
+
+    lists.PushFront<int>(&deque, 2)
+
+    assert(len(deque) == 6)
+    assert(deque[0] == 2)
+    assert(deque[1] == 3)
+    assert(deque[-1] == 7)
+}
+
+TestDequeCapacityConstructors :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeDeque :=
+        lists.DequeWithCapacity<int>(
+            allocator,
+            deallocator,
+            10,
+        )
+
+    defer lists.DestroyDeque<int>(
+        &runtimeDeque,
+    )
+
+    assert(len(runtimeDeque) == 0)
+
+    assert(
+        lists.DequeCapacity<int>(
+            &runtimeDeque,
+        ) == 10,
+    )
+
+    staticDeque :=
+        lists.DequeWithStaticCapacity<int, 12>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDeque<int>(
+        &staticDeque,
+    )
+
+    assert(len(staticDeque) == 0)
+
+    assert(
+        lists.DequeCapacity<int>(
+            &staticDeque,
+        ) == 12,
+    )
+}
+
+TestDequeClear :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    deque := lists.DequeWithCapacity<int>(
+        allocator,
+        deallocator,
+        8,
+    )
+
+    defer lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    lists.PushBack<int>(&deque, 1)
+    lists.PushBack<int>(&deque, 2)
+    lists.PushFront<int>(&deque, 0)
+
+    originalCapacity := lists.DequeCapacity<int>(
+        &deque,
+    )
+
+    lists.ClearDeque<int>(
+        &deque,
+    )
+
+    assert(len(deque) == 0)
+    assert(lists.DequeIsEmpty<int>(&deque))
+
+    assert(
+        lists.DequeCapacity<int>(
+            &deque,
+        ) == originalCapacity,
+    )
+
+    lists.PushBack<int>(&deque, 100)
+
+    assert(len(deque) == 1)
+    assert(lists.Front<int>(&deque) == 100)
+}
+
+TestQueue :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    queue := lists.NewQueue<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyQueue<int>(
+        &queue,
+    )
+
+    assert(len(queue) == 0)
+    assert(lists.QueueIsEmpty<int>(&queue))
+
+    lists.Enqueue<int>(&queue, 10)
+    lists.Enqueue<int>(&queue, 20)
+    lists.Enqueue<int>(&queue, 30)
+
+    assert(len(queue) == 3)
+    assert(!lists.QueueIsEmpty<int>(&queue))
+    assert(lists.QueueFront<int>(&queue) == 10)
+
+    first, foundFirst := lists.Dequeue<int>(
+        &queue,
+    )
+
+    assert(foundFirst)
+    assert(first == 10)
+
+    second, foundSecond := lists.Dequeue<int>(
+        &queue,
+    )
+
+    assert(foundSecond)
+    assert(second == 20)
+
+    third, foundThird := lists.Dequeue<int>(
+        &queue,
+    )
+
+    assert(foundThird)
+    assert(third == 30)
+
+    _, foundEmpty := lists.Dequeue<int>(
+        &queue,
+    )
+
+    assert(!foundEmpty)
+    assert(lists.QueueIsEmpty<int>(&queue))
+}
+
+TestQueueCapacityConstructors :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    runtimeQueue :=
+        lists.QueueWithCapacity<int>(
+            allocator,
+            deallocator,
+            8,
+        )
+
+    defer lists.DestroyQueue<int>(
+        &runtimeQueue,
+    )
+
+    assert(len(runtimeQueue) == 0)
+
+    staticQueue :=
+        lists.QueueWithStaticCapacity<int, 10>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyQueue<int>(
+        &staticQueue,
+    )
+
+    assert(len(staticQueue) == 0)
+
+    lists.Enqueue<int>(
+        &staticQueue,
+        55,
+    )
+
+    assert(
+        lists.QueueFront<int>(
+            &staticQueue,
+        ) == 55,
+    )
+}
+
+TestStructElements :: task() {
+    Point :: struct {
+        X int
+        Y int
+    }
+
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.NewDynamicArrayEmpty<Point>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<Point>(
+        &values,
+    )
+
+    lists.Append<Point>(
+        &values,
+        Point{
+            X = 10,
+            Y = 20,
+        },
+    )
+
+    lists.Append<Point>(
+        &values,
+        Point{
+            X = 30,
+            Y = 40,
+        },
+    )
+
+    assert(len(values) == 2)
+
+    first := values[0]
+    second := values[1]
+
+    assert(first.X == 10)
+    assert(first.Y == 20)
+
+    assert(second.X == 30)
+    assert(second.Y == 40)
+
+    values[1] = Point{
+        X = 50,
+        Y = 60,
+    }
+
+    changed := values[1]
+
+    assert(changed.X == 50)
+    assert(changed.Y == 60)
+}
+
+TestDestroyTwice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.NewDynamicArrayEmpty<int>(
+            allocator,
+            deallocator,
+        )
+
+    lists.Append<int>(
+        &values,
+        10,
+    )
+
+    lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 0)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 0,
+    )
+
+    lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    assert(len(values) == 0)
+
+    array := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        3,
+        5,
+    )
+
+    lists.DestroyArray<int>(
+        &array,
+    )
+
+    assert(len(array) == 0)
+
+    lists.DestroyArray<int>(
+        &array,
+    )
+
+    assert(len(array) == 0)
+
+    deque := lists.NewDeque<int>(
+        allocator,
+        deallocator,
+    )
+
+    lists.PushBack<int>(
+        &deque,
+        1,
+    )
+
+    lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    assert(len(deque) == 0)
+
+    lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    assert(len(deque) == 0)
+}
+
+Main :: task() {
+    TestSlice()
+
+    TestRuntimeArray()
+    TestArrayFromSlice()
+    TestEmptyArray()
+    TestStaticArray()
+
+    TestDynamicArrayEmpty()
+    TestDynamicArrayCapacityConstructors()
+    TestDynamicArrayLengthConstructors()
+    TestDynamicArrayFilled()
+    TestDynamicArrayReserve()
+    TestDynamicArrayInsert()
+    TestDynamicArrayRemove()
+    TestDynamicArrayPop()
+    TestDynamicArrayFromSlice()
+    TestDynamicArrayAppendSlice()
+    TestDynamicArrayClear()
+    TestDynamicArraySlice()
+
+    TestStack()
+    TestStackCapacityConstructors()
+
+    TestDequeBasic()
+    TestDequeWrappingAndGrowth()
+    TestDequeCapacityConstructors()
+    TestDequeClear()
+
+    TestQueue()
+    TestQueueCapacityConstructors()
+
+    TestStructElements()
+    TestDestroyTwice()
+}

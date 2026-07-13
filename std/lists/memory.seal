@@ -1,0 +1,169 @@
+/*
+_ByteCount calculates storage required for count elements.
+
+It panics if the multiplication overflows.
+*/
+_ByteCount :: task <T type>(
+    count uint,
+) uint {
+    elementSize := size(T)
+
+    if count == 0 ||
+        elementSize == 0 {
+        return 0
+    }
+
+    byteCount := count * elementSize
+
+    if byteCount / count != elementSize {
+        panic("lists: allocation size overflow")
+    }
+
+    return byteCount
+}
+
+/*
+_GrowCapacity applies the standard geometric growth rule:
+
+    max(requiredCapacity, oldCapacity * 2)
+*/
+_GrowCapacity :: task(
+    oldCapacity uint,
+    requiredCapacity uint,
+) uint {
+    if requiredCapacity <= oldCapacity {
+        return oldCapacity
+    }
+
+    if oldCapacity == 0 {
+        return requiredCapacity
+    }
+
+    doubled := oldCapacity * 2
+
+    if doubled / 2 != oldCapacity {
+        return requiredCapacity
+    }
+
+    if doubled < requiredCapacity {
+        return requiredCapacity
+    }
+
+    return doubled
+}
+
+/*
+_NormalizeIndex normalizes an existing-element index.
+
+Negative indexes are interpreted relative to length.
+*/
+_NormalizeIndex :: task(
+    index int,
+    length uint,
+) uint {
+    normalized := index
+    signedLength := cast<int>(length)
+
+    if normalized < 0 {
+        normalized += signedLength
+    }
+
+    if normalized < 0 ||
+        normalized >= signedLength {
+        panic("lists: index out of bounds")
+    }
+
+    return cast<uint>(normalized)
+}
+
+/*
+_NormalizeInsertIndex normalizes an insertion boundary.
+
+The resulting index may equal length.
+*/
+_NormalizeInsertIndex :: task(
+    index int,
+    length uint,
+) uint {
+    normalized := index
+    signedLength := cast<int>(length)
+
+    if normalized < 0 {
+        normalized += signedLength
+    }
+
+    if normalized < 0 ||
+        normalized > signedLength {
+        panic("lists: insertion index out of bounds")
+    }
+
+    return cast<uint>(normalized)
+}
+
+/*
+_Allocate allocates storage for count elements.
+
+A zero count produces nil storage without reporting allocation failure.
+*/
+_Allocate :: task <T type>(
+    allocator mem.Allocator,
+    count uint,
+) rawptr {
+    if count == 0 {
+        return nil
+    }
+
+    byteCount := _ByteCount<T>(count)
+
+    data := mem.AllocWith(
+        allocator,
+        byteCount,
+    )
+
+    if data == nil {
+        panic("lists: allocation failed")
+    }
+
+    return data
+}
+
+/*
+_AllocateZeroed allocates zero-filled storage for count elements.
+*/
+_AllocateZeroed :: task <T type>(
+    allocator mem.ZeroAllocator,
+    count uint,
+) rawptr {
+    if count == 0 {
+        return nil
+    }
+
+    data := mem.AllocZeroedWith(
+        allocator,
+        count,
+        size(T),
+    )
+
+    if data == nil {
+        panic("lists: allocation failed")
+    }
+
+    return data
+}
+
+/*
+_DestroyStorage releases an allocation and safely accepts nil.
+*/
+_DestroyStorage :: task(
+    deallocator mem.Deallocator,
+    data rawptr,
+) {
+    if data == nil {
+        return
+    }
+
+    mem.FreeWith(
+        deallocator,
+        data,
+    )
+}

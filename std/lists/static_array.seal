@@ -1,0 +1,150 @@
+/*
+StaticArray owns fixed-length allocator-backed storage.
+
+N is part of the type but does not imply inline or stack element
+storage.
+*/
+StaticArray :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    _data rawptr
+    _deallocator mem.Deallocator
+}
+
+/*
+NewStaticArrayZeroed creates a zero-filled StaticArray.
+*/
+NewStaticArrayZeroed :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.ZeroAllocator,
+    deallocator mem.Deallocator,
+) StaticArray<T, N> {
+    length := cast<uint>(N)
+
+    data := _AllocateZeroed<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    return StaticArray<T, N>{
+        _data = data,
+        _deallocator = deallocator,
+    }
+}
+
+/*
+NewStaticArrayFilled fills all N elements with shallow copies of value.
+*/
+NewStaticArrayFilled :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value T,
+) StaticArray<T, N> {
+    length := cast<uint>(N)
+
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        length,
+    )
+
+    index: uint = 0
+
+    for index < length {
+        _WriteSlot<T>(
+            data,
+            index,
+            value,
+        )
+
+        index += 1
+    }
+
+    return StaticArray<T, N>{
+        _data = data,
+        _deallocator = deallocator,
+    }
+}
+
+NewStaticArray :: overload {
+    NewStaticArrayZeroed
+    NewStaticArrayFilled
+}
+
+StaticArrayLength :: pure task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+) uint {
+    return cast<uint>(N)
+}
+
+StaticArrayAt :: pure task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index int,
+) T {
+    normalized := _NormalizeIndex(
+        index,
+        cast<uint>(N),
+    )
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    )
+}
+
+StaticArraySet :: task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index int,
+    value T,
+) {
+    normalized := _NormalizeIndex(
+        index,
+        cast<uint>(N),
+    )
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+}
+
+StaticArraySlice :: task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+) Slice<T> {
+    return Slice<T>{
+        _data = values._data,
+        _length = cast<uint>(N),
+    }
+}
+
+DestroyStaticArray :: task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+) {
+    _DestroyStorage(
+        values._deallocator,
+        values._data,
+    )
+
+    values._data = nil
+}

@@ -1,0 +1,413 @@
+/*
+Deque is a growable circular double-ended queue.
+
+Copying a Deque performs a shallow ownership copy and must be avoided.
+*/
+Deque :: struct <T type> {
+    _data rawptr
+    _length uint
+    _capacity uint
+    _head uint
+
+    _allocator mem.Allocator
+    _deallocator mem.Deallocator
+}
+
+NewDeque :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Deque<T> {
+    return Deque<T>{
+        _data = nil,
+        _length = 0,
+        _capacity = 0,
+        _head = 0,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+DequeWithCapacity :: task <T type>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    capacity uint,
+) Deque<T> {
+    data := _Allocate<_Slot<T>>(
+        allocator,
+        capacity,
+    )
+
+    return Deque<T>{
+        _data = data,
+        _length = 0,
+        _capacity = capacity,
+        _head = 0,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+DequeWithStaticCapacity :: task <
+    T type,
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Deque<T> {
+    return DequeWithCapacity<T>(
+        allocator,
+        deallocator,
+        cast<uint>(N),
+    )
+}
+
+DequeLength :: pure task <T type>(
+    deque *Deque<T>,
+) uint {
+    return deque._length
+}
+
+DequeCapacity :: pure task <T type>(
+    deque *Deque<T>,
+) uint {
+    return deque._capacity
+}
+
+DequeIsEmpty :: pure task <T type>(
+    deque *Deque<T>,
+) bool {
+    return deque._length == 0
+}
+
+/*
+_DequePhysicalIndex maps a logical index to its circular slot.
+*/
+_DequePhysicalIndex :: task <T type>(
+    deque *Deque<T>,
+    logicalIndex uint,
+) uint {
+    if deque._capacity == 0 {
+        panic("lists: deque has no storage")
+    }
+
+    return (
+        deque._head +
+        logicalIndex
+    ) % deque._capacity
+}
+
+/*
+_ReserveDeque reorders existing elements into contiguous storage.
+*/
+_ReserveDeque :: task <T type>(
+    deque *Deque<T>,
+    requiredCapacity uint,
+) {
+    if requiredCapacity <= deque._capacity {
+        return
+    }
+
+    newData := _Allocate<_Slot<T>>(
+        deque._allocator,
+        requiredCapacity,
+    )
+
+    logicalIndex: uint = 0
+
+    for logicalIndex < deque._length {
+        physicalIndex := _DequePhysicalIndex<T>(
+            deque,
+            logicalIndex,
+        )
+
+        source := cast<rawptr>(
+            _SlotPointer<T>(
+                deque._data,
+                physicalIndex,
+            ),
+        )
+
+        destination := cast<rawptr>(
+            _SlotPointer<T>(
+                newData,
+                logicalIndex,
+            ),
+        )
+
+        mem.MemcpyC(
+            destination,
+            source,
+            size(_Slot<T>),
+        )
+
+        logicalIndex += 1
+    }
+
+    _DestroyStorage(
+        deque._deallocator,
+        deque._data,
+    )
+
+    deque._data = newData
+    deque._capacity = requiredCapacity
+    deque._head = 0
+}
+
+_GrowDeque :: task <T type>(
+    deque *Deque<T>,
+    requiredLength uint,
+) {
+    if requiredLength <= deque._capacity {
+        return
+    }
+
+    newCapacity := _GrowCapacity(
+        deque._capacity,
+        requiredLength,
+    )
+
+    _ReserveDeque<T>(
+        deque,
+        newCapacity,
+    )
+}
+
+PushBack :: task <T type>(
+    deque *Deque<T>,
+    value T,
+) {
+    requiredLength := deque._length + 1
+
+    if requiredLength <= deque._length {
+        panic("lists.PushBack: length overflow")
+    }
+
+    _GrowDeque<T>(
+        deque,
+        requiredLength,
+    )
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        deque._length,
+    )
+
+    _WriteSlot<T>(
+        deque._data,
+        physicalIndex,
+        value,
+    )
+
+    deque._length = requiredLength
+}
+
+PushFront :: task <T type>(
+    deque *Deque<T>,
+    value T,
+) {
+    requiredLength := deque._length + 1
+
+    if requiredLength <= deque._length {
+        panic("lists.PushFront: length overflow")
+    }
+
+    _GrowDeque<T>(
+        deque,
+        requiredLength,
+    )
+
+    if deque._head == 0 {
+        deque._head = deque._capacity - 1
+    } else {
+        deque._head -= 1
+    }
+
+    _WriteSlot<T>(
+        deque._data,
+        deque._head,
+        value,
+    )
+
+    deque._length = requiredLength
+}
+
+PopFront :: task <T type>(
+    deque *Deque<T>,
+) T, bool {
+    if deque._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    result := _ReadSlot<T>(
+        deque._data,
+        deque._head,
+    )
+
+    _ZeroSlots<T>(
+        deque._data,
+        deque._head,
+        1,
+    )
+
+    deque._length -= 1
+
+    if deque._length == 0 {
+        deque._head = 0
+    } else {
+        deque._head =
+            (deque._head + 1) %
+            deque._capacity
+    }
+
+    return result, true
+}
+
+PopBack :: task <T type>(
+    deque *Deque<T>,
+) T, bool {
+    if deque._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        deque._length - 1,
+    )
+
+    result := _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    )
+
+    _ZeroSlots<T>(
+        deque._data,
+        physicalIndex,
+        1,
+    )
+
+    deque._length -= 1
+
+    if deque._length == 0 {
+        deque._head = 0
+    }
+
+    return result, true
+}
+
+Front :: pure task <T type>(
+    deque *Deque<T>,
+) T {
+    if deque._length == 0 {
+        panic("lists.Front: empty deque")
+    }
+
+    return _ReadSlot<T>(
+        deque._data,
+        deque._head,
+    )
+}
+
+Back :: pure task <T type>(
+    deque *Deque<T>,
+) T {
+    if deque._length == 0 {
+        panic("lists.Back: empty deque")
+    }
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        deque._length - 1,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    )
+}
+
+DequeAt :: pure task <T type>(
+    deque *Deque<T>,
+    index int,
+) T {
+    logicalIndex := _NormalizeIndex(
+        index,
+        deque._length,
+    )
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        logicalIndex,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    )
+}
+
+DequeSet :: task <T type>(
+    deque *Deque<T>,
+    index int,
+    value T,
+) {
+    logicalIndex := _NormalizeIndex(
+        index,
+        deque._length,
+    )
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        logicalIndex,
+    )
+
+    _WriteSlot<T>(
+        deque._data,
+        physicalIndex,
+        value,
+    )
+}
+
+/*
+ClearDeque removes all logical elements while retaining capacity.
+*/
+ClearDeque :: task <T type>(
+    deque *Deque<T>,
+) {
+    logicalIndex: uint = 0
+
+    for logicalIndex < deque._length {
+        physicalIndex := _DequePhysicalIndex<T>(
+            deque,
+            logicalIndex,
+        )
+
+        _ZeroSlots<T>(
+            deque._data,
+            physicalIndex,
+            1,
+        )
+
+        logicalIndex += 1
+    }
+
+    deque._length = 0
+    deque._head = 0
+}
+
+DestroyDeque :: task <T type>(
+    deque *Deque<T>,
+) {
+    _DestroyStorage(
+        deque._deallocator,
+        deque._data,
+    )
+
+    deque._data = nil
+    deque._length = 0
+    deque._capacity = 0
+    deque._head = 0
+}
