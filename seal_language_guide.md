@@ -1306,6 +1306,8 @@ for i := 0; i < 100; i += 1 {
 }
 ```
 
+break and continue only affect for loops. Internally are goto to avoid C collisions with switch statements.
+
 ### 16.4 `switch`
 
 Seal has specialized switch forms for unions and `any`, covered later.

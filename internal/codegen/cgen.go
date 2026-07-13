@@ -772,7 +772,7 @@ func checkerGenericArgumentToAst(
 		}
 
 		value := arg.Key
-		if _, err := strconv.Unquote(value); err != nil {
+		if _, err := unquoteSealLiteral(value); err != nil {
 			value = strconv.Quote(value)
 		}
 
@@ -809,7 +809,7 @@ func checkerGenericArgumentToAst(
 			}
 		}
 
-		if _, err := strconv.Unquote(arg.Key); err == nil {
+		if _, err := unquoteSealLiteral(arg.Key); err == nil {
 			return ast.GenericArg{
 				Kind: ast.GenericArgExpr,
 				Expr: &ast.StringLitExpr{
@@ -9156,7 +9156,9 @@ func (g *Generator) emitBuiltinTextBinaryExpr(
 func (g *Generator) emitStringLiteral(
 	e *ast.StringLitExpr,
 ) string {
-	value, err := strconv.Unquote(e.Value)
+	value, err := unquoteSealLiteral(
+		e.Value,
+	)
 	if err != nil {
 		g.error(
 			e.Span(),
@@ -9188,12 +9190,18 @@ func (g *Generator) emitStringLiteral(
 func (g *Generator) emitCStringLiteral(
 	e *ast.CStringLitExpr,
 ) string {
-	raw := strings.TrimPrefix(
-		e.Value,
-		"c",
-	)
+	if len(e.Value) < 2 ||
+		e.Value[0] != 'c' {
+		g.error(
+			e.Span(),
+			"invalid cstring literal",
+		)
+		return `""`
+	}
 
-	value, err := strconv.Unquote(raw)
+	value, err := unquoteSealLiteral(
+		e.Value[1:],
+	)
 	if err != nil {
 		g.error(
 			e.Span(),
@@ -9230,7 +9238,9 @@ func (g *Generator) emitCStringLiteral(
 func (g *Generator) emitCharLiteral(
 	e *ast.CharLitExpr,
 ) string {
-	value, err := strconv.Unquote(e.Value)
+	value, err := unquoteSealLiteral(
+		e.Value,
+	)
 	if err != nil {
 		g.error(
 			e.Span(),
@@ -15738,6 +15748,65 @@ func (g *Generator) linef(format string, args ...any) {
 
 func (g *Generator) error(span source.Span, message string) {
 	g.diags.Add(span, message)
+}
+
+func normalizeSealQuotedLiteral(
+	literal string,
+) string {
+	var out strings.Builder
+	out.Grow(len(literal))
+
+	for i := 0; i < len(literal); {
+		if literal[i] != '\\' {
+			out.WriteByte(literal[i])
+			i++
+			continue
+		}
+
+		// Leave a trailing backslash unchanged. strconv.Unquote will report
+		// the appropriate malformed-literal diagnostic.
+		if i+1 >= len(literal) {
+			out.WriteByte(literal[i])
+			i++
+			continue
+		}
+
+		next := literal[i+1]
+
+		// Go does not accept the short escape \0. Seal does.
+		//
+		// Preserve longer octal escapes such as \000, but translate a short
+		// \0 into Go's equivalent fixed-width hexadecimal escape.
+		if next == '0' {
+			hasFollowingOctalDigit :=
+				i+2 < len(literal) &&
+					literal[i+2] >= '0' &&
+					literal[i+2] <= '7'
+
+			if !hasFollowingOctalDigit {
+				out.WriteString(`\x00`)
+				i += 2
+				continue
+			}
+		}
+
+		// Copy the complete escape pair. In particular, this ensures that
+		// "\\0" remains an escaped backslash followed by the character '0',
+		// rather than being interpreted as a null byte.
+		out.WriteByte(literal[i])
+		out.WriteByte(literal[i+1])
+		i += 2
+	}
+
+	return out.String()
+}
+
+func unquoteSealLiteral(
+	literal string,
+) (string, error) {
+	return strconv.Unquote(
+		normalizeSealQuotedLiteral(literal),
+	)
 }
 
 func quoteCByteString(value string) string {
