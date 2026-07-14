@@ -510,32 +510,85 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, `#include "stdlib.h"`) {
-		t.Fatalf("expected stdlib include, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		`#include "stdlib.h"`,
+	) {
+		t.Fatalf(
+			"expected stdlib include, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "void * malloc(uintptr_t size);") {
-		t.Fatalf("expected malloc prototype, got:\n%s", out)
+	// stdlib.h is authoritative for malloc and free. CGen must not emit
+	// Seal-derived declarations that could conflict with the platform ABI.
+	if strings.Contains(
+		out,
+		"void * malloc(uintptr_t size);",
+	) {
+		t.Fatalf(
+			"header-backed extern malloc must not be redeclared, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "void free(void * ptr);") {
-		t.Fatalf("expected free prototype, got:\n%s", out)
+	if strings.Contains(
+		out,
+		"void free(void * ptr);",
+	) {
+		t.Fatalf(
+			"header-backed extern free must not be redeclared, got:\n%s",
+			out,
+		)
 	}
 
-	if strings.Contains(out, "void * malloc(uintptr_t size) {") {
-		t.Fatalf("extern malloc should not emit body, got:\n%s", out)
+	if strings.Contains(
+		out,
+		"void * malloc(uintptr_t size) {",
+	) {
+		t.Fatalf(
+			"extern malloc must not emit a function body, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "void * ptr = malloc(64);") {
-		t.Fatalf("expected malloc call, got:\n%s", out)
+	if strings.Contains(
+		out,
+		"void free(void * ptr) {",
+	) {
+		t.Fatalf(
+			"extern free must not emit a function body, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "free(ptr);") {
-		t.Fatalf("expected free call, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		"void * ptr = malloc(64);",
+	) {
+		t.Fatalf(
+			"expected malloc call, got:\n%s",
+			out,
+		)
 	}
+
+	if !strings.Contains(
+		out,
+		"free(ptr);",
+	) {
+		t.Fatalf(
+			"expected free call, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateExternVariadicPrintf(t *testing.T) {
@@ -552,20 +605,56 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
-	if !strings.Contains(out, `#include "stdio.h"`) {
-		t.Fatalf("expected stdio include, got:\n%s", out)
+	if !strings.Contains(
+		out,
+		`#include "stdio.h"`,
+	) {
+		t.Fatalf(
+			"expected stdio include, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, "intptr_t printf(const char * format, ...);") {
-		t.Fatalf("expected printf variadic prototype, got:\n%s", out)
+	// stdio.h declares printf using the platform C ABI. Seal's `int` lowers
+	// to intptr_t, which is not necessarily C's int, so emitting this
+	// redeclaration would be incorrect.
+	if strings.Contains(
+		out,
+		"intptr_t printf(const char * format, ...);",
+	) {
+		t.Fatalf(
+			"header-backed extern printf must not be redeclared, got:\n%s",
+			out,
+		)
 	}
 
-	if !strings.Contains(out, `printf("%d %s", 10, "hello");`) {
-		t.Fatalf("expected printf call, got:\n%s", out)
+	if strings.Contains(
+		out,
+		"intptr_t printf(const char * format, ...) {",
+	) {
+		t.Fatalf(
+			"extern printf must not emit a function body, got:\n%s",
+			out,
+		)
 	}
+
+	if !strings.Contains(
+		out,
+		`printf("%d %s", 10, "hello");`,
+	) {
+		t.Fatalf(
+			"expected printf call, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenerateSealVariadicInt(t *testing.T) {

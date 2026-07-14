@@ -1773,6 +1773,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.line("#include <stdint.h>")
 	g.line("#include <stddef.h>")
 	g.line("#include <stdio.h>")
+	g.line("#include <string.h>")
 	g.line("#include <assert.h>")
 	g.line("")
 	g.line("#ifndef NULL")
@@ -4141,44 +4142,167 @@ func (g *Generator) isLocalValueName(name string) bool {
 	return ok
 }
 
-func (g *Generator) cTypeFromSizeArg(expr ast.Expr) (CType, bool) {
-	id, ok := expr.(*ast.IdentExpr)
-	if !ok {
+func (g *Generator) cTypeFromSizeArg(
+	expr ast.Expr,
+) (CType, bool) {
+	if expr == nil {
 		return CInvalid, false
 	}
 
-	name := id.Name.Name
+	// A local identifier is always a runtime value, even when its name could
+	// otherwise be interpreted as a type name.
+	if id, ok := expr.(*ast.IdentExpr); ok {
+		name := id.Name.Name
 
-	if g.isLocalValueName(name) {
-		return CInvalid, false
-	}
+		if g.isLocalValueName(name) {
+			return CInvalid, false
+		}
 
-	if g.genericSubst != nil {
-		if arg, ok := g.genericSubst[name]; ok {
-			switch arg.Kind {
-			case ast.GenericArgType:
-				return g.cTypeFromAstWithGenericArgs(arg.Type, g.genericSubst), true
+		// Generic type parameter:
+		//
+		//     size(T)
+		//
+		// Resolve T through the active monomorphization substitution.
+		if g.genericSubst != nil {
+			if arg, exists := g.genericSubst[name]; exists {
+				switch arg.Kind {
+				case ast.GenericArgType:
+					typ := g.cTypeFromAstWithGenericArgs(
+						arg.Type,
+						g.genericSubst,
+					)
 
-			case ast.GenericArgExpr:
-				if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
-					ct := g.cTypeFromAstWithGenericArgs(typ, g.genericSubst)
-					if ct.SealName != "<invalid>" {
-						return ct, true
+					if typ.SealName != "" &&
+						typ.SealName != CInvalid.SealName {
+						return typ, true
+					}
+
+				case ast.GenericArgExpr:
+					if typeAst :=
+						typeAstFromExprForCGen(
+							arg.Expr,
+						); typeAst != nil {
+						typ :=
+							g.cTypeFromAstWithGenericArgs(
+								typeAst,
+								g.genericSubst,
+							)
+
+						if typ.SealName != "" &&
+							typ.SealName != CInvalid.SealName {
+							return typ, true
+						}
 					}
 				}
 			}
 		}
+
+		// Normal non-generic type:
+		//
+		//     size(int)
+		//     size(MyStruct)
+		if isBuiltinTypeName(name) ||
+			g.distincts[name] != nil ||
+			g.structs[name] != nil ||
+			g.enums[name] != nil ||
+			g.unions[name] != nil ||
+			g.interfaces[name] != nil {
+			typ := g.cTypeFromAstInContext(
+				&ast.NamedType{
+					Parts: []ast.Ident{id.Name},
+					Loc:   id.Span(),
+				},
+			)
+
+			if typ.SealName != "" &&
+				typ.SealName != CInvalid.SealName {
+				return typ, true
+			}
+		}
+
+		// An unqualified type inside imported generic code can belong to the
+		// package currently stored in typeContextPackage.
+		if g.typeContextPackage != "" {
+			if pkg := g.typePackageInfo(
+				g.typeContextPackage,
+			); pkg != nil &&
+				g.packageHasType(pkg, name) {
+				typ := g.cTypeFromAstInContext(
+					&ast.NamedType{
+						Parts: []ast.Ident{id.Name},
+						Loc:   id.Span(),
+					},
+				)
+
+				if typ.SealName != "" &&
+					typ.SealName != CInvalid.SealName {
+					return typ, true
+				}
+			}
+		}
+
+		return CInvalid, false
 	}
 
-	if isBuiltinTypeName(name) ||
-		g.distincts[name] != nil ||
-		g.structs[name] != nil ||
-		g.enums[name] != nil ||
-		g.unions[name] != nil ||
-		g.interfaces[name] != nil {
-		return g.cTypeFromAst(&ast.NamedType{
-			Parts: []ast.Ident{id.Name},
-		}), true
+	// Generic type expression:
+	//
+	//     size(_Slot<T>)
+	//     size(Box<int>)
+	//     size(pkg.Box<T>)
+	//
+	// The parser represents these type-shaped arguments as GenericExpr when
+	// they occur inside an expression argument list. Convert the expression
+	// back to a type AST and resolve it under the current generic
+	// substitution.
+	if _, ok := expr.(*ast.GenericExpr); ok {
+		typeAst := typeAstFromExprForCGen(expr)
+		if typeAst == nil {
+			return CInvalid, false
+		}
+
+		typ := g.cTypeFromAstInContext(typeAst)
+
+		if typ.SealName == "" ||
+			typ.SealName == CInvalid.SealName {
+			return CInvalid, false
+		}
+
+		return typ, true
+	}
+
+	// Qualified non-generic type:
+	//
+	//     size(pkg.Type)
+	//
+	// Do not reinterpret arbitrary selectors such as value.Field as types.
+	if selector, ok := expr.(*ast.SelectorExpr); ok {
+		id, ok := selector.Left.(*ast.IdentExpr)
+		if !ok {
+			return CInvalid, false
+		}
+
+		pkg := g.typePackageInfo(id.Name.Name)
+		if pkg == nil ||
+			!g.packageHasType(
+				pkg,
+				selector.Name.Name,
+			) {
+			return CInvalid, false
+		}
+
+		typeAst := typeAstFromExprForCGen(expr)
+		if typeAst == nil {
+			return CInvalid, false
+		}
+
+		typ := g.cTypeFromAstInContext(typeAst)
+
+		if typ.SealName == "" ||
+			typ.SealName == CInvalid.SealName {
+			return CInvalid, false
+		}
+
+		return typ, true
 	}
 
 	return CInvalid, false
@@ -5613,11 +5737,23 @@ func (g *Generator) emitImportedTaskPrototypes() {
 		return
 	}
 
-	names := make([]string, 0, len(g.packages))
+	names := make(
+		[]string,
+		0,
+		len(g.packages),
+	)
+
 	for name := range g.packages {
-		names = append(names, name)
+		names = append(
+			names,
+			name,
+		)
 	}
+
 	sort.Strings(names)
+
+	emitted := false
+	seen := map[string]bool{}
 
 	for _, pkgName := range names {
 		pkg := g.packages[pkgName]
@@ -5625,23 +5761,62 @@ func (g *Generator) emitImportedTaskPrototypes() {
 			continue
 		}
 
-		taskNames := make([]string, 0, len(pkg.Tasks))
+		taskNames := make(
+			[]string,
+			0,
+			len(pkg.Tasks),
+		)
+
 		for taskName := range pkg.Tasks {
-			taskNames = append(taskNames, taskName)
+			taskNames = append(
+				taskNames,
+				taskName,
+			)
 		}
+
 		sort.Strings(taskNames)
 
 		for _, taskName := range taskNames {
 			info := pkg.Tasks[taskName]
-			if taskName == "Main" || info.IsIntrinsic || len(info.GenericParams) > 0 {
+
+			if taskName == "Main" ||
+				info.IsIntrinsic ||
+				len(info.GenericParams) > 0 {
 				continue
 			}
 
-			g.linef("%s;", g.packageTaskSignature(pkgName, taskName, info))
+			// Standard-library externs are declared by the runtime headers
+			// included at the top of every generated translation unit.
+			if cExternDeclaredByRuntimeHeaders(info) {
+				continue
+			}
+
+			signature := g.packageTaskSignature(
+				pkgName,
+				taskName,
+				info,
+			)
+
+			// The same PackageInfo may occasionally be reachable through more
+			// than one metadata-map key. Avoid duplicate C declarations.
+			if seen[signature] {
+				continue
+			}
+
+			seen[signature] = true
+
+			g.linef(
+				"%s;",
+				signature,
+			)
+
+			emitted = true
 		}
 	}
 
-	g.line("")
+	if emitted {
+		g.line("")
+	}
 }
 
 func (g *Generator) packageTaskSignature(
@@ -5779,10 +5954,16 @@ func (g *Generator) taskInfoInPackageContext(
 	return out
 }
 
-func (g *Generator) emitTaskPrototypes(file *ast.File) {
+func (g *Generator) emitTaskPrototypes(
+	file *ast.File,
+) {
+	emitted := false
+
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.TaskDecl)
-		if !ok || d.IsTest || d.IsIntrinsic {
+		if !ok ||
+			d.IsTest ||
+			d.IsIntrinsic {
 			continue
 		}
 
@@ -5790,10 +5971,31 @@ func (g *Generator) emitTaskPrototypes(file *ast.File) {
 			continue
 		}
 
-		g.linef("%s;", g.taskSignature(d, false))
+		info, exists := g.tasks[d.Name.Name]
+		if !exists {
+			continue
+		}
+
+		// Functions supplied by the C standard library must use the exact
+		// prototypes supplied by their headers. Seal's int/uint/rawptr types
+		// are source-level types and do not necessarily reproduce the exact C
+		// ABI declaration.
+		if cExternDeclaredByRuntimeHeaders(info) {
+			continue
+		}
+
+		g.linef(
+			"%s;",
+			g.taskSignature(
+				d,
+				false,
+			),
+		)
+
+		emitted = true
 	}
 
-	if len(g.tasks) > 0 {
+	if emitted {
 		g.line("")
 	}
 }
@@ -10453,6 +10655,34 @@ func (g *Generator) registerImportedGenericTaskInstance(
 		args,
 	)
 
+	// A workspace specialization request can qualify a task with the package
+	// currently being generated:
+	//
+	//     lists.SomeGenericTask<int>
+	//
+	// In that package, it is a local specialization rather than an imported
+	// one. Redirect it to genericTasks to avoid duplicate prototypes and
+	// definitions with the same generated C name.
+	if packageName == g.packageName {
+		localInfo, ok := g.tasks[taskName]
+
+		if ok &&
+			localInfo.Decl != nil &&
+			len(localInfo.GenericParams) > 0 {
+			return g.registerGenericTaskInstance(
+				localInfo.Decl,
+				args,
+			)
+		}
+
+		if info.Decl != nil {
+			return g.registerGenericTaskInstance(
+				info.Decl,
+				args,
+			)
+		}
+	}
+
 	// Keep the original arguments for type lowering in the calling package.
 	//
 	// For example, app sees:
@@ -10513,6 +10743,53 @@ func (g *Generator) registerImportedGenericTaskInstance(
 	)
 
 	return name
+}
+
+func cExternDeclaredByRuntimeHeaders(
+	info TaskInfo,
+) bool {
+	if !info.IsExtern {
+		return false
+	}
+
+	name := strings.TrimSpace(
+		info.ExternName,
+	)
+
+	switch name {
+	// <stdlib.h>
+	case "malloc",
+		"calloc",
+		"realloc",
+		"free",
+		"abort":
+		return true
+
+	// <string.h>
+	case "memcpy",
+		"memmove",
+		"memcmp",
+		"memset",
+		"strlen",
+		"strcmp",
+		"strncmp",
+		"strcpy",
+		"strncpy":
+		return true
+
+	// <stdio.h>
+	case "printf",
+		"fprintf",
+		"sprintf",
+		"snprintf",
+		"puts",
+		"fputs",
+		"fwrite",
+		"fputc":
+		return true
+	}
+
+	return false
 }
 
 func (g *Generator) specializedImportedTaskCName(packageName string, taskName string, info TaskInfo, args []ast.GenericArg) string {
@@ -15783,6 +16060,30 @@ func (g *Generator) registerImportedGenericStructInstance(
 		decl.GenericParams,
 		args,
 	)
+
+	// A package-qualified type may still refer to the package currently being
+	// generated. This commonly happens with whole-workspace specialization
+	// requests:
+	//
+	//     lists._Slot<int>
+	//
+	// while generating package lists.
+	//
+	// Registering that specialization as imported would place the same C type
+	// in both genericStructs and importedGenericStructs, causing duplicate
+	// typedef definitions.
+	if packageName == g.packageName {
+		localDecl := g.structs[typeName]
+
+		if localDecl == nil {
+			localDecl = decl
+		}
+
+		return g.registerGenericStructInstance(
+			localDecl,
+			args,
+		)
+	}
 
 	// Preserve caller-local argument spelling for the representation emitted
 	// in the caller, but use package-qualified arguments for the owning
