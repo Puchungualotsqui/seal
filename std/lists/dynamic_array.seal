@@ -355,15 +355,31 @@ AppendSlice :: task <T type>(
         panic("lists.AppendSlice: length overflow")
     }
 
-    /*
-    The source may refer into values. Save whether it aliases before
-    growth, because growth can invalidate the old storage.
-    */
-    aliases := source._data == values._data
+    aliases := false
     sourceOffset: uint = 0
+    searchIndex: uint = 0
 
-    if aliases {
-        sourceOffset = 0
+    for searchIndex < values._length {
+        candidate := cast<rawptr>(
+            _SlotPointer<T>(
+                values._data,
+                searchIndex,
+            ),
+        )
+
+        if candidate == source._data {
+            aliases = true
+            sourceOffset = searchIndex
+            break
+        }
+
+        searchIndex += 1
+    }
+
+    if aliases &&
+        sourceOffset + source._length >
+            values._length {
+        panic("lists.AppendSlice: invalid aliased slice")
     }
 
     oldLength := values._length
@@ -566,7 +582,7 @@ Clear :: task <T type>(
 /*
 DynamicArraySlice returns a borrowed view over initialized elements.
 */
-DynamicArraySlice :: task <T type>(
+DynamicArraySlice :: pure task <T type>(
     values *DynamicArray<T>,
 ) Slice<T> {
     return Slice<T>{

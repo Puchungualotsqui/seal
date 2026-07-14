@@ -33,7 +33,7 @@ SliceFromRaw :: task <T type>(
 /*
 SliceData returns the borrowed raw storage pointer.
 */
-SliceData :: task <T type>(
+SliceData :: pure task <T type>(
     values *Slice<T>,
 ) rawptr {
     return values._data
@@ -91,7 +91,7 @@ SliceRange returns a borrowed sub-slice containing [start, end).
 
 Negative boundaries are interpreted relative to the slice length.
 */
-SliceRange :: task <T type>(
+SliceRange :: pure task <T type>(
     values *Slice<T>,
     start int,
     end int,

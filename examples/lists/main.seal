@@ -1426,6 +1426,24 @@ Point :: struct {
         Y int
     }
 
+PointHash :: pure task(
+    value Point,
+) uint {
+    /*
+    Using only X deliberately permits collisions between points with
+    the same X. The equality task still distinguishes the complete key.
+    */
+    return lists.HashInt(value.X)
+}
+
+PointEqual :: pure task(
+    left Point,
+    right Point,
+) bool {
+    return left.X == right.X &&
+        left.Y == right.Y
+}
+
 TestStructElements :: task() {
     cAllocator := mem.NewCAllocator()
 
@@ -1567,13 +1585,2125 @@ TestDestroyTwice :: task() {
     assert(len(deque) == 0)
 }
 
+TestCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.DynamicArrayFilled<int>(
+        allocator,
+        deallocator,
+        4,
+        10,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    values[1] = 20
+    values[2] = 30
+    values[3] = 40
+
+    first, foundFirst :=
+        lists.DynamicArrayGet<int>(
+            &values,
+            0,
+        )
+
+    assert(foundFirst)
+    assert(first == 10)
+
+    last, foundLast :=
+        lists.DynamicArrayGet<int>(
+            &values,
+            -1,
+        )
+
+    assert(foundLast)
+    assert(last == 40)
+
+    missingPositive, foundPositive :=
+        lists.DynamicArrayGet<int>(
+            &values,
+            10,
+        )
+
+    assert(!foundPositive)
+    assert(missingPositive == 0)
+
+    missingNegative, foundNegative :=
+        lists.DynamicArrayGet<int>(
+            &values,
+            -10,
+        )
+
+    assert(!foundNegative)
+    assert(missingNegative == 0)
+
+    overloaded, foundOverloaded :=
+        lists.Get<int>(
+            &values,
+            2,
+        )
+
+    assert(foundOverloaded)
+    assert(overloaded == 30)
+
+    unsafeValue :=
+        lists.DynamicArrayGetUnsafe<int>(
+            &values,
+            1,
+        )
+
+    assert(unsafeValue == 20)
+
+    overloadedUnsafe :=
+        lists.GetUnsafe<int>(
+            &values,
+            3,
+        )
+
+    assert(overloadedUnsafe == 40)
+
+    changed := lists.DynamicArrayTrySet<int>(
+        &values,
+        1,
+        25,
+    )
+
+    assert(changed)
+    assert(values[1] == 25)
+
+    changedNegative :=
+        lists.TrySet<int>(
+            &values,
+            -1,
+            45,
+        )
+
+    assert(changedNegative)
+    assert(values[3] == 45)
+
+    notChanged := lists.DynamicArrayTrySet<int>(
+        &values,
+        20,
+        100,
+    )
+
+    assert(!notChanged)
+    assert(len(values) == 4)
+
+    lists.DynamicArraySetUnsafe<int>(
+        &values,
+        0,
+        15,
+    )
+
+    assert(values[0] == 15)
+
+    lists.SetUnsafe<int>(
+        &values,
+        2,
+        35,
+    )
+
+    assert(values[2] == 35)
+}
+
+TestSliceCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    array := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        3,
+        0,
+    )
+
+    defer lists.DestroyArray<int>(
+        &array,
+    )
+
+    array[0] = 5
+    array[1] = 10
+    array[2] = 15
+
+    slice := lists.ArraySlice<int>(
+        &array,
+    )
+
+    value, found := lists.SliceGet<int>(
+        &slice,
+        -1,
+    )
+
+    assert(found)
+    assert(value == 15)
+
+    _, missing := lists.SliceGet<int>(
+        &slice,
+        3,
+    )
+
+    assert(!missing)
+
+    changed := lists.SliceTrySet<int>(
+        &slice,
+        1,
+        11,
+    )
+
+    assert(changed)
+    assert(array[1] == 11)
+
+    notChanged := lists.SliceTrySet<int>(
+        &slice,
+        4,
+        100,
+    )
+
+    assert(!notChanged)
+
+    unsafeValue := lists.SliceGetUnsafe<int>(
+        &slice,
+        0,
+    )
+
+    assert(unsafeValue == 5)
+
+    lists.SliceSetUnsafe<int>(
+        &slice,
+        2,
+        16,
+    )
+
+    assert(array[2] == 16)
+}
+
+TestArrayCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.ArrayFilled<int>(
+        allocator,
+        deallocator,
+        3,
+        7,
+    )
+
+    defer lists.DestroyArray<int>(
+        &values,
+    )
+
+    value, found := lists.ArrayGet<int>(
+        &values,
+        -1,
+    )
+
+    assert(found)
+    assert(value == 7)
+
+    _, missing := lists.ArrayGet<int>(
+        &values,
+        3,
+    )
+
+    assert(!missing)
+
+    changed := lists.ArrayTrySet<int>(
+        &values,
+        1,
+        14,
+    )
+
+    assert(changed)
+    assert(values[1] == 14)
+
+    notChanged := lists.ArrayTrySet<int>(
+        &values,
+        -4,
+        100,
+    )
+
+    assert(!notChanged)
+
+    assert(
+        lists.ArrayGetUnsafe<int>(
+            &values,
+            1,
+        ) == 14,
+    )
+
+    lists.ArraySetUnsafe<int>(
+        &values,
+        2,
+        21,
+    )
+
+    assert(values[2] == 21)
+}
+
+TestStaticArrayCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.NewStaticArrayFilled<int, 3>(
+            allocator,
+            deallocator,
+            8,
+        )
+
+    defer lists.DestroyStaticArray<int, 3>(
+        &values,
+    )
+
+    value, found :=
+        lists.StaticArrayGet<int, 3>(
+            &values,
+            -1,
+        )
+
+    assert(found)
+    assert(value == 8)
+
+    _, missing :=
+        lists.StaticArrayGet<int, 3>(
+            &values,
+            3,
+        )
+
+    assert(!missing)
+
+    changed :=
+        lists.StaticArrayTrySet<int, 3>(
+            &values,
+            0,
+            16,
+        )
+
+    assert(changed)
+    assert(values[0] == 16)
+
+    notChanged :=
+        lists.StaticArrayTrySet<int, 3>(
+            &values,
+            5,
+            100,
+        )
+
+    assert(!notChanged)
+
+    assert(
+        lists.StaticArrayGetUnsafe<int, 3>(
+            &values,
+            0,
+        ) == 16,
+    )
+
+    lists.StaticArraySetUnsafe<int, 3>(
+        &values,
+        2,
+        24,
+    )
+
+    assert(values[2] == 24)
+}
+
+TestDequeCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    deque := lists.NewDeque<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyDeque<int>(
+        &deque,
+    )
+
+    emptyFront, foundEmptyFront :=
+        lists.DequeTryFront<int>(
+            &deque,
+        )
+
+    assert(!foundEmptyFront)
+    assert(emptyFront == 0)
+
+    emptyBack, foundEmptyBack :=
+        lists.DequeTryBack<int>(
+            &deque,
+        )
+
+    assert(!foundEmptyBack)
+    assert(emptyBack == 0)
+
+    lists.PushBack<int>(&deque, 10)
+    lists.PushBack<int>(&deque, 20)
+    lists.PushBack<int>(&deque, 30)
+
+    value, found := lists.DequeGet<int>(
+        &deque,
+        -1,
+    )
+
+    assert(found)
+    assert(value == 30)
+
+    _, missing := lists.DequeGet<int>(
+        &deque,
+        3,
+    )
+
+    assert(!missing)
+
+    changed := lists.DequeTrySet<int>(
+        &deque,
+        1,
+        25,
+    )
+
+    assert(changed)
+    assert(deque[1] == 25)
+
+    notChanged := lists.DequeTrySet<int>(
+        &deque,
+        4,
+        100,
+    )
+
+    assert(!notChanged)
+
+    assert(
+        lists.DequeGetUnsafe<int>(
+            &deque,
+            0,
+        ) == 10,
+    )
+
+    lists.DequeSetUnsafe<int>(
+        &deque,
+        2,
+        35,
+    )
+
+    assert(deque[2] == 35)
+
+    front, foundFront :=
+        lists.DequeTryFront<int>(
+            &deque,
+        )
+
+    assert(foundFront)
+    assert(front == 10)
+
+    back, foundBack :=
+        lists.DequeTryBack<int>(
+            &deque,
+        )
+
+    assert(foundBack)
+    assert(back == 35)
+
+    assert(
+        lists.DequeFrontUnsafe<int>(
+            &deque,
+        ) == 10,
+    )
+
+    assert(
+        lists.DequeBackUnsafe<int>(
+            &deque,
+        ) == 35,
+    )
+}
+
+TestStackAndQueueCheckedAccess :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    stack := lists.NewStack<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyStack<int>(
+        &stack,
+    )
+
+    emptyStackValue, foundEmptyStack :=
+        lists.StackTryPeek<int>(
+            &stack,
+        )
+
+    assert(!foundEmptyStack)
+    assert(emptyStackValue == 0)
+
+    lists.Push<int>(&stack, 10)
+    lists.Push<int>(&stack, 20)
+
+    stackValue, foundStack :=
+        lists.StackTryPeek<int>(
+            &stack,
+        )
+
+    assert(foundStack)
+    assert(stackValue == 20)
+
+    assert(
+        lists.StackPeekUnsafe<int>(
+            &stack,
+        ) == 20,
+    )
+
+    queue := lists.NewQueue<int>(
+        allocator,
+        deallocator,
+    )
+
+    defer lists.DestroyQueue<int>(
+        &queue,
+    )
+
+    emptyQueueValue, foundEmptyQueue :=
+        lists.QueueTryFront<int>(
+            &queue,
+        )
+
+    assert(!foundEmptyQueue)
+    assert(emptyQueueValue == 0)
+
+    lists.Enqueue<int>(&queue, 30)
+    lists.Enqueue<int>(&queue, 40)
+
+    queueValue, foundQueue :=
+        lists.QueueTryFront<int>(
+            &queue,
+        )
+
+    assert(foundQueue)
+    assert(queueValue == 30)
+
+    assert(
+        lists.QueueFrontUnsafe<int>(
+            &queue,
+        ) == 30,
+    )
+}
+
+TestDynamicArrayResize :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.DynamicArrayWithCapacity<int>(
+        allocator,
+        deallocator,
+        2,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 10)
+    lists.Append<int>(&values, 20)
+
+    lists.ResizeDynamicArray<int>(
+        &values,
+        5,
+    )
+
+    assert(len(values) == 5)
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 0)
+    assert(values[3] == 0)
+    assert(values[4] == 0)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) >= 5,
+    )
+
+    lists.Resize<int>(
+        &values,
+        7,
+        9,
+    )
+
+    assert(len(values) == 7)
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 0)
+    assert(values[3] == 0)
+    assert(values[4] == 0)
+    assert(values[5] == 9)
+    assert(values[6] == 9)
+
+    lists.Resize<int>(
+        &values,
+        3,
+    )
+
+    assert(len(values) == 3)
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 0)
+
+    previousCapacity :=
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        )
+
+    assert(previousCapacity >= 3)
+
+    lists.ShrinkDynamicArrayToFit<int>(
+        &values,
+    )
+
+    assert(len(values) == 3)
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 3,
+    )
+
+    assert(values[0] == 10)
+    assert(values[1] == 20)
+    assert(values[2] == 0)
+
+    lists.ResizeDynamicArray<int>(
+        &values,
+        0,
+    )
+
+    assert(len(values) == 0)
+
+    lists.ShrinkDynamicArrayToFit<int>(
+        &values,
+    )
+
+    assert(
+        lists.DynamicArrayCapacity<int>(
+            &values,
+        ) == 0,
+    )
+}
+
+TestDynamicArrayAliasedAppendSlice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values := lists.DynamicArrayWithCapacity<int>(
+        allocator,
+        deallocator,
+        4,
+    )
+
+    defer lists.DestroyDynamicArray<int>(
+        &values,
+    )
+
+    lists.Append<int>(&values, 1)
+    lists.Append<int>(&values, 2)
+    lists.Append<int>(&values, 3)
+    lists.Append<int>(&values, 4)
+
+    complete := lists.DynamicArraySlice<int>(
+        &values,
+    )
+
+    middle := lists.SliceRange<int>(
+        &complete,
+        1,
+        3,
+    )
+
+    /*
+    This forces growth while the source refers to the old allocation.
+    */
+    lists.AppendSlice<int>(
+        &values,
+        middle,
+    )
+
+    assert(len(values) == 6)
+
+    assert(values[0] == 1)
+    assert(values[1] == 2)
+    assert(values[2] == 3)
+    assert(values[3] == 4)
+    assert(values[4] == 2)
+    assert(values[5] == 3)
+}
+
+TestHashFunctions :: task() {
+    assert(
+        lists.HashString("Seal") ==
+        lists.HashString("Seal"),
+    )
+
+    assert(
+        lists.HashString("Seal") !=
+        lists.HashString("seal"),
+    )
+
+    assert(
+        lists.HashCString(c"Seal") ==
+        lists.HashCString(c"Seal"),
+    )
+
+    assert(lists.HashBool(false) == 0)
+    assert(lists.HashBool(true) == 1)
+
+    assert(
+        lists.EqualString(
+            "hello",
+            "hello",
+        ),
+    )
+
+    assert(
+        !lists.EqualString(
+            "hello",
+            "world",
+        ),
+    )
+
+    assert(
+        lists.EqualCString(
+            c"hello",
+            c"hello",
+        ),
+    )
+
+    assert(
+        lists.EqualInt(
+            10,
+            10,
+        ),
+    )
+
+    assert(
+        !lists.EqualInt(
+            10,
+            20,
+        ),
+    )
+}
+
+TestHashMapBasic :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    scores :=
+        lists.NewHashMapEmpty<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashMap<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &scores,
+    )
+
+    assert(
+        lists.HashMapLength<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+        ) == 0,
+    )
+
+    assert(
+        lists.HashMapIsEmpty<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+        ),
+    )
+
+    insertedAda :=
+        lists.HashMapPut<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+            100,
+        )
+
+    assert(insertedAda)
+
+    insertedGrace :=
+        lists.HashMapPut<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Grace",
+            95,
+        )
+
+    assert(insertedGrace)
+
+    insertedLinus :=
+        lists.HashMapInsert<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Linus",
+            90,
+        )
+
+    assert(insertedLinus)
+
+    assert(
+        lists.HashMapLength<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+        ) == 3,
+    )
+
+    assert(
+        !lists.HashMapIsEmpty<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+        ),
+    )
+
+    adaScore, foundAda :=
+        lists.HashMapGet<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+        )
+
+    assert(foundAda)
+    assert(adaScore == 100)
+
+    _, foundMissing :=
+        lists.HashMapGet<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Missing",
+        )
+
+    assert(!foundMissing)
+
+    assert(
+        lists.HashMapAt<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Grace",
+        ) == 95,
+    )
+
+    assert(
+        lists.HashMapGetUnsafe<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Linus",
+        ) == 90,
+    )
+
+    assert(
+        lists.HashMapContainsKey<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+        ),
+    )
+
+    assert(
+        !lists.HashMapContainsKey<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Unknown",
+        ),
+    )
+
+    replacedAda :=
+        lists.HashMapReplace<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+            101,
+        )
+
+    assert(replacedAda)
+
+    notReplaced :=
+        lists.HashMapReplace<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Unknown",
+            50,
+        )
+
+    assert(!notReplaced)
+
+    assert(
+        lists.HashMapAt<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+        ) == 101,
+    )
+
+    insertedDuplicate :=
+        lists.HashMapInsert<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+            500,
+        )
+
+    assert(!insertedDuplicate)
+
+    assert(
+        lists.HashMapAt<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+        ) == 101,
+    )
+
+    putExisting :=
+        lists.HashMapPut<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+            102,
+        )
+
+    assert(!putExisting)
+
+    assert(
+        lists.HashMapAt<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &scores,
+            "Ada",
+        ) == 102,
+    )
+}
+
+TestHashMapGrowthAndRemoval :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.HashMapWithCapacity<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            allocator,
+            deallocator,
+            2,
+        )
+
+    defer lists.DestroyHashMap<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+    )
+
+    index: int = 0
+
+    for index < 100 {
+        inserted :=
+            lists.HashMapPut<
+                int,
+                int,
+                lists.HashInt,
+                lists.EqualInt
+            >(
+                &values,
+                index,
+                index * 10,
+            )
+
+        assert(inserted)
+
+        index += 1
+    }
+
+    assert(
+        lists.HashMapLength<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ) == 100,
+    )
+
+    assert(
+        lists.HashMapCapacity<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ) >= 100,
+    )
+
+    checkIndex: int = 0
+
+    for checkIndex < 100 {
+        value, found :=
+            lists.HashMapGet<
+                int,
+                int,
+                lists.HashInt,
+                lists.EqualInt
+            >(
+                &values,
+                checkIndex,
+            )
+
+        assert(found)
+        assert(value == checkIndex * 10)
+
+        checkIndex += 1
+    }
+
+    removed, foundRemoved :=
+        lists.HashMapRemove<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+            50,
+        )
+
+    assert(foundRemoved)
+    assert(removed == 500)
+
+    _, foundAfterRemoval :=
+        lists.HashMapGet<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+            50,
+        )
+
+    assert(!foundAfterRemoval)
+
+    _, removedMissing :=
+        lists.HashMapRemove<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+            500,
+        )
+
+    assert(!removedMissing)
+
+    lists.HashMapPut<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+        50,
+        999,
+    )
+
+    assert(
+        lists.HashMapAt<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+            50,
+        ) == 999,
+    )
+
+    removedUnsafe :=
+        lists.HashMapRemoveUnsafe<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+            50,
+        )
+
+    assert(removedUnsafe == 999)
+
+    lists.ReserveHashMap<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+        300,
+    )
+
+    assert(
+        lists.HashMapCapacity<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ) >= 300,
+    )
+
+    lists.ShrinkHashMapToFit<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+    )
+
+    assert(
+        lists.HashMapCapacity<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ) >=
+        lists.HashMapLength<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ),
+    )
+}
+
+TestHashMapCollections :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.NewHashMapEmpty<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashMap<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+    )
+
+    lists.HashMapPut<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+        "one",
+        1,
+    )
+
+    lists.HashMapPut<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+        "two",
+        2,
+    )
+
+    lists.HashMapPut<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+        "three",
+        3,
+    )
+
+    keys :=
+        lists.HashMapKeys<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        )
+
+    defer lists.DestroyDynamicArray<string>(
+        &keys,
+    )
+
+    mapValues :=
+        lists.HashMapValues<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &mapValues,
+    )
+
+    items :=
+        lists.HashMapItems<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        )
+
+    defer lists.DestroyDynamicArray<
+        lists.KeyValue<string, int>
+    >(
+        &items,
+    )
+
+    assert(len(keys) == 3)
+    assert(len(mapValues) == 3)
+    assert(len(items) == 3)
+
+    foundOne := false
+    foundTwo := false
+    foundThree := false
+
+    keyIndex: int = 0
+
+    for keyIndex < cast<int>(len(keys)) {
+        key := keys[keyIndex]
+
+        if key == "one" {
+            foundOne = true
+        }
+
+        if key == "two" {
+            foundTwo = true
+        }
+
+        if key == "three" {
+            foundThree = true
+        }
+
+        keyIndex += 1
+    }
+
+    assert(foundOne)
+    assert(foundTwo)
+    assert(foundThree)
+
+    foundValueOne := false
+    foundValueTwo := false
+    foundValueThree := false
+
+    valueIndex: int = 0
+
+    for valueIndex <
+        cast<int>(len(mapValues)) {
+        value := mapValues[valueIndex]
+
+        if value == 1 {
+            foundValueOne = true
+        }
+
+        if value == 2 {
+            foundValueTwo = true
+        }
+
+        if value == 3 {
+            foundValueThree = true
+        }
+
+        valueIndex += 1
+    }
+
+    assert(foundValueOne)
+    assert(foundValueTwo)
+    assert(foundValueThree)
+
+    itemIndex: int = 0
+
+    for itemIndex < cast<int>(len(items)) {
+        item := items[itemIndex]
+
+        expected, found :=
+            lists.HashMapGet<
+                string,
+                int,
+                lists.HashString,
+                lists.EqualString
+            >(
+                &values,
+                item.Key,
+            )
+
+        assert(found)
+        assert(expected == item.Value)
+
+        itemIndex += 1
+    }
+
+    lists.ClearHashMap<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+    )
+
+    assert(
+        lists.HashMapLength<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        ) == 0,
+    )
+
+    assert(
+        lists.HashMapIsEmpty<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        ),
+    )
+}
+
+TestHashMapStaticCapacity :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.HashMapWithStaticCapacity<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString,
+            16
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashMap<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+    )
+
+    assert(
+        lists.HashMapCapacity<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+        ) >= 16,
+    )
+
+    lists.HashMapPut<
+        string,
+        int,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &values,
+        "Seal",
+        1,
+    )
+
+    assert(
+        lists.HashMapAt<
+            string,
+            int,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &values,
+            "Seal",
+        ) == 1,
+    )
+}
+
+TestHashMapCustomKeyAndCollisions :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    points :=
+        lists.NewHashMapEmpty<
+            Point,
+            string,
+            PointHash,
+            PointEqual
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashMap<
+        Point,
+        string,
+        PointHash,
+        PointEqual
+    >(
+        &points,
+    )
+
+    first := Point{
+        X = 10,
+        Y = 20,
+    }
+
+    collision := Point{
+        X = 10,
+        Y = 30,
+    }
+
+    other := Point{
+        X = 40,
+        Y = 50,
+    }
+
+    lists.HashMapPut<
+        Point,
+        string,
+        PointHash,
+        PointEqual
+    >(
+        &points,
+        first,
+        "first",
+    )
+
+    lists.HashMapPut<
+        Point,
+        string,
+        PointHash,
+        PointEqual
+    >(
+        &points,
+        collision,
+        "collision",
+    )
+
+    lists.HashMapPut<
+        Point,
+        string,
+        PointHash,
+        PointEqual
+    >(
+        &points,
+        other,
+        "other",
+    )
+
+    assert(
+        lists.HashMapAt<
+            Point,
+            string,
+            PointHash,
+            PointEqual
+        >(
+            &points,
+            first,
+        ) == "first",
+    )
+
+    assert(
+        lists.HashMapAt<
+            Point,
+            string,
+            PointHash,
+            PointEqual
+        >(
+            &points,
+            collision,
+        ) == "collision",
+    )
+
+    assert(
+        lists.HashMapAt<
+            Point,
+            string,
+            PointHash,
+            PointEqual
+        >(
+            &points,
+            other,
+        ) == "other",
+    )
+
+    assert(
+        lists.HashMapLength<
+            Point,
+            string,
+            PointHash,
+            PointEqual
+        >(
+            &points,
+        ) == 3,
+    )
+}
+
+TestHashSetBasic :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    names :=
+        lists.NewHashSetEmpty<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashSet<
+        string,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &names,
+    )
+
+    assert(
+        lists.HashSetIsEmpty<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+        ),
+    )
+
+    insertedAda :=
+        lists.HashSetAdd<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        )
+
+    assert(insertedAda)
+
+    insertedGrace :=
+        lists.HashSetAdd<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Grace",
+        )
+
+    assert(insertedGrace)
+
+    insertedDuplicate :=
+        lists.HashSetAdd<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        )
+
+    assert(!insertedDuplicate)
+
+    assert(
+        lists.HashSetLength<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+        ) == 2,
+    )
+
+    assert(
+        lists.HashSetContains<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        ),
+    )
+
+    assert(
+        !lists.HashSetContains<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Linus",
+        ),
+    )
+
+    removedAda :=
+        lists.HashSetRemove<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        )
+
+    assert(removedAda)
+
+    removedAgain :=
+        lists.HashSetRemove<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        )
+
+    assert(!removedAgain)
+
+    assert(
+        !lists.HashSetContains<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Ada",
+        ),
+    )
+
+    lists.ReserveHashSet<
+        string,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &names,
+        100,
+    )
+
+    assert(
+        lists.HashSetCapacity<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+        ) >= 100,
+    )
+
+    lists.ShrinkHashSetToFit<
+        string,
+        lists.HashString,
+        lists.EqualString
+    >(
+        &names,
+    )
+
+    assert(
+        lists.HashSetContains<
+            string,
+            lists.HashString,
+            lists.EqualString
+        >(
+            &names,
+            "Grace",
+        ),
+    )
+}
+
+TestHashSetValuesAndClear :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    values :=
+        lists.HashSetWithStaticCapacity<
+            int,
+            lists.HashInt,
+            lists.EqualInt,
+            8
+        >(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyHashSet<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+    )
+
+    lists.HashSetAdd<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+        10,
+    )
+
+    lists.HashSetAdd<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+        20,
+    )
+
+    lists.HashSetAdd<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+        30,
+    )
+
+    setValues :=
+        lists.HashSetValues<
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        )
+
+    defer lists.DestroyDynamicArray<int>(
+        &setValues,
+    )
+
+    assert(len(setValues) == 3)
+
+    foundTen := false
+    foundTwenty := false
+    foundThirty := false
+
+    index: int = 0
+
+    for index < cast<int>(len(setValues)) {
+        value := setValues[index]
+
+        if value == 10 {
+            foundTen = true
+        }
+
+        if value == 20 {
+            foundTwenty = true
+        }
+
+        if value == 30 {
+            foundThirty = true
+        }
+
+        index += 1
+    }
+
+    assert(foundTen)
+    assert(foundTwenty)
+    assert(foundThirty)
+
+    lists.ClearHashSet<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &values,
+    )
+
+    assert(
+        lists.HashSetLength<
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ) == 0,
+    )
+
+    assert(
+        lists.HashSetIsEmpty<
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &values,
+        ),
+    )
+}
+
+TestHashCollectionsDestroyTwice :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    map :=
+        lists.NewHashMapEmpty<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            allocator,
+            deallocator,
+        )
+
+    lists.HashMapPut<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &map,
+        1,
+        10,
+    )
+
+    lists.DestroyHashMap<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &map,
+    )
+
+    assert(
+        lists.HashMapLength<
+            int,
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &map,
+        ) == 0,
+    )
+
+    lists.DestroyHashMap<
+        int,
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &map,
+    )
+
+    set :=
+        lists.NewHashSetEmpty<
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            allocator,
+            deallocator,
+        )
+
+    lists.HashSetAdd<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &set,
+        1,
+    )
+
+    lists.DestroyHashSet<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &set,
+    )
+
+    assert(
+        lists.HashSetLength<
+            int,
+            lists.HashInt,
+            lists.EqualInt
+        >(
+            &set,
+        ) == 0,
+    )
+
+    lists.DestroyHashSet<
+        int,
+        lists.HashInt,
+        lists.EqualInt
+    >(
+        &set,
+    )
+}
+
 Main :: task() {
     TestSlice()
+    TestSliceCheckedAccess()
 
     TestRuntimeArray()
     TestArrayFromSlice()
     TestEmptyArray()
     TestStaticArray()
+    TestArrayCheckedAccess()
+    TestStaticArrayCheckedAccess()
 
     TestDynamicArrayEmpty()
     TestDynamicArrayCapacityConstructors()
@@ -1585,20 +3715,36 @@ Main :: task() {
     TestDynamicArrayPop()
     TestDynamicArrayFromSlice()
     TestDynamicArrayAppendSlice()
+    TestDynamicArrayAliasedAppendSlice()
     TestDynamicArrayClear()
     TestDynamicArraySlice()
+    TestDynamicArrayResize()
+    TestCheckedAccess()
 
     TestStack()
     TestStackCapacityConstructors()
+    TestStackAndQueueCheckedAccess()
 
     TestDequeBasic()
     TestDequeWrappingAndGrowth()
     TestDequeCapacityConstructors()
     TestDequeClear()
+    TestDequeCheckedAccess()
 
     TestQueue()
     TestQueueCapacityConstructors()
 
     TestStructElements()
     TestDestroyTwice()
+
+    TestHashFunctions()
+    TestHashMapBasic()
+    TestHashMapGrowthAndRemoval()
+    TestHashMapCollections()
+    TestHashMapStaticCapacity()
+    TestHashMapCustomKeyAndCollisions()
+
+    TestHashSetBasic()
+    TestHashSetValuesAndClear()
+    TestHashCollectionsDestroyTwice()
 }

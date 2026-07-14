@@ -1,0 +1,174 @@
+_HashBytes :: pure task(
+    data rawptr,
+    byteLength uint,
+) uint {
+    modulus: u64 = 4294967291
+    multiplier: u64 = 16777619
+    hash: u64 = 2166136261
+
+    index: uint = 0
+
+    for index < byteLength {
+        byte := data[cast<int>(index)]
+
+        hash = (
+            hash * multiplier +
+            cast<u64>(byte) +
+            1
+        ) % modulus
+
+        index += 1
+    }
+
+    return cast<uint>(hash)
+}
+
+HashString :: pure task(
+    value string,
+) uint {
+    return _HashBytes(
+        cast<rawptr>(value),
+        size(value),
+    )
+}
+
+HashCString :: pure task(
+    value cstring,
+) uint {
+    return _HashBytes(
+        cast<rawptr>(value),
+        size(value),
+    )
+}
+
+HashBool :: pure task(
+    value bool,
+) uint {
+    if value {
+        return 1
+    }
+
+    return 0
+}
+
+HashUint :: pure task(
+    value uint,
+) uint {
+    return cast<uint>(
+        cast<u64>(value) %
+        4294967291,
+    )
+}
+
+HashInt :: pure task(
+    value int,
+) uint {
+    if value >= 0 {
+        return HashUint(
+            cast<uint>(value),
+        )
+    }
+
+    magnitude := cast<uint>(
+        -(value + 1),
+    )
+
+    return HashUint(magnitude) + 1
+}
+
+HashU8 :: pure task(value u8) uint {
+    return cast<uint>(value)
+}
+
+HashU16 :: pure task(value u16) uint {
+    return cast<uint>(value)
+}
+
+HashU32 :: pure task(value u32) uint {
+    return HashUint(cast<uint>(value))
+}
+
+HashU64 :: pure task(value u64) uint {
+    return cast<uint>(
+        value % 4294967291,
+    )
+}
+
+HashI8 :: pure task(value i8) uint {
+    return HashInt(cast<int>(value))
+}
+
+HashI16 :: pure task(value i16) uint {
+    return HashInt(cast<int>(value))
+}
+
+HashI32 :: pure task(value i32) uint {
+    return HashInt(cast<int>(value))
+}
+
+HashI64 :: pure task(
+    value i64,
+) uint {
+    if value >= 0 {
+        return cast<uint>(
+            cast<u64>(value) %
+            4294967291,
+        )
+    }
+
+    magnitude := cast<u64>(
+        -(value + 1),
+    )
+
+    return cast<uint>(
+        magnitude % 4294967291,
+    ) + 1
+}
+
+HashChar :: pure task(
+    value char,
+) uint {
+    return cast<uint>(value)
+}
+
+EqualString :: pure task(
+    left string,
+    right string,
+) bool {
+    return left == right
+}
+
+EqualCString :: pure task(
+    left cstring,
+    right cstring,
+) bool {
+    return left == right
+}
+
+EqualBool :: pure task(
+    left bool,
+    right bool,
+) bool {
+    return left == right
+}
+
+EqualInt :: pure task(
+    left int,
+    right int,
+) bool {
+    return left == right
+}
+
+EqualUint :: pure task(
+    left uint,
+    right uint,
+) bool {
+    return left == right
+}
+
+EqualChar :: pure task(
+    left char,
+    right char,
+) bool {
+    return left == right
+}

@@ -3,7 +3,7 @@ _ByteCount calculates storage required for count elements.
 
 It panics if the multiplication overflows.
 */
-_ByteCount :: task <T type>(
+_ByteCount :: pure task <T type>(
     count uint,
 ) uint {
     elementSize := size(T)
@@ -23,11 +23,11 @@ _ByteCount :: task <T type>(
 }
 
 /*
-_GrowCapacity applies the standard geometric growth rule:
+_GrowCapacity applies:
 
     max(requiredCapacity, oldCapacity * 2)
 */
-_GrowCapacity :: task(
+_GrowCapacity :: pure task(
     oldCapacity uint,
     requiredCapacity uint,
 ) uint {
@@ -57,7 +57,7 @@ _NormalizeIndex normalizes an existing-element index.
 
 Negative indexes are interpreted relative to length.
 */
-_NormalizeIndex :: task(
+_NormalizeIndex :: pure task(
     index int,
     length uint,
 ) uint {
@@ -77,11 +77,33 @@ _NormalizeIndex :: task(
 }
 
 /*
+_TryNormalizeIndex returns false instead of panicking.
+*/
+_TryNormalizeIndex :: pure task(
+    index int,
+    length uint,
+) uint, bool {
+    normalized := index
+    signedLength := cast<int>(length)
+
+    if normalized < 0 {
+        normalized += signedLength
+    }
+
+    if normalized < 0 ||
+        normalized >= signedLength {
+        return 0, false
+    }
+
+    return cast<uint>(normalized), true
+}
+
+/*
 _NormalizeInsertIndex normalizes an insertion boundary.
 
 The resulting index may equal length.
 */
-_NormalizeInsertIndex :: task(
+_NormalizeInsertIndex :: pure task(
     index int,
     length uint,
 ) uint {
@@ -101,9 +123,25 @@ _NormalizeInsertIndex :: task(
 }
 
 /*
+_ElementPointer returns a pointer to one element.
+
+No bounds checking is performed.
+*/
+_ElementPointer :: pure task <T type>(
+    data rawptr,
+    index uint,
+) *T {
+    byteOffset := index * size(T)
+
+    return cast<*T>(
+        &data[cast<int>(byteOffset)]
+    )
+}
+
+/*
 _Allocate allocates storage for count elements.
 
-A zero count produces nil storage without reporting allocation failure.
+A zero count produces nil storage.
 */
 _Allocate :: task <T type>(
     allocator mem.Allocator,
@@ -128,7 +166,7 @@ _Allocate :: task <T type>(
 }
 
 /*
-_AllocateZeroed allocates zero-filled storage for count elements.
+_AllocateZeroed allocates zero-filled storage.
 */
 _AllocateZeroed :: task <T type>(
     allocator mem.ZeroAllocator,
@@ -152,7 +190,7 @@ _AllocateZeroed :: task <T type>(
 }
 
 /*
-_DestroyStorage releases an allocation and safely accepts nil.
+_DestroyStorage releases an allocation and accepts nil.
 */
 _DestroyStorage :: task(
     deallocator mem.Deallocator,

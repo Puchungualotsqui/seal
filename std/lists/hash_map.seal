@@ -1,0 +1,1045 @@
+_HashEntryState :: enum {
+    Empty
+    Occupied
+    Deleted
+}
+
+_HashEntry :: struct <
+    K type,
+    V type,
+> {
+    _state _HashEntryState
+    _hash uint
+    _key K
+    _value V
+}
+
+KeyValue :: struct <
+    K type,
+    V type,
+> {
+    Key K
+    Value V
+}
+
+/*
+HashMap uses open addressing with linear probing.
+
+Hash and Equal must be pure and must agree:
+
+    Equal(a, b) implies Hash(a) == Hash(b)
+
+Copying HashMap performs a shallow ownership copy and must be avoided.
+*/
+HashMap :: struct <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+> {
+    _entries rawptr
+    _length uint
+    _capacity uint
+    _deleted uint
+
+    _allocator mem.Allocator
+    _deallocator mem.Deallocator
+}
+
+_HashMapEntryPointer :: pure task <
+    K type,
+    V type,
+>(
+    entries rawptr,
+    index uint,
+) *_HashEntry<K, V> {
+    return _ElementPointer<
+        _HashEntry<K, V>
+    >(
+        entries,
+        index,
+    )
+}
+
+_HashMapCapacityForEntries :: pure task(
+    requiredEntries uint,
+) uint {
+    if requiredEntries == 0 {
+        return 0
+    }
+
+    capacity: uint = 8
+
+    for requiredEntries >
+        capacity - capacity / 4 {
+        doubled := capacity * 2
+
+        if doubled <= capacity {
+            panic("lists.HashMap: capacity overflow")
+        }
+
+        capacity = doubled
+    }
+
+    return capacity
+}
+
+NewHashMapEmpty :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) HashMap<K, V, Hash, Equal> {
+    return HashMap<K, V, Hash, Equal>{
+        _entries = nil,
+        _length = 0,
+        _capacity = 0,
+        _deleted = 0,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+HashMapWithCapacity :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    requestedCapacity uint,
+) HashMap<K, V, Hash, Equal> {
+    capacity := _HashMapCapacityForEntries(
+        requestedCapacity,
+    )
+
+    entries := _Allocate<
+        _HashEntry<K, V>
+    >(
+        allocator,
+        capacity,
+    )
+
+    if capacity > 0 {
+        mem.MemsetC(
+            entries,
+            0,
+            _ByteCount<
+                _HashEntry<K, V>
+            >(capacity),
+        )
+    }
+
+    return HashMap<K, V, Hash, Equal>{
+        _entries = entries,
+        _length = 0,
+        _capacity = capacity,
+        _deleted = 0,
+        _allocator = allocator,
+        _deallocator = deallocator,
+    }
+}
+
+HashMapWithStaticCapacity :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) HashMap<K, V, Hash, Equal> {
+    return HashMapWithCapacity<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        allocator,
+        deallocator,
+        cast<uint>(N),
+    )
+}
+
+NewHashMap :: overload {
+    NewHashMapEmpty
+    HashMapWithCapacity
+}
+
+HashMapLength :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) uint {
+    return values._length
+}
+
+HashMapCapacity :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) uint {
+    return values._capacity
+}
+
+HashMapIsEmpty :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) bool {
+    return values._length == 0
+}
+
+/*
+_HashMapFindSlot returns either:
+
+    an occupied slot containing key, with found == true; or
+    a slot suitable for insertion, with found == false.
+*/
+_HashMapFindSlot :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    hash uint,
+    key K,
+) uint, bool {
+    if values._capacity == 0 {
+        return 0, false
+    }
+
+    index := hash % values._capacity
+    firstDeleted: int = -1
+    scanned: uint = 0
+
+    for scanned < values._capacity {
+        entry := _HashMapEntryPointer<K, V>(
+            values._entries,
+            index,
+        )
+
+        if entry._state == .Empty {
+            if firstDeleted >= 0 {
+                return cast<uint>(firstDeleted), false
+            }
+
+            return index, false
+        }
+
+        if entry._state == .Deleted {
+            if firstDeleted < 0 {
+                firstDeleted = cast<int>(index)
+            }
+        } else if entry._hash == hash &&
+            Equal(entry._key, key) {
+            return index, true
+        }
+
+        index = (index + 1) %
+            values._capacity
+
+        scanned += 1
+    }
+
+    if firstDeleted >= 0 {
+        return cast<uint>(firstDeleted), false
+    }
+
+    unreachable()
+
+    return 0, false
+}
+
+_HashMapInsertKnownHash :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    hash uint,
+    key K,
+    value V,
+) {
+    index, found := _HashMapFindSlot<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+    )
+
+    if found {
+        entry := _HashMapEntryPointer<K, V>(
+            values._entries,
+            index,
+        )
+
+        entry._value = value
+
+        return
+    }
+
+    entry := _HashMapEntryPointer<K, V>(
+        values._entries,
+        index,
+    )
+
+    if entry._state == .Deleted {
+        values._deleted -= 1
+    }
+
+    entry._hash = hash
+    entry._key = key
+    entry._value = value
+    entry._state = .Occupied
+
+    values._length += 1
+}
+
+_ResizeHashMap :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    requestedCapacity uint,
+) {
+    minimum := _HashMapCapacityForEntries(
+        values._length,
+    )
+
+    newCapacity := requestedCapacity
+
+    if newCapacity < minimum {
+        newCapacity = minimum
+    }
+
+    if newCapacity == 0 {
+        _DestroyStorage(
+            values._deallocator,
+            values._entries,
+        )
+
+        values._entries = nil
+        values._capacity = 0
+        values._deleted = 0
+
+        return
+    }
+
+    newEntries := _Allocate<
+        _HashEntry<K, V>
+    >(
+        values._allocator,
+        newCapacity,
+    )
+
+    mem.MemsetC(
+        newEntries,
+        0,
+        _ByteCount<
+            _HashEntry<K, V>
+        >(newCapacity),
+    )
+
+    oldEntries := values._entries
+    oldCapacity := values._capacity
+
+    values._entries = newEntries
+    values._length = 0
+    values._capacity = newCapacity
+    values._deleted = 0
+
+    index: uint = 0
+
+    for index < oldCapacity {
+        oldEntry := _HashMapEntryPointer<K, V>(
+            oldEntries,
+            index,
+        )
+
+        if oldEntry._state == .Occupied {
+            _HashMapInsertKnownHash<
+                K,
+                V,
+                Hash,
+                Equal
+            >(
+                values,
+                oldEntry._hash,
+                oldEntry._key,
+                oldEntry._value,
+            )
+        }
+
+        index += 1
+    }
+
+    _DestroyStorage(
+        values._deallocator,
+        oldEntries,
+    )
+}
+
+_HashMapEnsureInsertCapacity :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) {
+    if values._capacity == 0 {
+        _ResizeHashMap<
+            K,
+            V,
+            Hash,
+            Equal
+        >(
+            values,
+            8,
+        )
+
+        return
+    }
+
+    threshold :=
+        values._capacity -
+        values._capacity / 4
+
+    used := values._length +
+        values._deleted
+
+    if used + 1 <= threshold {
+        return
+    }
+
+    if values._deleted > 0 &&
+        values._length + 1 <= threshold {
+        _ResizeHashMap<
+            K,
+            V,
+            Hash,
+            Equal
+        >(
+            values,
+            values._capacity,
+        )
+
+        return
+    }
+
+    newCapacity := values._capacity * 2
+
+    if newCapacity <= values._capacity {
+        panic("lists.HashMap: capacity overflow")
+    }
+
+    _ResizeHashMap<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        newCapacity,
+    )
+}
+
+/*
+HashMapPut inserts or replaces a value.
+
+It returns true when a new key was inserted and false when an existing
+value was replaced.
+*/
+HashMapPut :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+    value V,
+) bool {
+    hash := Hash(key)
+
+    if values._capacity > 0 {
+        index, found := _HashMapFindSlot<
+            K,
+            V,
+            Hash,
+            Equal
+        >(
+            values,
+            hash,
+            key,
+        )
+
+        if found {
+            entry := _HashMapEntryPointer<K, V>(
+                values._entries,
+                index,
+            )
+
+            entry._value = value
+
+            return false
+        }
+    }
+
+    _HashMapEnsureInsertCapacity<
+        K,
+        V,
+        Hash,
+        Equal
+    >(values)
+
+    _HashMapInsertKnownHash<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+        value,
+    )
+
+    return true
+}
+
+/*
+HashMapInsert inserts only when key is absent.
+*/
+HashMapInsert :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+    value V,
+) bool {
+    hash := Hash(key)
+
+    if values._capacity > 0 {
+        _, found := _HashMapFindSlot<
+            K,
+            V,
+            Hash,
+            Equal
+        >(
+            values,
+            hash,
+            key,
+        )
+
+        if found {
+            return false
+        }
+    }
+
+    _HashMapEnsureInsertCapacity<
+        K,
+        V,
+        Hash,
+        Equal
+    >(values)
+
+    _HashMapInsertKnownHash<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+        value,
+    )
+
+    return true
+}
+
+/*
+HashMapReplace replaces only when key exists.
+*/
+HashMapReplace :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+    value V,
+) bool {
+    if values._capacity == 0 {
+        return false
+    }
+
+    hash := Hash(key)
+
+    index, found := _HashMapFindSlot<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+    )
+
+    if !found {
+        return false
+    }
+
+    entry := _HashMapEntryPointer<K, V>(
+        values._entries,
+        index,
+    )
+
+    entry._value = value
+
+    return true
+}
+
+/*
+HashMapGet returns false when key is absent.
+*/
+HashMapGet :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) V, bool {
+    if values._capacity == 0 {
+        empty: V
+
+        return empty, false
+    }
+
+    hash := Hash(key)
+
+    index, found := _HashMapFindSlot<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+    )
+
+    if !found {
+        empty: V
+
+        return empty, false
+    }
+
+    entry := _HashMapEntryPointer<K, V>(
+        values._entries,
+        index,
+    )
+
+    return entry._value, true
+}
+
+/*
+HashMapAt panics when key is absent.
+*/
+HashMapAt :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) V {
+    value, found := HashMapGet<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        key,
+    )
+
+    if !found {
+        panic("lists.HashMapAt: key not found")
+    }
+
+    return value
+}
+
+/*
+HashMapGetUnsafe assumes that key exists.
+*/
+HashMapGetUnsafe :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) V {
+    value, found := HashMapGet<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        key,
+    )
+
+    if !found {
+        unreachable()
+    }
+
+    return value
+}
+
+HashMapContainsKey :: pure task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) bool {
+    _, found := HashMapGet<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        key,
+    )
+
+    return found
+}
+
+/*
+HashMapRemove removes a key and returns its previous value.
+*/
+HashMapRemove :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) V, bool {
+    if values._capacity == 0 {
+        empty: V
+
+        return empty, false
+    }
+
+    hash := Hash(key)
+
+    index, found := _HashMapFindSlot<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        hash,
+        key,
+    )
+
+    if !found {
+        empty: V
+
+        return empty, false
+    }
+
+    entry := _HashMapEntryPointer<K, V>(
+        values._entries,
+        index,
+    )
+
+    result := entry._value
+
+    entry._state = .Deleted
+
+    values._length -= 1
+    values._deleted += 1
+
+    return result, true
+}
+
+HashMapRemoveUnsafe :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    key K,
+) V {
+    value, found := HashMapRemove<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        key,
+    )
+
+    if !found {
+        unreachable()
+    }
+
+    return value
+}
+
+ReserveHashMap :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+    requiredEntries uint,
+) {
+    requiredCapacity :=
+        _HashMapCapacityForEntries(
+            requiredEntries,
+        )
+
+    if requiredCapacity <= values._capacity {
+        return
+    }
+
+    _ResizeHashMap<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        requiredCapacity,
+    )
+}
+
+ShrinkHashMapToFit :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) {
+    requiredCapacity :=
+        _HashMapCapacityForEntries(
+            values._length,
+        )
+
+    if requiredCapacity == values._capacity &&
+        values._deleted == 0 {
+        return
+    }
+
+    _ResizeHashMap<
+        K,
+        V,
+        Hash,
+        Equal
+    >(
+        values,
+        requiredCapacity,
+    )
+}
+
+ClearHashMap :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) {
+    if values._capacity > 0 {
+        mem.MemsetC(
+            values._entries,
+            0,
+            _ByteCount<
+                _HashEntry<K, V>
+            >(values._capacity),
+        )
+    }
+
+    values._length = 0
+    values._deleted = 0
+}
+
+HashMapKeys :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) DynamicArray<K> {
+    result := DynamicArrayWithCapacity<K>(
+        values._allocator,
+        values._deallocator,
+        values._length,
+    )
+
+    index: uint = 0
+
+    for index < values._capacity {
+        entry := _HashMapEntryPointer<K, V>(
+            values._entries,
+            index,
+        )
+
+        if entry._state == .Occupied {
+            Append<K>(
+                &result,
+                entry._key,
+            )
+        }
+
+        index += 1
+    }
+
+    return result
+}
+
+HashMapValues :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) DynamicArray<V> {
+    result := DynamicArrayWithCapacity<V>(
+        values._allocator,
+        values._deallocator,
+        values._length,
+    )
+
+    index: uint = 0
+
+    for index < values._capacity {
+        entry := _HashMapEntryPointer<K, V>(
+            values._entries,
+            index,
+        )
+
+        if entry._state == .Occupied {
+            Append<V>(
+                &result,
+                entry._value,
+            )
+        }
+
+        index += 1
+    }
+
+    return result
+}
+
+HashMapItems :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) DynamicArray<KeyValue<K, V>> {
+    result :=
+        DynamicArrayWithCapacity<
+            KeyValue<K, V>
+        >(
+            values._allocator,
+            values._deallocator,
+            values._length,
+        )
+
+    index: uint = 0
+
+    for index < values._capacity {
+        entry := _HashMapEntryPointer<K, V>(
+            values._entries,
+            index,
+        )
+
+        if entry._state == .Occupied {
+            item := KeyValue<K, V>{
+                Key = entry._key,
+                Value = entry._value,
+            }
+
+            Append<KeyValue<K, V>>(
+                &result,
+                item,
+            )
+        }
+
+        index += 1
+    }
+
+    return result
+}
+
+DestroyHashMap :: task <
+    K type,
+    V type,
+    Hash task[(K) uint],
+    Equal task[(K, K) bool],
+>(
+    values *HashMap<K, V, Hash, Equal>,
+) {
+    _DestroyStorage(
+        values._deallocator,
+        values._entries,
+    )
+
+    values._entries = nil
+    values._length = 0
+    values._capacity = 0
+    values._deleted = 0
+}

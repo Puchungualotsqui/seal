@@ -158,7 +158,7 @@ ArraySet :: task <T type>(
 /*
 ArraySlice returns a borrowed view over the complete array.
 */
-ArraySlice :: task <T type>(
+ArraySlice :: pure task <T type>(
     values *Array<T>,
 ) Slice<T> {
     return Slice<T>{

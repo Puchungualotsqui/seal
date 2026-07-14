@@ -2,35 +2,23 @@ _Slot :: struct <T type> {
     Value T
 }
 
-/*
-_SlotByteCount calculates storage for count slots.
-*/
-_SlotByteCount :: task <T type>(
+_SlotByteCount :: pure task <T type>(
     count uint,
 ) uint {
     return _ByteCount<_Slot<T>>(count)
 }
 
-/*
-_SlotPointer returns a pointer to one slot.
-
-The caller is responsible for bounds checking.
-*/
-_SlotPointer :: task <T type>(
+_SlotPointer :: pure task <T type>(
     data rawptr,
     index uint,
 ) *_Slot<T> {
-    byteOffset := index * size(_Slot<T>)
-
-    return cast<*_Slot<T>>(
-        &data[cast<int>(byteOffset)]
+    return _ElementPointer<_Slot<T>>(
+        data,
+        index,
     )
 }
 
-/*
-_ReadSlot performs a shallow value copy.
-*/
-_ReadSlot :: task <T type>(
+_ReadSlot :: pure task <T type>(
     data rawptr,
     index uint,
 ) T {
@@ -42,9 +30,6 @@ _ReadSlot :: task <T type>(
     return slot.Value
 }
 
-/*
-_WriteSlot performs a shallow value assignment.
-*/
 _WriteSlot :: task <T type>(
     data rawptr,
     index uint,
@@ -58,9 +43,6 @@ _WriteSlot :: task <T type>(
     slot.Value = value
 }
 
-/*
-_ZeroSlots fills a slot range with zero bytes.
-*/
 _ZeroSlots :: task <T type>(
     data rawptr,
     start uint,

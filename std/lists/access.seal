@@ -1,0 +1,491 @@
+/*
+Slice access.
+*/
+
+SliceGet :: pure task <T type>(
+    values *Slice<T>,
+    index int,
+) T, bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    ), true
+}
+
+SliceGetUnsafe :: pure task <T type>(
+    values *Slice<T>,
+    index uint,
+) T {
+    return _ReadSlot<T>(
+        values._data,
+        index,
+    )
+}
+
+SliceTrySet :: task <T type>(
+    values *Slice<T>,
+    index int,
+    value T,
+) bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        return false
+    }
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+
+    return true
+}
+
+SliceSetUnsafe :: task <T type>(
+    values *Slice<T>,
+    index uint,
+    value T,
+) {
+    _WriteSlot<T>(
+        values._data,
+        index,
+        value,
+    )
+}
+
+/*
+Runtime fixed arrays.
+*/
+
+ArrayGet :: pure task <T type>(
+    values *Array<T>,
+    index int,
+) T, bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    ), true
+}
+
+ArrayGetUnsafe :: pure task <T type>(
+    values *Array<T>,
+    index uint,
+) T {
+    return _ReadSlot<T>(
+        values._data,
+        index,
+    )
+}
+
+ArrayTrySet :: task <T type>(
+    values *Array<T>,
+    index int,
+    value T,
+) bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        return false
+    }
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+
+    return true
+}
+
+ArraySetUnsafe :: task <T type>(
+    values *Array<T>,
+    index uint,
+    value T,
+) {
+    _WriteSlot<T>(
+        values._data,
+        index,
+        value,
+    )
+}
+
+/*
+Compile-time-length heap arrays.
+*/
+
+StaticArrayGet :: pure task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index int,
+) T, bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        cast<uint>(N),
+    )
+
+    if !valid {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    ), true
+}
+
+StaticArrayGetUnsafe :: pure task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index uint,
+) T {
+    return _ReadSlot<T>(
+        values._data,
+        index,
+    )
+}
+
+StaticArrayTrySet :: task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index int,
+    value T,
+) bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        cast<uint>(N),
+    )
+
+    if !valid {
+        return false
+    }
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+
+    return true
+}
+
+StaticArraySetUnsafe :: task <
+    T type,
+    N int[N >= 0],
+>(
+    values *StaticArray<T, N>,
+    index uint,
+    value T,
+) {
+    _WriteSlot<T>(
+        values._data,
+        index,
+        value,
+    )
+}
+
+/*
+Dynamic arrays.
+*/
+
+DynamicArrayGet :: pure task <T type>(
+    values *DynamicArray<T>,
+    index int,
+) T, bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        values._data,
+        normalized,
+    ), true
+}
+
+DynamicArrayGetUnsafe :: pure task <T type>(
+    values *DynamicArray<T>,
+    index uint,
+) T {
+    return _ReadSlot<T>(
+        values._data,
+        index,
+    )
+}
+
+DynamicArrayTrySet :: task <T type>(
+    values *DynamicArray<T>,
+    index int,
+    value T,
+) bool {
+    normalized, valid := _TryNormalizeIndex(
+        index,
+        values._length,
+    )
+
+    if !valid {
+        return false
+    }
+
+    _WriteSlot<T>(
+        values._data,
+        normalized,
+        value,
+    )
+
+    return true
+}
+
+DynamicArraySetUnsafe :: task <T type>(
+    values *DynamicArray<T>,
+    index uint,
+    value T,
+) {
+    _WriteSlot<T>(
+        values._data,
+        index,
+        value,
+    )
+}
+
+/*
+Deque access.
+*/
+
+DequeGet :: pure task <T type>(
+    deque *Deque<T>,
+    index int,
+) T, bool {
+    logicalIndex, valid := _TryNormalizeIndex(
+        index,
+        deque._length,
+    )
+
+    if !valid {
+        empty: T
+
+        return empty, false
+    }
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        logicalIndex,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    ), true
+}
+
+DequeGetUnsafe :: pure task <T type>(
+    deque *Deque<T>,
+    index uint,
+) T {
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        index,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    )
+}
+
+DequeTrySet :: task <T type>(
+    deque *Deque<T>,
+    index int,
+    value T,
+) bool {
+    logicalIndex, valid := _TryNormalizeIndex(
+        index,
+        deque._length,
+    )
+
+    if !valid {
+        return false
+    }
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        logicalIndex,
+    )
+
+    _WriteSlot<T>(
+        deque._data,
+        physicalIndex,
+        value,
+    )
+
+    return true
+}
+
+DequeSetUnsafe :: task <T type>(
+    deque *Deque<T>,
+    index uint,
+    value T,
+) {
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        index,
+    )
+
+    _WriteSlot<T>(
+        deque._data,
+        physicalIndex,
+        value,
+    )
+}
+
+/*
+Stack access.
+*/
+
+StackTryPeek :: pure task <T type>(
+    stack *Stack<T>,
+) T, bool {
+    if stack._values._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        stack._values._data,
+        stack._values._length - 1,
+    ), true
+}
+
+StackPeekUnsafe :: pure task <T type>(
+    stack *Stack<T>,
+) T {
+    return _ReadSlot<T>(
+        stack._values._data,
+        stack._values._length - 1,
+    )
+}
+
+/*
+Deque end access.
+*/
+
+DequeTryFront :: pure task <T type>(
+    deque *Deque<T>,
+) T, bool {
+    if deque._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    return _ReadSlot<T>(
+        deque._data,
+        deque._head,
+    ), true
+}
+
+DequeFrontUnsafe :: pure task <T type>(
+    deque *Deque<T>,
+) T {
+    return _ReadSlot<T>(
+        deque._data,
+        deque._head,
+    )
+}
+
+DequeTryBack :: pure task <T type>(
+    deque *Deque<T>,
+) T, bool {
+    if deque._length == 0 {
+        empty: T
+
+        return empty, false
+    }
+
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        deque._length - 1,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    ), true
+}
+
+DequeBackUnsafe :: pure task <T type>(
+    deque *Deque<T>,
+) T {
+    physicalIndex := _DequePhysicalIndex<T>(
+        deque,
+        deque._length - 1,
+    )
+
+    return _ReadSlot<T>(
+        deque._data,
+        physicalIndex,
+    )
+}
+
+/*
+Queue front access.
+*/
+
+QueueTryFront :: pure task <T type>(
+    queue *Queue<T>,
+) T, bool {
+    return DequeTryFront<T>(
+        &queue._deque,
+    )
+}
+
+QueueFrontUnsafe :: pure task <T type>(
+    queue *Queue<T>,
+) T {
+    return DequeFrontUnsafe<T>(
+        &queue._deque,
+    )
+}

@@ -1,0 +1,132 @@
+/*
+ResizeDynamicArray changes the logical length.
+
+New elements are initialized with zero-filled storage.
+Shrinking clears the removed slots.
+
+Zero-filled storage may not eventually be a valid semantic value for
+every future owning or nontrivial Seal type.
+*/
+ResizeDynamicArray :: task <T type>(
+    values *DynamicArray<T>,
+    newLength uint,
+) {
+    oldLength := values._length
+
+    if newLength == oldLength {
+        return
+    }
+
+    if newLength < oldLength {
+        _ZeroSlots<T>(
+            values._data,
+            newLength,
+            oldLength - newLength,
+        )
+
+        values._length = newLength
+
+        return
+    }
+
+    _GrowDynamicArray<T>(
+        values,
+        newLength,
+    )
+
+    _ZeroSlots<T>(
+        values._data,
+        oldLength,
+        newLength - oldLength,
+    )
+
+    values._length = newLength
+}
+
+/*
+ResizeDynamicArrayFilled initializes newly added elements with value.
+*/
+ResizeDynamicArrayFilled :: task <T type>(
+    values *DynamicArray<T>,
+    newLength uint,
+    value T,
+) {
+    oldLength := values._length
+
+    if newLength == oldLength {
+        return
+    }
+
+    if newLength < oldLength {
+        _ZeroSlots<T>(
+            values._data,
+            newLength,
+            oldLength - newLength,
+        )
+
+        values._length = newLength
+
+        return
+    }
+
+    _GrowDynamicArray<T>(
+        values,
+        newLength,
+    )
+
+    index := oldLength
+
+    for index < newLength {
+        _WriteSlot<T>(
+            values._data,
+            index,
+            value,
+        )
+
+        index += 1
+    }
+
+    values._length = newLength
+}
+
+/*
+ShrinkDynamicArrayToFit reduces capacity to exactly length.
+*/
+ShrinkDynamicArrayToFit :: task <T type>(
+    values *DynamicArray<T>,
+) {
+    if values._capacity == values._length {
+        return
+    }
+
+    if values._length == 0 {
+        _DestroyStorage(
+            values._deallocator,
+            values._data,
+        )
+
+        values._data = nil
+        values._capacity = 0
+
+        return
+    }
+
+    newData := _Allocate<_Slot<T>>(
+        values._allocator,
+        values._length,
+    )
+
+    mem.MemcpyC(
+        newData,
+        values._data,
+        _SlotByteCount<T>(values._length),
+    )
+
+    _DestroyStorage(
+        values._deallocator,
+        values._data,
+    )
+
+    values._data = newData
+    values._capacity = values._length
+}

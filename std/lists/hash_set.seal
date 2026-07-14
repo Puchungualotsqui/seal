@@ -1,0 +1,292 @@
+_Present :: struct {
+    _unused u8
+}
+
+HashSet :: struct <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+> {
+    _map HashMap<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >
+}
+
+NewHashSetEmpty :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) HashSet<T, Hash, Equal> {
+    return HashSet<T, Hash, Equal>{
+        _map = NewHashMapEmpty<
+            T,
+            _Present,
+            Hash,
+            Equal
+        >(
+            allocator,
+            deallocator,
+        ),
+    }
+}
+
+HashSetWithCapacity :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    capacity uint,
+) HashSet<T, Hash, Equal> {
+    return HashSet<T, Hash, Equal>{
+        _map = HashMapWithCapacity<
+            T,
+            _Present,
+            Hash,
+            Equal
+        >(
+            allocator,
+            deallocator,
+            capacity,
+        ),
+    }
+}
+
+HashSetWithStaticCapacity :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+    N int[N >= 0],
+>(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) HashSet<T, Hash, Equal> {
+    return HashSet<T, Hash, Equal>{
+        _map =
+            HashMapWithStaticCapacity<
+                T,
+                _Present,
+                Hash,
+                Equal,
+                N
+            >(
+                allocator,
+                deallocator,
+            ),
+    }
+}
+
+NewHashSet :: overload {
+    NewHashSetEmpty
+    HashSetWithCapacity
+}
+
+HashSetLength :: pure task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) uint {
+    return HashMapLength<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+HashSetCapacity :: pure task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) uint {
+    return HashMapCapacity<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+HashSetIsEmpty :: pure task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) bool {
+    return HashMapIsEmpty<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+/*
+HashSetAdd returns true when value was newly inserted.
+*/
+HashSetAdd :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+    value T,
+) bool {
+    return HashMapPut<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+        value,
+        _Present{
+            _unused = 0,
+        },
+    )
+}
+
+HashSetContains :: pure task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+    value T,
+) bool {
+    return HashMapContainsKey<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+        value,
+    )
+}
+
+HashSetRemove :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+    value T,
+) bool {
+    _, removed := HashMapRemove<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+        value,
+    )
+
+    return removed
+}
+
+ReserveHashSet :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+    requiredEntries uint,
+) {
+    ReserveHashMap<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+        requiredEntries,
+    )
+}
+
+ShrinkHashSetToFit :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) {
+    ShrinkHashMapToFit<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+ClearHashSet :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) {
+    ClearHashMap<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+HashSetValues :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) DynamicArray<T> {
+    return HashMapKeys<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}
+
+DestroyHashSet :: task <
+    T type,
+    Hash task[(T) uint],
+    Equal task[(T, T) bool],
+>(
+    values *HashSet<T, Hash, Equal>,
+) {
+    DestroyHashMap<
+        T,
+        _Present,
+        Hash,
+        Equal
+    >(
+        &values._map,
+    )
+}

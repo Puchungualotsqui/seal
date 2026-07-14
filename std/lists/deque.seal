@@ -82,7 +82,7 @@ DequeIsEmpty :: pure task <T type>(
 /*
 _DequePhysicalIndex maps a logical index to its circular slot.
 */
-_DequePhysicalIndex :: task <T type>(
+_DequePhysicalIndex :: pure task <T type>(
     deque *Deque<T>,
     logicalIndex uint,
 ) uint {
