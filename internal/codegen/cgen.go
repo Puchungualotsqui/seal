@@ -458,11 +458,43 @@ func (g *Generator) typePackageInfo(
 		return nil
 	}
 
-	if pkg := g.packages[packageName]; pkg != nil {
+	if pkg := packageInfoBySemanticName(
+		g.packages,
+		packageName,
+	); pkg != nil {
 		return pkg
 	}
 
-	return g.workspacePackages[packageName]
+	return packageInfoBySemanticName(
+		g.workspacePackages,
+		packageName,
+	)
+}
+
+func packageInfoBySemanticName(
+	packages map[string]*PackageInfo,
+	packageName string,
+) *PackageInfo {
+	if packageName == "" ||
+		len(packages) == 0 {
+		return nil
+	}
+
+	if pkg := packages[packageName]; pkg != nil {
+		return pkg
+	}
+
+	for _, pkg := range packages {
+		if pkg == nil {
+			continue
+		}
+
+		if pkg.Name == packageName {
+			return pkg
+		}
+	}
+
+	return nil
 }
 
 func cloneIndexResolutions(
@@ -1691,15 +1723,43 @@ func (g *Generator) newTemp(prefix string) string {
 
 func (g *Generator) Generate(file *ast.File) string {
 	g.collect(file)
-	g.collectImportedImplTemplates()
 
 	g.seedNonGenericInterfaceInstances()
 	g.collectImportedInterfaceInstances()
 	g.seedRequestedGenericInstances()
 
 	// Requests seeded into this package may contain concrete types owned by a
-	// package that depends on this one, such as app.Point in mem.NewC<app.Point>.
+	// package that depends on this one, such as app.Point in mem.NewC<Point>.
 	g.collectRequiredExternalTypes()
+
+	// Collect interfaces referenced directly by the current file before
+	// deciding which workspace packages must be promoted into the visible
+	// package set.
+	//
+	// A package can be available through workspacePackages without being
+	// present in packages. This happens, for example, when listsExample uses
+	// mem interfaces and concrete types reached through another package.
+	g.collectInterfaceInstancesFromFile(file)
+
+	// Promote workspace packages that contain implementations for interfaces
+	// used by the current translation unit. Re-run imported interface
+	// discovery after each promotion because a promoted package may expose
+	// additional interface references.
+	for {
+		beforePackages := len(g.packages)
+		beforeInterfaces := len(g.interfaceInstances)
+		beforeTemplates := len(g.implTemplates)
+
+		g.collectImportedImplTemplates()
+		g.collectImportedInterfaceInstances()
+		g.collectInterfaceInstancesFromFile(file)
+
+		if beforePackages == len(g.packages) &&
+			beforeInterfaces == len(g.interfaceInstances) &&
+			beforeTemplates == len(g.implTemplates) {
+			break
+		}
+	}
 
 	g.finalizeInterfaceAndGenericInstances(file)
 
@@ -1954,39 +2014,245 @@ func (g *Generator) implTemplateFromDeclInPackage(
 	}
 }
 
-func (g *Generator) collectImportedImplTemplates() {
-	if len(g.packages) == 0 {
-		return
+func (g *Generator) implTemplateMatchesRegisteredInterface(
+	template *ImplTemplate,
+) bool {
+	if template == nil ||
+		len(g.interfaceInstances) == 0 {
+		return false
 	}
 
-	packageNames := make([]string, 0, len(g.packages))
+	paramKinds := implGenericParamKindsForCGen(
+		template.GenericParams,
+	)
 
-	for packageName := range g.packages {
-		packageNames = append(packageNames, packageName)
-	}
-
-	sort.Strings(packageNames)
-
-	for _, packageName := range packageNames {
-		pkg := g.packages[packageName]
-		if pkg == nil {
+	for _, instance := range g.interfaceInstances {
+		if instance == nil {
 			continue
 		}
 
+		subst := map[string]ast.GenericArg{}
+
+		if g.matchInterfaceTemplate(
+			template.Interface,
+			template.PackageName,
+			instance,
+			subst,
+			paramKinds,
+		) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (g *Generator) collectImportedImplTemplates() {
+	if g.packages == nil {
+		g.packages = map[string]*PackageInfo{}
+	}
+
+	// Avoid appending the same declaration again when this function runs
+	// repeatedly during workspace-package promotion.
+	seenDeclarations := map[*ast.ImplDecl]bool{}
+
+	for _, template := range g.implTemplates {
+		if template == nil ||
+			template.Decl == nil {
+			continue
+		}
+
+		seenDeclarations[template.Decl] = true
+	}
+
+	appendPackageTemplates := func(
+		packageName string,
+		pkg *PackageInfo,
+	) {
+		if packageName == "" ||
+			packageName == g.packageName ||
+			pkg == nil {
+			return
+		}
+
 		for _, decl := range pkg.Impls {
-			template := g.implTemplateFromDeclInPackage(
-				packageName,
-				decl,
-			)
+			if decl == nil ||
+				seenDeclarations[decl] {
+				continue
+			}
+
+			template :=
+				g.implTemplateFromDeclInPackage(
+					packageName,
+					decl,
+				)
+
 			if template == nil {
 				continue
 			}
+
+			seenDeclarations[decl] = true
 
 			g.implTemplates = append(
 				g.implTemplates,
 				template,
 			)
 		}
+	}
+
+	// First collect every implementation from ordinary source-level package
+	// dependencies already present in g.packages.
+	directPackages := map[string]*PackageInfo{}
+
+	for mapKey, pkg := range g.packages {
+		if pkg == nil {
+			continue
+		}
+
+		packageName := pkg.Name
+
+		if packageName == "" {
+			packageName = mapKey
+		}
+
+		if packageName == "" ||
+			packageName == g.packageName {
+			continue
+		}
+
+		// Prefer an entry whose semantic PackageInfo.Name is populated.
+		existing := directPackages[packageName]
+
+		if existing == nil ||
+			existing.Name == "" {
+			directPackages[packageName] = pkg
+		}
+	}
+
+	directNames := make(
+		[]string,
+		0,
+		len(directPackages),
+	)
+
+	for packageName := range directPackages {
+		directNames = append(
+			directNames,
+			packageName,
+		)
+	}
+
+	sort.Strings(directNames)
+
+	for _, packageName := range directNames {
+		appendPackageTemplates(
+			packageName,
+			directPackages[packageName],
+		)
+	}
+
+	if len(g.workspacePackages) == 0 {
+		return
+	}
+
+	// Next inspect workspace-only packages. Do not promote every package in
+	// the workspace: that would make implementations visible without a
+	// corresponding type/interface dependency.
+	//
+	// Promote only a package containing an implementation whose interface
+	// matches an interface instance already referenced by this translation
+	// unit.
+	workspacePackages := map[string]*PackageInfo{}
+
+	for mapKey, pkg := range g.workspacePackages {
+		if pkg == nil {
+			continue
+		}
+
+		packageName := pkg.Name
+
+		if packageName == "" {
+			packageName = mapKey
+		}
+
+		if packageName == "" ||
+			packageName == g.packageName {
+			continue
+		}
+
+		// The package is already directly visible.
+		if packageInfoBySemanticName(
+			g.packages,
+			packageName,
+		) != nil {
+			continue
+		}
+
+		existing := workspacePackages[packageName]
+
+		if existing == nil ||
+			existing.Name == "" {
+			workspacePackages[packageName] = pkg
+		}
+	}
+
+	workspaceNames := make(
+		[]string,
+		0,
+		len(workspacePackages),
+	)
+
+	for packageName := range workspacePackages {
+		workspaceNames = append(
+			workspaceNames,
+			packageName,
+		)
+	}
+
+	sort.Strings(workspaceNames)
+
+	for _, packageName := range workspaceNames {
+		pkg := workspacePackages[packageName]
+
+		matchesReferencedInterface := false
+
+		for _, decl := range pkg.Impls {
+			if decl == nil {
+				continue
+			}
+
+			template :=
+				g.implTemplateFromDeclInPackage(
+					packageName,
+					decl,
+				)
+
+			if template == nil {
+				continue
+			}
+
+			if g.implTemplateMatchesRegisteredInterface(
+				template,
+			) {
+				matchesReferencedInterface = true
+				break
+			}
+		}
+
+		if !matchesReferencedInterface {
+			continue
+		}
+
+		// Promote the package into the normal visible package set. This is
+		// important beyond implementation discovery: imported structs, task
+		// prototypes, helper tasks, extern names, inline impl bodies, enums,
+		// and unions all use g.packages during C emission.
+		g.packages[packageName] = pkg
+
+		appendPackageTemplates(
+			packageName,
+			pkg,
+		)
 	}
 }
 
@@ -13117,16 +13383,24 @@ func (g *Generator) discoverRequestedInterfaceImpls() bool {
 	for {
 		changed := false
 
-		keys := make([]string, 0, len(g.interfaceInstances))
+		keys := make(
+			[]string,
+			0,
+			len(g.interfaceInstances),
+		)
 
 		for key := range g.interfaceInstances {
-			keys = append(keys, key)
+			keys = append(
+				keys,
+				key,
+			)
 		}
 
 		sort.Strings(keys)
 
 		for _, key := range keys {
 			instance := g.interfaceInstances[key]
+
 			if instance == nil {
 				continue
 			}
@@ -13153,8 +13427,7 @@ func (g *Generator) discoverRequestedInterfaceImpls() bool {
 						continue
 					}
 
-					g.resolvedImpls[resolved.Key] =
-						resolved
+					g.resolvedImpls[resolved.Key] = resolved
 
 					g.collectResolvedImplMonomorphizations(
 						resolved,
@@ -13606,89 +13879,183 @@ func (g *Generator) implTargetCandidates() []CType {
 		})
 	}
 
-	packageNames := make([]string, 0, len(g.packages))
-
-	for packageName := range g.packages {
-		packageNames = append(
-			packageNames,
-			packageName,
-		)
+	type importedPackage struct {
+		MapKey      string
+		PackageName string
+		Info        *PackageInfo
 	}
 
-	sort.Strings(packageNames)
+	var packages []importedPackage
 
-	for _, packageName := range packageNames {
-		pkg := g.packages[packageName]
+	for mapKey, pkg := range g.packages {
 		if pkg == nil {
 			continue
 		}
 
-		for name, decl := range pkg.Structs {
+		packageName := pkg.Name
+
+		if packageName == "" {
+			packageName = mapKey
+		}
+
+		packages = append(
+			packages,
+			importedPackage{
+				MapKey:      mapKey,
+				PackageName: packageName,
+				Info:        pkg,
+			},
+		)
+	}
+
+	sort.Slice(
+		packages,
+		func(i int, j int) bool {
+			if packages[i].PackageName ==
+				packages[j].PackageName {
+				return packages[i].MapKey <
+					packages[j].MapKey
+			}
+
+			return packages[i].PackageName <
+				packages[j].PackageName
+		},
+	)
+
+	for _, imported := range packages {
+		packageName := imported.PackageName
+		pkg := imported.Info
+
+		structNames := make(
+			[]string,
+			0,
+			len(pkg.Structs),
+		)
+
+		for name := range pkg.Structs {
+			structNames = append(
+				structNames,
+				name,
+			)
+		}
+
+		sort.Strings(structNames)
+
+		for _, name := range structNames {
+			decl := pkg.Structs[name]
+
 			if decl == nil ||
 				len(decl.GenericParams) != 0 {
 				continue
 			}
 
-			cName := cImportedTypeName(
-				packageName,
-				name,
+			add(
+				g.importedNamedCType(
+					packageName,
+					name,
+				),
 			)
-
-			add(CType{
-				Name:     cName,
-				SealName: cName,
-			})
 		}
+
+		distinctNames := make(
+			[]string,
+			0,
+			len(pkg.Distincts),
+		)
 
 		for name := range pkg.Distincts {
-			cName := cImportedTypeName(
-				packageName,
+			distinctNames = append(
+				distinctNames,
 				name,
 			)
-
-			add(CType{
-				Name:     cName,
-				SealName: cName,
-			})
 		}
+
+		sort.Strings(distinctNames)
+
+		for _, name := range distinctNames {
+			add(
+				g.importedNamedCType(
+					packageName,
+					name,
+				),
+			)
+		}
+
+		enumNames := make(
+			[]string,
+			0,
+			len(pkg.Enums),
+		)
 
 		for name := range pkg.Enums {
-			cName := cImportedTypeName(
-				packageName,
+			enumNames = append(
+				enumNames,
 				name,
 			)
-
-			add(CType{
-				Name:     cName,
-				SealName: cName,
-			})
 		}
 
+		sort.Strings(enumNames)
+
+		for _, name := range enumNames {
+			add(
+				g.importedNamedCType(
+					packageName,
+					name,
+				),
+			)
+		}
+
+		unionNames := make(
+			[]string,
+			0,
+			len(pkg.Unions),
+		)
+
 		for name := range pkg.Unions {
-			cName := cImportedTypeName(
-				packageName,
+			unionNames = append(
+				unionNames,
 				name,
 			)
+		}
 
-			add(CType{
-				Name:     cName,
-				SealName: cName,
-			})
+		sort.Strings(unionNames)
+
+		for _, name := range unionNames {
+			add(
+				g.importedNamedCType(
+					packageName,
+					name,
+				),
+			)
 		}
 	}
 
-	names := make([]string, 0, len(seen))
+	names := make(
+		[]string,
+		0,
+		len(seen),
+	)
 
 	for name := range seen {
-		names = append(names, name)
+		names = append(
+			names,
+			name,
+		)
 	}
 
 	sort.Strings(names)
 
-	out := make([]CType, 0, len(names))
+	out := make(
+		[]CType,
+		0,
+		len(names),
+	)
 
 	for _, name := range names {
-		out = append(out, seen[name])
+		out = append(
+			out,
+			seen[name],
+		)
 	}
 
 	return out
@@ -14122,7 +14489,11 @@ func (g *Generator) findResolvedImpl(
 		return nil
 	}
 
-	key := resolvedImplKey(instance.Key, target)
+	key := resolvedImplKey(
+		instance.Key,
+		target,
+	)
+
 	return g.resolvedImpls[key]
 }
 
