@@ -1,37 +1,31 @@
 /*
-StaticArray owns fixed-length allocator-backed storage.
+StaticArray owns fixed-length inline storage.
 
-N is part of the type but does not imply inline or stack element
-storage.
+N is part of the type and determines the exact number of elements stored
+directly inside the StaticArray value.
+
+StaticArray does not allocate memory and requires no allocator,
+deallocator, or explicit destruction.
+
+Copying a StaticArray copies its complete inline slot storage by value.
+The elements themselves retain the normal copy semantics of T.
 */
 StaticArray :: struct <
     T type,
     N int[N >= 0],
 > {
-    _data rawptr
-    _deallocator mem.Deallocator
+    _data @inline_array<_Slot<T>, N>
 }
 
 /*
-NewStaticArrayZeroed creates a zero-filled StaticArray.
+NewStaticArrayZeroed creates a zero-initialized StaticArray.
 */
 NewStaticArrayZeroed :: task <
     T type,
     N int[N >= 0],
->(
-    allocator mem.ZeroAllocator,
-    deallocator mem.Deallocator,
-) StaticArray<T, N> {
-    length := cast<uint>(N)
-
-    data := _AllocateZeroed<_Slot<T>>(
-        allocator,
-        length,
-    )
-
+>() StaticArray<T, N> {
     return StaticArray<T, N>{
-        _data = data,
-        _deallocator = deallocator,
+        _data = @inline_array<_Slot<T>, N>(),
     }
 }
 
@@ -42,33 +36,18 @@ NewStaticArrayFilled :: task <
     T type,
     N int[N >= 0],
 >(
-    allocator mem.Allocator,
-    deallocator mem.Deallocator,
     value T,
 ) StaticArray<T, N> {
-    length := cast<uint>(N)
+    result := NewStaticArrayZeroed<T, N>()
 
-    data := _Allocate<_Slot<T>>(
-        allocator,
-        length,
-    )
+    index := 0
 
-    index: uint = 0
-
-    for index < length {
-        _WriteSlot<T>(
-            data,
-            index,
-            value,
-        )
-
+    for index < N {
+        result._data[index].Value = value
         index += 1
     }
 
-    return StaticArray<T, N>{
-        _data = data,
-        _deallocator = deallocator,
-    }
+    return result
 }
 
 NewStaticArray :: overload {
@@ -76,6 +55,9 @@ NewStaticArray :: overload {
     NewStaticArrayFilled
 }
 
+/*
+StaticArrayLength returns the fixed compile-time element count.
+*/
 StaticArrayLength :: pure task <
     T type,
     N int[N >= 0],
@@ -85,6 +67,11 @@ StaticArrayLength :: pure task <
     return cast<uint>(N)
 }
 
+/*
+StaticArrayAt returns the element at index.
+
+Negative indexes are normalized relative to the fixed array length.
+*/
 StaticArrayAt :: pure task <
     T type,
     N int[N >= 0],
@@ -97,12 +84,16 @@ StaticArrayAt :: pure task <
         cast<uint>(N),
     )
 
-    return _ReadSlot<T>(
-        values._data,
-        normalized,
-    )
+    return values._data[
+        cast<int>(normalized)
+    ].Value
 }
 
+/*
+StaticArraySet replaces the element at index by shallow assignment.
+
+Negative indexes are normalized relative to the fixed array length.
+*/
 StaticArraySet :: task <
     T type,
     N int[N >= 0],
@@ -116,35 +107,36 @@ StaticArraySet :: task <
         cast<uint>(N),
     )
 
-    _WriteSlot<T>(
-        values._data,
-        normalized,
-        value,
-    )
+    values._data[
+        cast<int>(normalized)
+    ].Value = value
 }
 
+/*
+StaticArraySlice creates a borrowed Slice over the StaticArray storage.
+
+The returned Slice does not own the storage and must not outlive the
+StaticArray from which it was created.
+
+For an empty StaticArray, the borrowed data pointer is nil.
+*/
 StaticArraySlice :: pure task <
     T type,
     N int[N >= 0],
 >(
     values *StaticArray<T, N>,
 ) Slice<T> {
+    if N == 0 {
+        return Slice<T>{
+            _data = nil,
+            _length = 0,
+        }
+    }
+
     return Slice<T>{
-        _data = values._data,
+        _data = cast<rawptr>(
+            &values._data[0],
+        ),
         _length = cast<uint>(N),
     }
-}
-
-DestroyStaticArray :: task <
-    T type,
-    N int[N >= 0],
->(
-    values *StaticArray<T, N>,
-) {
-    _DestroyStorage(
-        values._deallocator,
-        values._data,
-    )
-
-    values._data = nil
 }

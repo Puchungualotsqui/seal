@@ -209,29 +209,8 @@ TestEmptyArray :: task() {
 }
 
 TestStaticArray :: task() {
-    cAllocator := mem.NewCAllocator()
-
-    allocator := cast<mem.Allocator>(
-        &cAllocator,
-    )
-
-    zeroAllocator := cast<mem.ZeroAllocator>(
-        &cAllocator,
-    )
-
-    deallocator := cast<mem.Deallocator>(
-        &cAllocator,
-    )
-
     zeroed :=
-        lists.NewStaticArrayZeroed<int, 5>(
-            zeroAllocator,
-            deallocator,
-        )
-
-    defer lists.DestroyStaticArray<int, 5>(
-        &zeroed,
-    )
+        lists.NewStaticArrayZeroed<int, 5>()
 
     assert(len(zeroed) == 5)
 
@@ -247,14 +226,8 @@ TestStaticArray :: task() {
 
     filled :=
         lists.NewStaticArrayFilled<int, 4>(
-            allocator,
-            deallocator,
             9,
         )
-
-    defer lists.DestroyStaticArray<int, 4>(
-        &filled,
-    )
 
     assert(len(filled) == 4)
 
@@ -272,10 +245,15 @@ TestStaticArray :: task() {
     )
 
     assert(len(slice) == 4)
+
+    assert(slice[0] == 9)
     assert(slice[1] == 18)
+    assert(slice[2] == 9)
+    assert(slice[3] == 9)
 
     slice[2] = 27
 
+    assert(slice[2] == 27)
     assert(filled[2] == 27)
 }
 
@@ -1866,26 +1844,10 @@ TestArrayCheckedAccess :: task() {
 }
 
 TestStaticArrayCheckedAccess :: task() {
-    cAllocator := mem.NewCAllocator()
-
-    allocator := cast<mem.Allocator>(
-        &cAllocator,
-    )
-
-    deallocator := cast<mem.Deallocator>(
-        &cAllocator,
-    )
-
     values :=
         lists.NewStaticArrayFilled<int, 3>(
-            allocator,
-            deallocator,
             8,
         )
-
-    defer lists.DestroyStaticArray<int, 3>(
-        &values,
-    )
 
     value, found :=
         lists.StaticArrayGet<int, 3>(
@@ -1937,6 +1899,163 @@ TestStaticArrayCheckedAccess :: task() {
     )
 
     assert(values[2] == 24)
+
+    overloadedValue, overloadedFound :=
+        lists.Get<int, 3>(
+            &values,
+            1,
+        )
+
+    assert(overloadedFound)
+    assert(overloadedValue == 8)
+
+    overloadedChanged :=
+        lists.TrySet<int, 3>(
+            &values,
+            -1,
+            32,
+        )
+
+    assert(overloadedChanged)
+    assert(values[2] == 32)
+
+    overloadedUnsafe :=
+        lists.GetUnsafe<int, 3>(
+            &values,
+            0,
+        )
+
+    assert(overloadedUnsafe == 16)
+
+    lists.SetUnsafe<int, 3>(
+        &values,
+        1,
+        40,
+    )
+
+    assert(values[1] == 40)
+}
+
+TestStaticArrayValueSemantics :: task() {
+    original :=
+        lists.NewStaticArrayFilled<int, 4>(
+            10,
+        )
+
+    copy := original
+
+    assert(len(original) == 4)
+    assert(len(copy) == 4)
+
+    copy[1] = 99
+
+    assert(original[0] == 10)
+    assert(original[1] == 10)
+    assert(original[2] == 10)
+    assert(original[3] == 10)
+
+    assert(copy[0] == 10)
+    assert(copy[1] == 99)
+    assert(copy[2] == 10)
+    assert(copy[3] == 10)
+
+    original[2] = 50
+
+    assert(original[2] == 50)
+    assert(copy[2] == 10)
+}
+
+TestEmptyStaticArray :: task() {
+    values :=
+        lists.NewStaticArrayZeroed<int, 0>()
+
+    assert(len(values) == 0)
+
+    assert(
+        lists.StaticArrayLength<int, 0>(
+            &values,
+        ) == 0,
+    )
+
+    slice := lists.StaticArraySlice<int, 0>(
+        &values,
+    )
+
+    assert(len(slice) == 0)
+
+    assert(
+        lists.SliceData<int>(
+            &slice,
+        ) == nil,
+    )
+
+    _, found :=
+        lists.StaticArrayGet<int, 0>(
+            &values,
+            0,
+        )
+
+    assert(!found)
+
+    changed :=
+        lists.StaticArrayTrySet<int, 0>(
+            &values,
+            0,
+            100,
+        )
+
+    assert(!changed)
+}
+
+TestNestedStaticArray :: task() {
+    first :=
+        lists.NewStaticArrayFilled<int, 3>(
+            1,
+        )
+
+    second :=
+        lists.NewStaticArrayFilled<int, 3>(
+            2,
+        )
+
+    matrix :=
+        lists.NewStaticArrayZeroed<
+            lists.StaticArray<int, 3>,
+            2
+        >()
+
+    matrix[0] = first
+    matrix[1] = second
+
+    assert(len(matrix) == 2)
+
+    firstRow := matrix[0]
+    secondRow := matrix[1]
+
+    assert(len(firstRow) == 3)
+    assert(len(secondRow) == 3)
+
+    assert(firstRow[0] == 1)
+    assert(firstRow[1] == 1)
+    assert(firstRow[2] == 1)
+
+    assert(secondRow[0] == 2)
+    assert(secondRow[1] == 2)
+    assert(secondRow[2] == 2)
+
+    secondRow[2] = 99
+
+    assert(secondRow[2] == 99)
+
+    /*
+    StaticArrayAt returns elements by value, so changing secondRow does
+    not modify the nested StaticArray stored inside matrix.
+    */
+    storedSecondRow := matrix[1]
+
+    assert(storedSecondRow[0] == 2)
+    assert(storedSecondRow[1] == 2)
+    assert(storedSecondRow[2] == 2)
 }
 
 TestDequeCheckedAccess :: task() {
@@ -3702,6 +3821,9 @@ Main :: task() {
     TestArrayFromSlice()
     TestEmptyArray()
     TestStaticArray()
+    TestStaticArrayValueSemantics()
+    TestEmptyStaticArray()
+    TestNestedStaticArray()
     TestArrayCheckedAccess()
     TestStaticArrayCheckedAccess()
 

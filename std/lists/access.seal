@@ -139,7 +139,7 @@ ArraySetUnsafe :: task <T type>(
 }
 
 /*
-Compile-time-length heap arrays.
+Compile-time-length inline arrays.
 */
 
 StaticArrayGet :: pure task <
@@ -160,10 +160,9 @@ StaticArrayGet :: pure task <
         return empty, false
     }
 
-    return _ReadSlot<T>(
-        values._data,
-        normalized,
-    ), true
+    return values._data[
+        cast<int>(normalized)
+    ].Value, true
 }
 
 StaticArrayGetUnsafe :: pure task <
@@ -173,10 +172,9 @@ StaticArrayGetUnsafe :: pure task <
     values *StaticArray<T, N>,
     index uint,
 ) T {
-    return _ReadSlot<T>(
-        values._data,
-        index,
-    )
+    return values._data[
+        cast<int>(index)
+    ].Value
 }
 
 StaticArrayTrySet :: task <
@@ -196,11 +194,9 @@ StaticArrayTrySet :: task <
         return false
     }
 
-    _WriteSlot<T>(
-        values._data,
-        normalized,
-        value,
-    )
+    values._data[
+        cast<int>(normalized)
+    ].Value = value
 
     return true
 }
@@ -213,11 +209,9 @@ StaticArraySetUnsafe :: task <
     index uint,
     value T,
 ) {
-    _WriteSlot<T>(
-        values._data,
-        index,
-        value,
-    )
+    values._data[
+        cast<int>(index)
+    ].Value = value
 }
 
 /*
