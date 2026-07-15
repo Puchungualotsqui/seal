@@ -7266,3 +7266,264 @@ Main :: task() {
 
 	runGeneratedC(t, out)
 }
+
+func TestGenerateInlineArrayOfOverloadedIndexRows(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Row :: struct {
+    data @inline_array<int, 3>
+    length uint
+}
+
+RowAt :: pure task(
+    values *Row,
+    index int,
+) int {
+    return values.data[index]
+}
+
+RowSet :: task(
+    values *Row,
+    index int,
+    value int,
+) {
+    values.data[index] = value
+}
+
+RowLen :: pure task(
+    values *Row,
+) uint {
+    return values.length
+}
+
+[] :: overload {
+    RowAt
+}
+
+[]= :: overload {
+    RowSet
+}
+
+len :: overload {
+    RowLen
+}
+
+Main :: task() {
+    first := Row{
+        data = @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        length = 3,
+    }
+
+    second := Row{
+        data = @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+        length = 3,
+    }
+
+    matrix := @inline_array<Row, 2>(
+        first,
+        second,
+    )
+
+    value := matrix[1][2]
+
+    matrix[0][1] = 99
+
+    rows := len(matrix)
+    columns := len(matrix[0])
+
+    assert(value == 6)
+    assert(matrix[0][0] == 1)
+    assert(matrix[0][1] == 99)
+    assert(matrix[1][2] == 6)
+    assert(rows == 2)
+    assert(columns == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[3];",
+	) {
+		t.Fatalf(
+			"expected inline-array storage inside Row, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"Row matrix[2] = {first, second};",
+	) {
+		t.Fatalf(
+			"expected outer inline-array matrix declaration, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"RowAt(&((matrix)[1]), 2)",
+	) {
+		t.Fatalf(
+			"expected built-in outer indexing followed by overloaded inner read, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"RowSet(&((matrix)[0]), 1, 99)",
+	) {
+		t.Fatalf(
+			"expected built-in outer indexing followed by overloaded inner write, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uintptr_t rows = ((uintptr_t)2);",
+	) {
+		t.Fatalf(
+			"expected built-in outer inline-array len, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"RowLen(&((matrix)[0]))",
+	) {
+		t.Fatalf(
+			"expected overloaded len for indexed Row value, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMixedBuiltinAndOverloadedDoubleIndex(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+DynamicRow :: struct {
+    values @inline_array<int, 4>
+    length uint
+}
+
+DynamicRowAt :: pure task(
+    row *DynamicRow,
+    index int,
+) int {
+    return row.values[index]
+}
+
+DynamicRowSet :: task(
+    row *DynamicRow,
+    index int,
+    value int,
+) {
+    row.values[index] = value
+}
+
+[] :: overload {
+    DynamicRowAt
+}
+
+[]= :: overload {
+    DynamicRowSet
+}
+
+Main :: task() {
+    row0 := DynamicRow{
+        values = @inline_array<int, 4>(
+            10,
+            20,
+            30,
+            40,
+        ),
+        length = 4,
+    }
+
+    row1 := DynamicRow{
+        values = @inline_array<int, 4>(
+            50,
+            60,
+            70,
+            80,
+        ),
+        length = 4,
+    }
+
+    matrix := @inline_array<DynamicRow, 2>(
+        row0,
+        row1,
+    )
+
+    before := matrix[1][2]
+
+    matrix[1][2] = 777
+
+    after := matrix[1][2]
+
+    assert(before == 70)
+    assert(after == 777)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"DynamicRow matrix[2] = {row0, row1};",
+	) {
+		t.Fatalf(
+			"expected inline-array matrix storage, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"DynamicRowAt(&((matrix)[1]), 2)",
+	) {
+		t.Fatalf(
+			"expected chained builtin-plus-overloaded read, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"DynamicRowSet(&((matrix)[1]), 2, 777)",
+	) {
+		t.Fatalf(
+			"expected chained builtin-plus-overloaded write, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}

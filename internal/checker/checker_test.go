@@ -10755,3 +10755,337 @@ Identity :: task(
 		)
 	}
 }
+
+func TestCheckerInlineArrayOfOverloadedIndexRows(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+Row :: struct {
+    data @inline_array<int, 3>
+    length uint
+}
+
+RowAt :: pure task(
+    values *Row,
+    index int,
+) int {
+    return values.data[index]
+}
+
+RowSet :: task(
+    values *Row,
+    index int,
+    value int,
+) {
+    values.data[index] = value
+}
+
+RowLen :: pure task(
+    values *Row,
+) uint {
+    return values.length
+}
+
+[] :: overload {
+    RowAt
+}
+
+[]= :: overload {
+    RowSet
+}
+
+len :: overload {
+    RowLen
+}
+
+Main :: task() {
+    first := Row{
+        data = @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        length = 3,
+    }
+
+    second := Row{
+        data = @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+        length = 3,
+    }
+
+    matrix := @inline_array<Row, 2>(
+        first,
+        second,
+    )
+
+    row := matrix[1]
+    value := matrix[1][2]
+
+    matrix[0][1] = 99
+
+    rows := len(matrix)
+    columns := len(matrix[0])
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	/*
+		row := matrix[1]
+
+		This is a direct inline-array read.
+	*/
+	rowIndex := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			3,
+		),
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		rowIndex,
+		IndexResolutionInlineArrayRead,
+	)
+
+	/*
+		value := matrix[1][2]
+
+		The expression contains two independent index operations:
+
+		    matrix[1]
+		        builtin inline-array indexing
+
+		    matrix[1][2]
+		        overloaded Row indexing
+	*/
+	valueStmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		4,
+	)
+
+	valueDecl, ok :=
+		valueStmt.(*ast.VarDeclStmt)
+
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			valueStmt,
+		)
+	}
+
+	outerIndex, ok :=
+		valueDecl.Value.(*ast.IndexExpr)
+
+	if !ok {
+		t.Fatalf(
+			"value expression type = %T, want *ast.IndexExpr",
+			valueDecl.Value,
+		)
+	}
+
+	innerIndex, ok :=
+		outerIndex.Left.(*ast.IndexExpr)
+
+	if !ok {
+		t.Fatalf(
+			"outer index left type = %T, want *ast.IndexExpr",
+			outerIndex.Left,
+		)
+	}
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		innerIndex,
+		IndexResolutionInlineArrayRead,
+	)
+
+	overloadedRead :=
+		assertIndexResolutionKind(
+			t,
+			run.Checker,
+			outerIndex,
+			IndexResolutionOverloadRead,
+		)
+
+	if overloadedRead.Candidate == nil {
+		t.Fatal(
+			"expected overloaded row index read to have a selected candidate",
+		)
+	}
+
+	if overloadedRead.Candidate.Name !=
+		"RowAt" {
+		t.Fatalf(
+			"selected overloaded read candidate = %q, want %q",
+			overloadedRead.Candidate.Name,
+			"RowAt",
+		)
+	}
+
+	/*
+		matrix[0][1] = 99
+
+		Again:
+
+		    matrix[0]
+		        inline-array read producing an addressable Row
+
+		    matrix[0][1] = 99
+		        overloaded []= assignment
+	*/
+	assignStmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		5,
+	)
+
+	assignIndex :=
+		checkerIndexFromAssignStmt(
+			t,
+			assignStmt,
+		)
+
+	innerAssignIndex, ok :=
+		assignIndex.Left.(*ast.IndexExpr)
+
+	if !ok {
+		t.Fatalf(
+			"assignment outer index left type = %T, want *ast.IndexExpr",
+			assignIndex.Left,
+		)
+	}
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		innerAssignIndex,
+		IndexResolutionInlineArrayRead,
+	)
+
+	overloadedWrite :=
+		assertIndexResolutionKind(
+			t,
+			run.Checker,
+			assignIndex,
+			IndexResolutionOverloadWrite,
+		)
+
+	if overloadedWrite.Candidate == nil {
+		t.Fatal(
+			"expected overloaded row index write to have a selected candidate",
+		)
+	}
+
+	if overloadedWrite.Candidate.Name !=
+		"RowSet" {
+		t.Fatalf(
+			"selected overloaded write candidate = %q, want %q",
+			overloadedWrite.Candidate.Name,
+			"RowSet",
+		)
+	}
+
+	/*
+		rows := len(matrix)
+
+		This must use the builtin inline-array len operation.
+	*/
+	rowsCall := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			6,
+		),
+	)
+
+	rowsResolution, ok :=
+		run.Checker.LenResolutionFor(
+			rowsCall,
+		)
+
+	if !ok {
+		t.Fatal(
+			"len(matrix) has no checker resolution",
+		)
+	}
+
+	if rowsResolution.Kind !=
+		LenResolutionInlineArray {
+		t.Fatalf(
+			"len(matrix) resolution kind = %v, want %v",
+			rowsResolution.Kind,
+			LenResolutionInlineArray,
+		)
+	}
+
+	/*
+		columns := len(matrix[0])
+
+		The argument is an addressable Row obtained through inline-array
+		indexing, so the RowLen overload must be selected.
+	*/
+	columnsCall := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			7,
+		),
+	)
+
+	columnsResolution, ok :=
+		run.Checker.LenResolutionFor(
+			columnsCall,
+		)
+
+	if !ok {
+		t.Fatal(
+			"len(matrix[0]) has no checker resolution",
+		)
+	}
+
+	if columnsResolution.Kind !=
+		LenResolutionOverload {
+		t.Fatalf(
+			"len(matrix[0]) resolution kind = %v, want %v",
+			columnsResolution.Kind,
+			LenResolutionOverload,
+		)
+	}
+
+	if columnsResolution.Candidate == nil {
+		t.Fatal(
+			"expected len(matrix[0]) to select overloaded RowLen",
+		)
+	}
+
+	if columnsResolution.Candidate.Name !=
+		"RowLen" {
+		t.Fatalf(
+			"selected len candidate = %q, want %q",
+			columnsResolution.Candidate.Name,
+			"RowLen",
+		)
+	}
+}

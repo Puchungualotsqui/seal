@@ -14947,7 +14947,10 @@ func (c *Checker) isAddressableExpr(
 ) bool {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		sym := scope.Lookup(e.Name.Name)
+		sym := scope.Lookup(
+			e.Name.Name,
+		)
+
 		if sym == nil {
 			return false
 		}
@@ -14960,6 +14963,69 @@ func (c *Checker) isAddressableExpr(
 			scope,
 			e.Left,
 		)
+
+	case *ast.IndexExpr:
+		resolution, ok :=
+			c.indexResolutions[e]
+
+		if !ok {
+			return false
+		}
+
+		switch resolution.Kind {
+		case IndexResolutionInlineArrayRead:
+			/*
+				An inline-array element occupies storage directly inside its
+				parent array:
+
+				    matrix[1]
+
+				is addressable exactly when:
+
+				    matrix
+
+				is addressable.
+			*/
+			return c.isAddressableExpr(
+				scope,
+				e.Left,
+			)
+
+		case IndexResolutionVariadicRead:
+			/*
+				A variadic element refers to actual variadic storage.
+			*/
+			return true
+
+		case IndexResolutionRawptrRead:
+			/*
+				Raw-pointer indexing dereferences actual memory.
+			*/
+			return true
+
+		case IndexResolutionPrimitiveByteRead:
+			/*
+				Primitive byte indexing refers to a byte inside the original
+				primitive value, so the base value must itself be addressable.
+			*/
+			return c.isAddressableExpr(
+				scope,
+				e.Left,
+			)
+
+		default:
+			/*
+				This deliberately rejects:
+
+				    string[index]
+				    cstring[index]
+				    overloaded[index]
+
+				String-like reads are immutable, while an overloaded [] may
+				return a temporary task result rather than direct storage.
+			*/
+			return false
+		}
 
 	case *ast.UnaryExpr:
 		return e.Op == token.Star
@@ -14974,7 +15040,10 @@ func (c *Checker) isMutableAddressableExpr(
 ) bool {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		sym := scope.Lookup(e.Name.Name)
+		sym := scope.Lookup(
+			e.Name.Name,
+		)
+
 		return sym != nil &&
 			sym.Kind == SymbolVar
 
@@ -14983,6 +15052,56 @@ func (c *Checker) isMutableAddressableExpr(
 			scope,
 			e.Left,
 		)
+
+	case *ast.IndexExpr:
+		resolution, ok :=
+			c.indexResolutions[e]
+
+		if !ok {
+			return false
+		}
+
+		switch resolution.Kind {
+		case IndexResolutionInlineArrayRead:
+			/*
+				Mutability propagates through inline-array indexing:
+
+				    matrix[0]
+
+				is mutable when matrix itself is mutable.
+			*/
+			return c.isMutableAddressableExpr(
+				scope,
+				e.Left,
+			)
+
+		case IndexResolutionVariadicRead:
+			/*
+				Variadic elements are writable according to the existing
+				checkIndexAssignment semantics.
+			*/
+			return true
+
+		case IndexResolutionRawptrRead:
+			/*
+				Raw pointers refer to mutable byte-addressable memory.
+			*/
+			return true
+
+		case IndexResolutionPrimitiveByteRead:
+			return c.isMutableAddressableExpr(
+				scope,
+				e.Left,
+			)
+
+		default:
+			/*
+				Do not consider overloaded [] results mutable automatically.
+				The overload may return a value rather than a reference to
+				storage.
+			*/
+			return false
+		}
 
 	case *ast.UnaryExpr:
 		return e.Op == token.Star
