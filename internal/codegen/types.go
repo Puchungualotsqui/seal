@@ -16,7 +16,11 @@ type CType struct {
 	IsVariadic     bool
 	IsInterface    bool
 	IsDynInterface bool
-	Elem           *CType
+
+	IsInlineArray bool
+	InlineLength  uint64
+
+	Elem *CType
 }
 
 func (t CType) String() string {
@@ -24,11 +28,60 @@ func (t CType) String() string {
 		return "..." + t.Elem.String()
 	}
 
+	if t.IsInlineArray {
+		elem := "<invalid>"
+		if t.Elem != nil {
+			elem = t.Elem.String()
+		}
+
+		return fmt.Sprintf(
+			"@inline_array<%s, %d>",
+			elem,
+			t.InlineLength,
+		)
+	}
+
 	return t.Name
 }
 
+func (t CType) PhysicalInlineLength() uint64 {
+	if t.InlineLength == 0 {
+		return 1
+	}
+
+	return t.InlineLength
+}
+
 func (t CType) Decl(name string) string {
+	if t.IsInlineArray {
+		if t.Elem == nil {
+			return CInvalid.Decl(name)
+		}
+
+		return t.Elem.Decl(
+			fmt.Sprintf(
+				"%s[%d]",
+				name,
+				t.PhysicalInlineLength(),
+			),
+		)
+	}
+
+	if name == "" {
+		return strings.TrimSpace(t.Name)
+	}
+
 	return fmt.Sprintf("%s %s", t.Name, name)
+}
+
+func (t CType) TypeName() string {
+	if t.IsInlineArray {
+		return strings.TrimSpace(
+			t.Decl(""),
+		)
+	}
+
+	return t.Name
 }
 
 var (
@@ -325,6 +378,12 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			Name:     name,
 			SealName: name,
 		}
+
+	case *ast.InlineArrayType:
+		return g.cInlineArrayTypeFromAst(
+			typ,
+			nil,
+		)
 
 	case *ast.InterfaceSelfType:
 		g.error(
@@ -1343,6 +1402,21 @@ func (g *Generator) inferExprType(
 			expected,
 		)
 
+	case *ast.InlineArrayExpr:
+		if expected != nil &&
+			expected.IsInlineArray {
+			return *expected
+		}
+
+		return g.cInlineArrayTypeFromAst(
+			&ast.InlineArrayType{
+				Elem:   e.Elem,
+				Length: e.Length,
+				Loc:    e.Loc,
+			},
+			g.genericSubst,
+		)
+
 	case *ast.IntLitExpr:
 		return CInt
 
@@ -1812,6 +1886,83 @@ func (g *Generator) unionHasMember(unionName string, memberName string) bool {
 	}
 
 	return false
+}
+
+func (g *Generator) lookupStructFieldTypeByIndex(
+	structName string,
+	index int,
+) CType {
+	if index < 0 {
+		return CInvalid
+	}
+
+	if d := g.structs[structName]; d != nil {
+		if index >= len(d.Fields) {
+			return CInvalid
+		}
+
+		return g.cTypeFromAst(
+			d.Fields[index].Type,
+		)
+	}
+
+	if info := g.genericStructs[structName]; info != nil {
+		if index >= len(info.Decl.Fields) {
+			return CInvalid
+		}
+
+		subst :=
+			genericArgSubstForCGen(
+				info.Decl.GenericParams,
+				info.Args,
+			)
+
+		return g.cTypeFromAstWithGenericArgs(
+			info.Decl.Fields[index].Type,
+			subst,
+		)
+	}
+
+	if info := g.importedGenericStructs[structName]; info != nil {
+		if index >= len(info.Decl.Fields) {
+			return CInvalid
+		}
+
+		subst :=
+			genericArgSubstForCGen(
+				info.Decl.GenericParams,
+				info.Args,
+			)
+
+		return g.cTypeFromAstWithGenericArgsInTypeContext(
+			info.PackageName,
+			info.Decl.Fields[index].Type,
+			subst,
+		)
+	}
+
+	for pkgName, pkg := range g.packages {
+		if pkg == nil {
+			continue
+		}
+
+		for typeName, decl := range pkg.Structs {
+			if cImportedTypeName(pkgName, typeName) != structName {
+				continue
+			}
+
+			if index >= len(decl.Fields) {
+				return CInvalid
+			}
+
+			return g.cTypeFromAstInTypeContext(
+				pkgName,
+				decl.Fields[index].Type,
+			)
+		}
+	}
+
+	return CInvalid
 }
 
 func (g *Generator) lookupStructFieldType(structName string, fieldName string) CType {

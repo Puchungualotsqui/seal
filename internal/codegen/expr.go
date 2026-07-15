@@ -54,6 +54,13 @@ func (g *Generator) isAddressableExprForReference(
 		if g.isByteIndexableCType(leftType) {
 			return g.isAddressableByteSource(e.Left)
 		}
+
+		if leftType.IsInlineArray ||
+			leftType.IsVariadic {
+			return g.isAddressableExprForReference(
+				e.Left,
+			)
+		}
 	}
 
 	return false
@@ -289,6 +296,22 @@ func (g *Generator) emitBuiltinIndexRead(
 			index,
 		)
 
+	case leftType.IsInlineArray:
+		if leftType.Elem == nil {
+			g.error(
+				e.Left.Span(),
+				"cannot index invalid @inline_array value",
+			)
+
+			return "0"
+		}
+
+		return fmt.Sprintf(
+			"(%s)[%s]",
+			left,
+			index,
+		)
+
 	case leftType.IsVariadic:
 		if leftType.Elem == nil {
 			g.error(
@@ -352,6 +375,22 @@ func (g *Generator) emitBuiltinIndexLValue(
 			"cstring indexing is read-only",
 		)
 		return "0", CInvalid, false
+
+	case leftType.IsInlineArray:
+		if leftType.Elem == nil {
+			g.error(
+				e.Left.Span(),
+				"cannot assign through invalid @inline_array value",
+			)
+
+			return "0", CInvalid, false
+		}
+
+		return fmt.Sprintf(
+			"(%s)[%s]",
+			left,
+			index,
+		), *leftType.Elem, true
 
 	case leftType.IsVariadic:
 		if leftType.Elem == nil {
@@ -515,6 +554,16 @@ func (g *Generator) emitAssignmentExpr(
 	}
 
 	leftType := g.inferExprType(s.Left, nil)
+
+	if leftType.IsInlineArray {
+		g.error(
+			s.Span(),
+			"cannot emit whole @inline_array assignment",
+		)
+
+		return "0"
+	}
+
 	left := g.emitExpr(s.Left, nil)
 	right := g.emitExpr(s.Right, &leftType)
 
@@ -560,6 +609,10 @@ func (g *Generator) indexExprType(
 	case leftType.SealName == "cstring":
 		return CChar
 
+	case leftType.IsInlineArray &&
+		leftType.Elem != nil:
+		return *leftType.Elem
+
 	case leftType.IsVariadic &&
 		leftType.Elem != nil:
 		return *leftType.Elem
@@ -594,7 +647,9 @@ func (g *Generator) isAddressableByteSource(
 			return true
 		}
 
-		return g.isAddressableByteSource(e.Left)
+		return g.isAddressableByteSource(
+			e.Left,
+		)
 
 	case *ast.UnaryExpr:
 		return e.Op == token.Star
@@ -609,14 +664,20 @@ func (g *Generator) isAddressableByteSource(
 		}
 
 		leftType :=
-			g.inferExprType(e.Left, nil)
+			g.inferExprType(
+				e.Left,
+				nil,
+			)
 
-		if leftType.IsVariadic ||
+		if leftType.IsInlineArray ||
+			leftType.IsVariadic ||
 			leftType.SealName == "rawptr" {
 			return true
 		}
 
-		if g.isByteIndexableCType(leftType) {
+		if g.isByteIndexableCType(
+			leftType,
+		) {
 			return g.isAddressableByteSource(
 				e.Left,
 			)
@@ -687,6 +748,31 @@ func (g *Generator) emitExpr(
 		}
 
 		return e.Name.Name
+
+	case *ast.InlineArrayExpr:
+		typ := g.inferExprType(
+			e,
+			expected,
+		)
+
+		if expected != nil &&
+			expected.IsInlineArray {
+			typ = *expected
+		}
+
+		if !typ.IsInlineArray {
+			g.error(
+				e.Span(),
+				"@inline_array expression has no inline-array C type",
+			)
+
+			return "0"
+		}
+
+		return g.emitInlineArrayCompoundLiteral(
+			e,
+			typ,
+		)
 
 	case *ast.DotIdentExpr:
 		if expected != nil &&
@@ -1041,24 +1127,66 @@ func (g *Generator) emitBuiltinTextBinaryExpr(
 	return comparison, true
 }
 
-func (g *Generator) emitCompoundLiteral(e *ast.CompoundLiteralExpr, typ CType) string {
+func (g *Generator) emitCompoundLiteral(
+	e *ast.CompoundLiteralExpr,
+	typ CType,
+) string {
 	if _, ok := g.distincts[typ.SealName]; ok {
-		g.error(e.Span(), fmt.Sprintf("distinct type %s cannot be constructed with a literal; use cast<%s>(value)", typ.SealName, typ.SealName))
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"distinct type %s cannot be constructed with a literal; use cast<%s>(value)",
+				typ.SealName,
+				typ.SealName,
+			),
+		)
+
 		return "0"
 	}
 
 	var values []string
 
 	for _, field := range e.Fields {
-		fieldType := g.lookupStructFieldType(typ.SealName, field.Name.Name)
-		values = append(values, fmt.Sprintf(".%s = %s", field.Name.Name, g.emitExpr(field.Value, &fieldType)))
+		fieldType :=
+			g.lookupStructFieldType(
+				typ.SealName,
+				field.Name.Name,
+			)
+
+		values = append(
+			values,
+			fmt.Sprintf(
+				".%s = %s",
+				field.Name.Name,
+				g.emitStructLiteralFieldValue(
+					field.Value,
+					fieldType,
+				),
+			),
+		)
 	}
 
-	for _, value := range e.Values {
-		values = append(values, g.emitExpr(value, nil))
+	for i, value := range e.Values {
+		fieldType :=
+			g.lookupStructFieldTypeByIndex(
+				typ.SealName,
+				i,
+			)
+
+		values = append(
+			values,
+			g.emitStructLiteralFieldValue(
+				value,
+				fieldType,
+			),
+		)
 	}
 
-	return fmt.Sprintf("(%s){%s}", typ.Name, strings.Join(values, ", "))
+	return fmt.Sprintf(
+		"(%s){%s}",
+		typ.Name,
+		strings.Join(values, ", "),
+	)
 }
 
 func (g *Generator) emitStringLiteral(
@@ -1509,7 +1637,7 @@ func (g *Generator) emitSizeCall(e *ast.CallExpr) string {
 	if typ, ok := g.cTypeFromSizeArg(e.Args[0]); ok {
 		return fmt.Sprintf(
 			"(uintptr_t)sizeof(%s)",
-			typ.Name,
+			typ.TypeName(),
 		)
 	}
 
@@ -1577,6 +1705,13 @@ func (g *Generator) emitLenCall(
 	}
 
 	argType := g.inferExprType(e.Args[0], nil)
+
+	if argType.IsInlineArray {
+		return fmt.Sprintf(
+			"((uintptr_t)%d)",
+			argType.InlineLength,
+		)
+	}
 
 	arg := ""
 	if len(preparedArgs) > 0 {

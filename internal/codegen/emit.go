@@ -90,7 +90,12 @@ func (g *Generator) emitDistincts(file *ast.File) {
 		}
 
 		underlying := g.cTypeFromAst(d.Underlying)
-		g.linef("typedef %s %s;", underlying.Name, d.Name.Name)
+
+		g.linef(
+			"typedef %s;",
+			underlying.Decl(d.Name.Name),
+		)
+
 		emitted = true
 	}
 
@@ -439,8 +444,44 @@ func (g *Generator) emitConstants(file *ast.File) {
 		}
 
 		typ := g.inferExprType(d.Value, nil)
+
+		if typ.IsInlineArray {
+			inline, ok :=
+				d.Value.(*ast.InlineArrayExpr)
+
+			if !ok {
+				g.error(
+					d.Value.Span(),
+					"@inline_array constant must be initialized with an @inline_array literal",
+				)
+
+				g.linef(
+					"static const %s = {0};",
+					typ.Decl(d.Name.Name),
+				)
+
+				continue
+			}
+
+			g.linef(
+				"static const %s = %s;",
+				typ.Decl(d.Name.Name),
+				g.emitInlineArrayInitializer(
+					inline,
+					typ,
+				),
+			)
+
+			continue
+		}
+
 		value := g.emitExpr(d.Value, &typ)
-		g.linef("static const %s = %s;", typ.Decl(d.Name.Name), value)
+
+		g.linef(
+			"static const %s = %s;",
+			typ.Decl(d.Name.Name),
+			value,
+		)
 	}
 
 	if len(g.consts) > 0 {
@@ -1203,6 +1244,30 @@ func (g *Generator) emitVarDeclStmt(
 
 	if s.Name.Name == "_" {
 		if s.HasValue {
+			if typ.IsInlineArray {
+				inline, ok :=
+					s.Value.(*ast.InlineArrayExpr)
+
+				if ok {
+					temp :=
+						g.newTemp(
+							"discard_inline_array",
+						)
+
+					g.linef(
+						"%s = %s;",
+						typ.Decl(temp),
+						g.emitInlineArrayInitializer(
+							inline,
+							typ,
+						),
+					)
+
+					g.linef("(void)%s;", temp)
+					return
+				}
+			}
+
 			g.linef(
 				"(void)(%s);",
 				g.emitExpr(s.Value, &typ),
@@ -1213,6 +1278,41 @@ func (g *Generator) emitVarDeclStmt(
 	}
 
 	g.scope.declare(s.Name.Name, typ)
+
+	if typ.IsInlineArray {
+		if s.HasValue {
+			inline, ok :=
+				s.Value.(*ast.InlineArrayExpr)
+
+			if !ok {
+				g.error(
+					s.Value.Span(),
+					"@inline_array variable must be initialized with an @inline_array literal",
+				)
+
+				g.linef(
+					"%s = {0};",
+					typ.Decl(s.Name.Name),
+				)
+
+				return
+			}
+
+			g.linef(
+				"%s = %s;",
+				typ.Decl(s.Name.Name),
+				g.emitInlineArrayInitializer(
+					inline,
+					typ,
+				),
+			)
+
+			return
+		}
+
+		g.linef("%s;", typ.Decl(s.Name.Name))
+		return
+	}
 
 	if s.HasValue {
 		value := g.emitExpr(s.Value, &typ)
@@ -1503,6 +1603,36 @@ func (g *Generator) emitForPart(
 		}
 
 		g.scope.declare(s.Name.Name, typ)
+
+		if typ.IsInlineArray {
+			if s.HasValue {
+				inline, ok :=
+					s.Value.(*ast.InlineArrayExpr)
+
+				if !ok {
+					g.error(
+						s.Value.Span(),
+						"@inline_array variable must be initialized with an @inline_array literal",
+					)
+
+					return fmt.Sprintf(
+						"%s = {0}",
+						typ.Decl(s.Name.Name),
+					)
+				}
+
+				return fmt.Sprintf(
+					"%s = %s",
+					typ.Decl(s.Name.Name),
+					g.emitInlineArrayInitializer(
+						inline,
+						typ,
+					),
+				)
+			}
+
+			return typ.Decl(s.Name.Name)
+		}
 
 		if s.HasValue {
 			value := g.emitExpr(s.Value, &typ)

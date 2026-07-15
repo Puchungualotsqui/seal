@@ -6534,3 +6534,735 @@ Main :: task() {
 
 	runGeneratedC(t, out)
 }
+
+func TestGenerateInlineArrayVariable(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t values[4] = {10, 20, 30, 40};",
+	) {
+		t.Fatalf(
+			"expected inline C array declaration, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateNestedInlineArrayVariable(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};",
+	) {
+		t.Fatalf(
+			"expected nested inline C array declaration, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateThreeDimensionalInlineArray(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    values := @inline_array<
+        @inline_array<
+            @inline_array<int, 2>,
+            3
+        >,
+        2
+    >(
+        @inline_array<
+            @inline_array<int, 2>,
+            3
+        >(
+            @inline_array<int, 2>(1, 2),
+            @inline_array<int, 2>(3, 4),
+            @inline_array<int, 2>(5, 6),
+        ),
+        @inline_array<
+            @inline_array<int, 2>,
+            3
+        >(
+            @inline_array<int, 2>(7, 8),
+            @inline_array<int, 2>(9, 10),
+            @inline_array<int, 2>(11, 12),
+        ),
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t values[2][3][2]",
+	) {
+		t.Fatalf(
+			"expected recursive three-dimensional declarator, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"{{{1, 2}, {3, 4}, {5, 6}}, {{7, 8}, {9, 10}, {11, 12}}}",
+	) {
+		t.Fatalf(
+			"expected recursive three-dimensional initializer, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateInlineArrayIndexRead(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+
+    value := values[2]
+
+    assert(value == 30)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t value = (values)[2];",
+	) {
+		t.Fatalf(
+			"expected inline-array index read, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateNestedInlineArrayIndexRead(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+    )
+
+    value := matrix[1][2]
+
+    assert(value == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t value = ((matrix)[1])[2];",
+	) {
+		t.Fatalf(
+			"expected nested inline-array index read, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateNestedInlineArrayIndexWrite(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+    )
+
+    matrix[0][1] = 99
+
+    assert(matrix[0][1] == 99)
+    assert(matrix[1][2] == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"((matrix)[0])[1] = 99;",
+	) {
+		t.Fatalf(
+			"expected nested inline-array index assignment, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateInlineArrayLen(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+    )
+
+    rows := len(matrix)
+    columns := len(matrix[0])
+
+    assert(rows == 2)
+    assert(columns == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uintptr_t rows = ((uintptr_t)2);",
+	) {
+		t.Fatalf(
+			"expected compile-time outer inline-array length, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uintptr_t columns = ((uintptr_t)3);",
+	) {
+		t.Fatalf(
+			"expected compile-time inner inline-array length, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateInlineArrayNamedConstantLength(t *testing.T) {
+	out, reporter := generate(t, `
+ColumnCount :: 3
+
+Main :: task() {
+    values := @inline_array<int, ColumnCount>(
+        10,
+        20,
+        30,
+    )
+
+    assert(len(values) == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t values[3] = {10, 20, 30};",
+	) {
+		t.Fatalf(
+			"expected constant inline-array length to lower to 3, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateInlineArrayConstantExpressionLength(t *testing.T) {
+	out, reporter := generate(t, `
+Base :: 2
+Extra :: 1
+
+Main :: task() {
+    values := @inline_array<int, Base + Extra>(
+        10,
+        20,
+        30,
+    )
+
+    assert(len(values) == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t values[3] = {10, 20, 30};",
+	) {
+		t.Fatalf(
+			"expected evaluated inline-array constant length, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateZeroLengthInlineArray(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    values := @inline_array<int, 0>()
+
+    assert(len(values) == 0)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t values[1] = {0};",
+	) {
+		t.Fatalf(
+			"expected zero-length inline array to use physical C storage of one element, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"((uintptr_t)0)",
+	) {
+		t.Fatalf(
+			"expected logical inline-array length to remain zero, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateStructContainingInlineArray(t *testing.T) {
+	out, reporter := generate(t, `
+Buffer :: struct {
+    data @inline_array<int, 4>
+}
+
+Main :: task() {
+    buffer := Buffer{
+        data = @inline_array<int, 4>(
+            10,
+            20,
+            30,
+            40,
+        ),
+    }
+
+    assert(buffer.data[0] == 10)
+    assert(buffer.data[3] == 40)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[4];",
+	) {
+		t.Fatalf(
+			"expected inline array inside struct declaration, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		".data = {10, 20, 30, 40}",
+	) {
+		t.Fatalf(
+			"expected brace initializer for inline-array struct field, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateNestedInlineArrayStructField(t *testing.T) {
+	out, reporter := generate(t, `
+Matrix :: struct {
+    data @inline_array<
+        @inline_array<int, 3>,
+        2
+    >
+}
+
+Main :: task() {
+    matrix := Matrix{
+        data = @inline_array<
+            @inline_array<int, 3>,
+            2
+        >(
+            @inline_array<int, 3>(
+                1,
+                2,
+                3,
+            ),
+            @inline_array<int, 3>(
+                4,
+                5,
+                6,
+            ),
+        ),
+    }
+
+    assert(matrix.data[1][2] == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[2][3];",
+	) {
+		t.Fatalf(
+			"expected nested inline-array struct field declaration, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		".data = {{1, 2, 3}, {4, 5, 6}}",
+	) {
+		t.Fatalf(
+			"expected nested brace initializer for struct field, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateGenericStructContainingNestedInlineArray(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Matrix :: struct<
+    T type,
+    Rows int[Rows >= 0],
+    Columns int[Columns >= 0],
+> {
+    data @inline_array<
+        @inline_array<T, Columns>,
+        Rows
+    >
+}
+
+Main :: task() {
+    matrix := Matrix<int, 2, 3>{
+        data = @inline_array<
+            @inline_array<int, 3>,
+            2
+        >(
+            @inline_array<int, 3>(
+                1,
+                2,
+                3,
+            ),
+            @inline_array<int, 3>(
+                4,
+                5,
+                6,
+            ),
+        ),
+    }
+
+    assert(matrix.data[0][0] == 1)
+    assert(matrix.data[1][2] == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[2][3];",
+	) {
+		t.Fatalf(
+			"expected specialized generic nested inline-array field, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateInlineArrayInsideReturnedStruct(t *testing.T) {
+	out, reporter := generate(t, `
+StackArray :: struct<
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<T, N>
+}
+
+Create :: task() StackArray<int, 4> {
+    return StackArray<int, 4>{
+        data = @inline_array<int, 4>(
+            10,
+            20,
+            30,
+            40,
+        ),
+    }
+}
+
+Main :: task() {
+    values := Create()
+
+    assert(values.data[0] == 10)
+    assert(values.data[3] == 40)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[4];",
+	) {
+		t.Fatalf(
+			"expected inline storage in returned wrapper struct, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateNestedInlineArrayEndToEnd(t *testing.T) {
+	out, reporter := generate(t, `
+Matrix :: struct<
+    T type,
+    Rows int[Rows >= 0],
+    Columns int[Columns >= 0],
+> {
+    data @inline_array<
+        @inline_array<T, Columns>,
+        Rows
+    >
+}
+
+Main :: task() {
+    matrix := Matrix<int, 2, 3>{
+        data = @inline_array<
+            @inline_array<int, 3>,
+            2
+        >(
+            @inline_array<int, 3>(
+                1,
+                2,
+                3,
+            ),
+            @inline_array<int, 3>(
+                4,
+                5,
+                6,
+            ),
+        ),
+    }
+
+    matrix.data[0][1] = 99
+
+    rows := len(matrix.data)
+    columns := len(matrix.data[0])
+
+    assert(matrix.data[0][0] == 1)
+    assert(matrix.data[0][1] == 99)
+    assert(matrix.data[1][2] == 6)
+    assert(rows == 2)
+    assert(columns == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t data[2][3];",
+	) {
+		t.Fatalf(
+			"expected nested inline storage declaration, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		".data = {{1, 2, 3}, {4, 5, 6}}",
+	) {
+		t.Fatalf(
+			"expected recursive brace initializer, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"(((matrix).data)[0])[1] = 99;",
+	) {
+		t.Fatalf(
+			"expected nested inline-array write, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}

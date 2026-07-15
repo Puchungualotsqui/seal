@@ -10298,3 +10298,460 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCheckerInlineArrayExpression(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckerNestedInlineArrayExpression(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+            3,
+        ),
+        @inline_array<int, 3>(
+            4,
+            5,
+            6,
+        ),
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckerNestedInlineArrayIndexReadResolution(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(1, 2, 3),
+        @inline_array<int, 3>(4, 5, 6),
+    )
+
+    row := matrix[1]
+    value := matrix[1][2]
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	rowIndex := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		rowIndex,
+		IndexResolutionInlineArrayRead,
+	)
+
+	valueStmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		2,
+	)
+
+	valueDecl, ok := valueStmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			valueStmt,
+		)
+	}
+
+	outerIndex, ok := valueDecl.Value.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf(
+			"value expression type = %T, want *ast.IndexExpr",
+			valueDecl.Value,
+		)
+	}
+
+	innerIndex, ok := outerIndex.Left.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf(
+			"outer index left type = %T, want *ast.IndexExpr",
+			outerIndex.Left,
+		)
+	}
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		innerIndex,
+		IndexResolutionInlineArrayRead,
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		outerIndex,
+		IndexResolutionInlineArrayRead,
+	)
+}
+
+func TestCheckerNestedInlineArrayIndexWriteResolution(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(1, 2, 3),
+        @inline_array<int, 3>(4, 5, 6),
+    )
+
+    matrix[0][1] = 99
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	assignIndex := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		assignIndex,
+		IndexResolutionInlineArrayWrite,
+	)
+
+	innerIndex, ok := assignIndex.Left.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf(
+			"assignment index left type = %T, want *ast.IndexExpr",
+			assignIndex.Left,
+		)
+	}
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		innerIndex,
+		IndexResolutionInlineArrayRead,
+	)
+}
+
+func TestCheckerNestedInlineArrayLen(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(1, 2, 3),
+        @inline_array<int, 3>(4, 5, 6),
+    )
+
+    rows := len(matrix)
+    columns := len(matrix[0])
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckerInlineArrayNamedConstantLength(t *testing.T) {
+	run := runCheckerTest(t, `
+ColumnCount :: 3
+
+Main :: task() {
+    values := @inline_array<int, ColumnCount>(
+        10,
+        20,
+        30,
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckerGenericNestedInlineArrayField(t *testing.T) {
+	run := runCheckerTest(t, `
+Matrix :: struct<
+    T type,
+    Rows int[Rows >= 0],
+    Columns int[Columns >= 0],
+> {
+    data @inline_array<
+        @inline_array<T, Columns>,
+        Rows
+    >
+}
+
+Main :: task() {
+    matrix := Matrix<int, 2, 3>{
+        data = @inline_array<
+            @inline_array<int, 3>,
+            2
+        >(
+            @inline_array<int, 3>(
+                1,
+                2,
+                3,
+            ),
+            @inline_array<int, 3>(
+                4,
+                5,
+                6,
+            ),
+        ),
+    }
+
+    value := matrix.data[1][2]
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckerNestedInlineArrayRejectsWrongInnerLength(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 3>,
+        2
+    >(
+        @inline_array<int, 3>(
+            1,
+            2,
+        ),
+        @inline_array<int, 3>(
+            3,
+            4,
+            5,
+        ),
+    )
+}
+`)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected checker diagnostic for wrong nested @inline_array initializer length",
+		)
+	}
+
+	diagnostics := run.Reporter.String()
+
+	if !strings.Contains(diagnostics, "3") {
+		t.Fatalf(
+			"expected diagnostic to mention required length 3:\n%s",
+			diagnostics,
+		)
+	}
+}
+
+func TestCheckerNestedInlineArrayRejectsWrongInnerElementType(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    matrix := @inline_array<
+        @inline_array<int, 2>,
+        2
+    >(
+        @inline_array<int, 2>(
+            1,
+            2,
+        ),
+        @inline_array<int, 2>(
+            3,
+            "wrong",
+        ),
+    )
+}
+`)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected checker diagnostic for wrong nested @inline_array element type",
+		)
+	}
+}
+
+func TestCheckerRejectsWholeInlineArrayAssignment(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    left := @inline_array<int, 3>(
+        1,
+        2,
+        3,
+    )
+
+    right := @inline_array<int, 3>(
+        4,
+        5,
+        6,
+    )
+
+    left = right
+}
+`)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected checker diagnostic for whole @inline_array assignment",
+		)
+	}
+
+	diagnostics := run.Reporter.String()
+
+	if !strings.Contains(
+		diagnostics,
+		"@inline_array",
+	) {
+		t.Fatalf(
+			"expected @inline_array assignment diagnostic:\n%s",
+			diagnostics,
+		)
+	}
+}
+
+func TestCheckerRejectsInlineArrayTaskParameter(t *testing.T) {
+	run := runCheckerTest(t, `
+Consume :: task(
+    values @inline_array<int, 4>,
+) {
+}
+`)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected checker diagnostic for direct @inline_array task parameter",
+		)
+	}
+
+	diagnostics := run.Reporter.String()
+
+	if !strings.Contains(
+		diagnostics,
+		"@inline_array",
+	) {
+		t.Fatalf(
+			"expected @inline_array parameter diagnostic:\n%s",
+			diagnostics,
+		)
+	}
+}
+
+func TestCheckerRejectsInlineArrayTaskResult(t *testing.T) {
+	run := runCheckerTest(t, `
+Create :: task() @inline_array<int, 4> {
+}
+`)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected checker diagnostic for direct @inline_array task result",
+		)
+	}
+
+	diagnostics := run.Reporter.String()
+
+	if !strings.Contains(
+		diagnostics,
+		"@inline_array",
+	) {
+		t.Fatalf(
+			"expected @inline_array result diagnostic:\n%s",
+			diagnostics,
+		)
+	}
+}
+
+func TestCheckerAllowsStructContainingInlineArrayInTaskSignature(
+	t *testing.T,
+) {
+	run := runCheckerTest(t, `
+StackArray :: struct<
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<T, N>
+}
+
+Identity :: task(
+    values StackArray<int, 4>,
+) StackArray<int, 4> {
+    return values
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}

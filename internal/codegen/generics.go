@@ -108,6 +108,32 @@ func checkerTypeToAstType(typ *checker.Type) ast.Type {
 			Elem: elem,
 		}
 
+	case checker.TypeInlineArray:
+		elem := checkerTypeToAstType(typ.Elem)
+		if elem == nil {
+			return nil
+		}
+
+		length := typ.InlineLengthExpr
+
+		if length == nil && typ.InlineLengthKnown {
+			length = &ast.IntLitExpr{
+				Value: fmt.Sprintf(
+					"%d",
+					typ.InlineLength,
+				),
+			}
+		}
+
+		if length == nil {
+			return nil
+		}
+
+		return &ast.InlineArrayType{
+			Elem:   elem,
+			Length: length,
+		}
+
 	case checker.TypeStruct,
 		checker.TypeInterface:
 		if typ.GenericBaseName != "" {
@@ -1204,6 +1230,10 @@ func (g *Generator) collectGenericStructInstancesFromType(typ ast.Type) {
 	case *ast.PointerType:
 		g.collectGenericStructInstancesFromType(t.Elem)
 
+	case *ast.InlineArrayType:
+		g.collectGenericStructInstancesFromType(t.Elem)
+		g.collectGenericStructInstancesFromExpr(t.Length)
+
 	case *ast.GenericType:
 		if pkgName, typeName, ok := packageTypeNameFromAst(t.Base); ok {
 			if pkg := g.packages[pkgName]; pkg != nil {
@@ -1282,6 +1312,14 @@ func (g *Generator) collectGenericStructInstancesFromExpr(
 	case *ast.BinaryExpr:
 		g.collectGenericStructInstancesFromExpr(e.Left)
 		g.collectGenericStructInstancesFromExpr(e.Right)
+
+	case *ast.InlineArrayExpr:
+		g.collectGenericStructInstancesFromType(e.Elem)
+		g.collectGenericStructInstancesFromExpr(e.Length)
+
+		for _, value := range e.Values {
+			g.collectGenericStructInstancesFromExpr(value)
+		}
 
 	case *ast.CallExpr:
 		g.collectGenericStructInstancesFromExpr(e.Callee)
@@ -1505,6 +1543,12 @@ func typeNameFromAst(t ast.Type) string {
 	case *ast.GenericType:
 		return typeNameFromAst(x.Base)
 
+	case *ast.InlineArrayType:
+		return "inline_array_" +
+			typeNameFromAst(x.Elem) +
+			"_" +
+			exprCName(x.Length)
+
 	default:
 		return ""
 	}
@@ -1611,6 +1655,19 @@ func (g *Generator) substituteTypeAstForCGen(typ ast.Type, subst map[string]ast.
 
 		return t
 
+	case *ast.InlineArrayType:
+		return &ast.InlineArrayType{
+			Elem: g.substituteTypeAstForCGen(
+				t.Elem,
+				subst,
+			),
+			Length: g.substituteExprForCGen(
+				t.Length,
+				subst,
+			),
+			Loc: t.Loc,
+		}
+
 	case *ast.PointerType:
 		return &ast.PointerType{
 			Elem: g.substituteTypeAstForCGen(t.Elem, subst),
@@ -1660,6 +1717,36 @@ func (g *Generator) substituteExprForCGen(
 		}
 
 		return e
+
+	case *ast.InlineArrayExpr:
+		values := make(
+			[]ast.Expr,
+			0,
+			len(e.Values),
+		)
+
+		for _, value := range e.Values {
+			values = append(
+				values,
+				g.substituteExprForCGen(
+					value,
+					subst,
+				),
+			)
+		}
+
+		return &ast.InlineArrayExpr{
+			Elem: g.substituteTypeAstForCGen(
+				e.Elem,
+				subst,
+			),
+			Length: g.substituteExprForCGen(
+				e.Length,
+				subst,
+			),
+			Values: values,
+			Loc:    e.Loc,
+		}
 
 	case *ast.UnaryExpr:
 		return &ast.UnaryExpr{
@@ -1873,6 +1960,12 @@ func (g *Generator) cTypeFromAstWithGenericArgs(typ ast.Type, subst map[string]a
 		}
 
 		return g.cTypeFromAst(t)
+
+	case *ast.InlineArrayType:
+		return g.cInlineArrayTypeFromAst(
+			t,
+			subst,
+		)
 
 	case *ast.PointerType:
 		elem := g.cTypeFromAstWithGenericArgs(t.Elem, subst)
@@ -2216,6 +2309,13 @@ func (g *Generator) emitGenericStructDepsForType(typ ast.Type, subst map[string]
 	case *ast.PointerType:
 		g.emitGenericStructDepsForType(t.Elem, subst, visiting)
 
+	case *ast.InlineArrayType:
+		g.emitGenericStructDepsForType(
+			t.Elem,
+			subst,
+			visiting,
+		)
+
 	case *ast.GenericType:
 		args := make([]ast.GenericArg, 0, len(t.Args))
 		for _, arg := range t.Args {
@@ -2473,6 +2573,13 @@ func (g *Generator) emitImportedGenericStructDepsForType(typ ast.Type, subst map
 
 	case *ast.PointerType:
 		g.emitImportedGenericStructDepsForType(t.Elem, subst, visiting)
+
+	case *ast.InlineArrayType:
+		g.emitImportedGenericStructDepsForType(
+			t.Elem,
+			subst,
+			visiting,
+		)
 
 	case *ast.GenericType:
 		args := make([]ast.GenericArg, 0, len(t.Args))
@@ -3631,6 +3738,15 @@ func (g *Generator) qualifyTypeForCrossPackageRequest(
 			Loc:   t.Loc,
 		}
 
+	case *ast.InlineArrayType:
+		return &ast.InlineArrayType{
+			Elem: g.qualifyTypeForCrossPackageRequest(
+				t.Elem,
+			),
+			Length: t.Length,
+			Loc:    t.Loc,
+		}
+
 	case *ast.PointerType:
 		return &ast.PointerType{
 			Elem: g.qualifyTypeForCrossPackageRequest(
@@ -4378,6 +4494,12 @@ func (g *Generator) collectRequiredExternalTypeFromType(
 			typeName,
 		)
 
+	case *ast.InlineArrayType:
+		g.collectRequiredExternalTypeFromType(
+			ownerPackage,
+			t.Elem,
+		)
+
 	case *ast.PointerType:
 		g.collectRequiredExternalTypeFromType(
 			ownerPackage,
@@ -4590,6 +4712,13 @@ func (g *Generator) emitRequiredExternalDependencies(
 		// A forward declaration is sufficient for pointer fields.
 		return
 
+	case *ast.InlineArrayType:
+		g.emitRequiredExternalDependencies(
+			ownerPackage,
+			t.Elem,
+			visiting,
+		)
+
 	case *ast.GenericType:
 		for _, arg := range t.Args {
 			if arg.Kind == ast.GenericArgType {
@@ -4744,9 +4873,8 @@ func (g *Generator) emitRequiredExternalTypeDefinition(
 			)
 
 		g.linef(
-			"typedef %s %s;",
-			underlying.Name,
-			cName,
+			"typedef %s;",
+			underlying.Decl(cName),
 		)
 		g.line("")
 
@@ -4892,4 +5020,58 @@ func (g *Generator) emitRequiredExternalTypes() {
 			visiting,
 		)
 	}
+}
+
+func normalizeGenericArgsForCGenParams(params []ast.GenericParam, args []ast.GenericArg) []ast.GenericArg {
+	if len(params) == 0 || len(args) == 0 {
+		return args
+	}
+
+	out := make([]ast.GenericArg, len(args))
+	copy(out, args)
+
+	for i := range out {
+		if i >= len(params) {
+			break
+		}
+
+		out[i] = normalizeGenericArgForCGenParam(params[i], out[i])
+	}
+
+	return out
+}
+
+func normalizeGenericArgForCGenParam(param ast.GenericParam, arg ast.GenericArg) ast.GenericArg {
+	switch param.Category {
+	case ast.GenericParamType,
+		ast.GenericParamEnum,
+		ast.GenericParamUnion:
+		if arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
+			if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
+				return ast.GenericArg{
+					Kind: ast.GenericArgType,
+					Type: typ,
+					Loc:  arg.Loc,
+				}
+			}
+		}
+
+	case ast.GenericParamTask:
+		// Task arguments must stay expressions:
+		//
+		//     Use<Identity<int>>()
+		//     Use<rules.Identity<int>>()
+		//
+		// Do not reinterpret these as GenericArgType.
+		return arg
+
+	case ast.GenericParamInt,
+		ast.GenericParamBool,
+		ast.GenericParamString,
+		ast.GenericParamValue:
+		// Value arguments must stay expressions.
+		return arg
+	}
+
+	return arg
 }

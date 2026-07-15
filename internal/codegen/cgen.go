@@ -104,9 +104,10 @@ type Generator struct {
 	genericSubst         map[string]ast.GenericArg
 	importedGenericTasks map[string]*ImportedGenericTaskInstance
 
-	tasks     map[string]TaskInfo
-	overloads map[string][]string
-	consts    map[string]CType
+	tasks      map[string]TaskInfo
+	overloads  map[string][]string
+	consts     map[string]CType
+	constDecls map[string]*ast.ConstDecl
 
 	emittedVariadics map[string]bool
 
@@ -199,6 +200,7 @@ func NewWithPackagesAndSemanticInfo(
 		tasks:                         map[string]TaskInfo{},
 		overloads:                     map[string][]string{},
 		consts:                        map[string]CType{},
+		constDecls:                    map[string]*ast.ConstDecl{},
 		emittedVariadics:              map[string]bool{},
 		distincts:                     map[string]*ast.DistinctDecl{},
 		interfaceInstances:            map[string]*InterfaceInstance{},
@@ -487,6 +489,9 @@ func (g *Generator) collect(file *ast.File) {
 		case *ast.DistinctDecl:
 			g.distincts[d.Name.Name] = d
 
+		case *ast.ConstDecl:
+			g.constDecls[d.Name.Name] = d
+
 		case *ast.StructDecl:
 			g.structs[d.Name.Name] = d
 
@@ -618,6 +623,7 @@ func (g *Generator) collect(file *ast.File) {
 			g.tasks[d.Name.Name] = info
 
 		case *ast.ConstDecl:
+			g.constDecls[d.Name.Name] = d
 			g.consts[d.Name.Name] = g.inferExprType(d.Value, nil)
 		}
 	}
