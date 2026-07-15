@@ -644,6 +644,606 @@ TestRepeatEmpty :: task(
     assert(emptyValue.ByteLength == 0)
 }
 
+TestSplit :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    parts := strings.Split(
+        allocator,
+        deallocator,
+        "one,two,,four",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &parts,
+    )
+
+    assert(len(parts) == 4)
+
+    assert(parts[0] == "one")
+    assert(parts[1] == "two")
+    assert(parts[2] == "")
+    assert(parts[3] == "four")
+
+    edgeParts := strings.Split(
+        allocator,
+        deallocator,
+        ",a,",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &edgeParts,
+    )
+
+    assert(len(edgeParts) == 3)
+
+    assert(edgeParts[0] == "")
+    assert(edgeParts[1] == "a")
+    assert(edgeParts[2] == "")
+
+    noMatch := strings.Split(
+        allocator,
+        deallocator,
+        "Seal",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &noMatch,
+    )
+
+    assert(len(noMatch) == 1)
+    assert(noMatch[0] == "Seal")
+
+    repeatedSeparator := strings.Split(
+        allocator,
+        deallocator,
+        "a----b",
+        "--",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &repeatedSeparator,
+    )
+
+    assert(len(repeatedSeparator) == 3)
+
+    assert(repeatedSeparator[0] == "a")
+    assert(repeatedSeparator[1] == "")
+    assert(repeatedSeparator[2] == "b")
+
+    unicode := strings.Split(
+        allocator,
+        deallocator,
+        "mañana ñ mundo ñ final",
+        " ñ ",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &unicode,
+    )
+
+    assert(len(unicode) == 3)
+
+    assert(unicode[0] == "mañana")
+    assert(unicode[1] == "mundo")
+    assert(unicode[2] == "final")
+}
+
+TestSplitEmptyValues :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    emptyValue := strings.Split(
+        allocator,
+        deallocator,
+        "",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &emptyValue,
+    )
+
+    assert(len(emptyValue) == 1)
+    assert(emptyValue[0] == "")
+
+    emptyBoth := strings.Split(
+        allocator,
+        deallocator,
+        "",
+        "",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &emptyBoth,
+    )
+
+    assert(len(emptyBoth) == 0)
+
+    emptyFields := strings.Split(
+        allocator,
+        deallocator,
+        ",,",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &emptyFields,
+    )
+
+    assert(len(emptyFields) == 3)
+
+    assert(emptyFields[0] == "")
+    assert(emptyFields[1] == "")
+    assert(emptyFields[2] == "")
+}
+
+TestSplitUnicodeScalars :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    scalars := strings.Split(
+        allocator,
+        deallocator,
+        "Añ😀界",
+        "",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &scalars,
+    )
+
+    assert(len(scalars) == 4)
+
+    assert(scalars[0] == "A")
+    assert(scalars[1] == "ñ")
+    assert(scalars[2] == "😀")
+    assert(scalars[3] == "界")
+
+    assert(size(scalars[0]) == 1)
+    assert(size(scalars[1]) == 2)
+    assert(size(scalars[2]) == 4)
+    assert(size(scalars[3]) == 3)
+
+    assert(len(scalars[0]) == 1)
+    assert(len(scalars[1]) == 1)
+    assert(len(scalars[2]) == 1)
+    assert(len(scalars[3]) == 1)
+}
+
+TestJoin :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    parts := strings.Split(
+        allocator,
+        deallocator,
+        "one,two,three",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &parts,
+    )
+
+    partsSlice :=
+        lists.DynamicArraySlice<string>(
+            &parts,
+        )
+
+    joined := strings.Join(
+        allocator,
+        partsSlice,
+        " | ",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &joined,
+    )
+
+    assert(
+        strings.View(&joined) ==
+            "one | two | three",
+    )
+
+    assert(
+        joined.ByteLength ==
+            size("one | two | three"),
+    )
+
+    unicodeParts := strings.Split(
+        allocator,
+        deallocator,
+        "mañana,😀,世界",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &unicodeParts,
+    )
+
+    unicodeSlice :=
+        lists.DynamicArraySlice<string>(
+            &unicodeParts,
+        )
+
+    unicodeJoined := strings.Join(
+        allocator,
+        unicodeSlice,
+        "—",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &unicodeJoined,
+    )
+
+    assert(
+        strings.View(&unicodeJoined) ==
+            "mañana—😀—世界",
+    )
+}
+
+TestJoinEdgeCases :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    emptyParts :=
+        lists.NewDynamicArrayEmpty<string>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<string>(
+        &emptyParts,
+    )
+
+    emptySlice :=
+        lists.DynamicArraySlice<string>(
+            &emptyParts,
+        )
+
+    emptyJoined := strings.Join(
+        allocator,
+        emptySlice,
+        ",",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &emptyJoined,
+    )
+
+    assert(strings.View(&emptyJoined) == "")
+    assert(emptyJoined.ByteLength == 0)
+
+    onePart :=
+        lists.NewDynamicArrayEmpty<string>(
+            allocator,
+            deallocator,
+        )
+
+    defer lists.DestroyDynamicArray<string>(
+        &onePart,
+    )
+
+    lists.Append<string>(
+        &onePart,
+        "Seal",
+    )
+
+    oneSlice :=
+        lists.DynamicArraySlice<string>(
+            &onePart,
+        )
+
+    oneJoined := strings.Join(
+        allocator,
+        oneSlice,
+        "ignored",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &oneJoined,
+    )
+
+    assert(
+        strings.View(&oneJoined) ==
+            "Seal",
+    )
+
+    emptySeparatorParts := strings.Split(
+        allocator,
+        deallocator,
+        "a,b,c",
+        ",",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &emptySeparatorParts,
+    )
+
+    emptySeparatorSlice :=
+        lists.DynamicArraySlice<string>(
+            &emptySeparatorParts,
+        )
+
+    joinedWithoutSeparator := strings.Join(
+        allocator,
+        emptySeparatorSlice,
+        "",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &joinedWithoutSeparator,
+    )
+
+    assert(
+        strings.View(
+            &joinedWithoutSeparator,
+        ) == "abc",
+    )
+}
+
+TestSplitJoinRoundTrip :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    source := "mañana|😀|Seal|世界"
+
+    parts := strings.Split(
+        allocator,
+        deallocator,
+        source,
+        "|",
+    )
+
+    defer lists.DestroyDynamicArray<string>(
+        &parts,
+    )
+
+    partsSlice :=
+        lists.DynamicArraySlice<string>(
+            &parts,
+        )
+
+    joined := strings.Join(
+        allocator,
+        partsSlice,
+        "|",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &joined,
+    )
+
+    assert(strings.View(&joined) == source)
+}
+
+TestReplaceAll :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    replaced := strings.ReplaceAll(
+        allocator,
+        "abcabc",
+        "ab",
+        "XY",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &replaced,
+    )
+
+    assert(
+        strings.View(&replaced) ==
+            "XYcXYc",
+    )
+
+    compacted := strings.ReplaceAll(
+        allocator,
+        "aaaa",
+        "aa",
+        "b",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &compacted,
+    )
+
+    assert(
+        strings.View(&compacted) ==
+            "bb",
+    )
+
+    expanded := strings.ReplaceAll(
+        allocator,
+        "aaa",
+        "a",
+        "Seal",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &expanded,
+    )
+
+    assert(
+        strings.View(&expanded) ==
+            "SealSealSeal",
+    )
+
+    removed := strings.ReplaceAll(
+        allocator,
+        "one---two---three",
+        "---",
+        "",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &removed,
+    )
+
+    assert(
+        strings.View(&removed) ==
+            "onetwothree",
+    )
+}
+
+TestReplaceAllUnicode :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    unicode := strings.ReplaceAll(
+        allocator,
+        "λ λ λ",
+        "λ",
+        "Seal",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &unicode,
+    )
+
+    assert(
+        strings.View(&unicode) ==
+            "Seal Seal Seal",
+    )
+
+    emoji := strings.ReplaceAll(
+        allocator,
+        "😀a😀b😀",
+        "😀",
+        "界",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &emoji,
+    )
+
+    assert(
+        strings.View(&emoji) ==
+            "界a界b界",
+    )
+
+    word := strings.ReplaceAll(
+        allocator,
+        "mañana mañana",
+        "mañana",
+        "hoy",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &word,
+    )
+
+    assert(
+        strings.View(&word) ==
+            "hoy hoy",
+    )
+}
+
+TestReplaceAllEdgeCases :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    noMatch := strings.ReplaceAll(
+        allocator,
+        "Seal language",
+        "compiler",
+        "runtime",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &noMatch,
+    )
+
+    assert(
+        strings.View(&noMatch) ==
+            "Seal language",
+    )
+
+    emptyNeedle := strings.ReplaceAll(
+        allocator,
+        "Seal",
+        "",
+        "x",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &emptyNeedle,
+    )
+
+    assert(
+        strings.View(&emptyNeedle) ==
+            "Seal",
+    )
+
+    emptyValue := strings.ReplaceAll(
+        allocator,
+        "",
+        "a",
+        "b",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &emptyValue,
+    )
+
+    assert(strings.View(&emptyValue) == "")
+
+    completeRemoval := strings.ReplaceAll(
+        allocator,
+        "aaaa",
+        "a",
+        "",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &completeRemoval,
+    )
+
+    assert(
+        strings.View(&completeRemoval) ==
+            "",
+    )
+
+    completeReplacement := strings.ReplaceAll(
+        allocator,
+        "Seal",
+        "Seal",
+        "language",
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &completeReplacement,
+    )
+
+    assert(
+        strings.View(
+            &completeReplacement,
+        ) == "language",
+    )
+}
+
 TestDestroyTwice :: task(
     allocator mem.Allocator,
     deallocator mem.Deallocator,
@@ -766,6 +1366,51 @@ Main :: task() {
     )
 
     TestRepeatEmpty(
+        allocator,
+        deallocator,
+    )
+
+    TestSplit(
+        allocator,
+        deallocator,
+    )
+
+    TestSplitEmptyValues(
+        allocator,
+        deallocator,
+    )
+
+    TestSplitUnicodeScalars(
+        allocator,
+        deallocator,
+    )
+
+    TestJoin(
+        allocator,
+        deallocator,
+    )
+
+    TestJoinEdgeCases(
+        allocator,
+        deallocator,
+    )
+
+    TestSplitJoinRoundTrip(
+        allocator,
+        deallocator,
+    )
+
+    TestReplaceAll(
+        allocator,
+        deallocator,
+    )
+
+    TestReplaceAllUnicode(
+        allocator,
+        deallocator,
+    )
+
+    TestReplaceAllEdgeCases(
         allocator,
         deallocator,
     )
