@@ -586,3 +586,213 @@ len :: overload {
 		)
 	}
 }
+
+func TestResolveInlineArrayOfGenericStruct(
+	t *testing.T,
+) {
+	input := `
+Slot :: struct <T type> {
+    Value T
+}
+
+StaticArray :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<Slot<T>, N>
+}
+`
+
+	reporter := diag.NewReporter()
+
+	sourceFile := source.NewFile(
+		"test.seal",
+		input,
+	)
+
+	lex := lexer.New(
+		sourceFile,
+		reporter,
+	)
+
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
+	file := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	resolver := New(
+		reporter,
+	)
+
+	resolver.ResolveFile(
+		file,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveInlineArrayOfPrivateGenericStruct(
+	t *testing.T,
+) {
+	input := `
+_Slot :: struct <T type> {
+    Value T
+}
+
+StaticArray :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    _data @inline_array<_Slot<T>, N>
+}
+`
+
+	reporter := diag.NewReporter()
+
+	sourceFile := source.NewFile(
+		"test.seal",
+		input,
+	)
+
+	lex := lexer.New(
+		sourceFile,
+		reporter,
+	)
+
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
+	file := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	resolver := New(
+		reporter,
+	)
+
+	resolver.ResolveFile(
+		file,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveInlineArrayExprWithGenericStructElement(
+	t *testing.T,
+) {
+	input := `
+_Slot :: struct <T type> {
+    Value T
+}
+
+StaticArray :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    _data @inline_array<_Slot<T>, N>
+}
+
+NewStaticArray :: task <
+    T type,
+    N int[N >= 0],
+>() StaticArray<T, N> {
+    return StaticArray<T, N>{
+        _data = @inline_array<_Slot<T>, N>(),
+    }
+}
+`
+
+	reporter := diag.NewReporter()
+
+	sourceFile := source.NewFile(
+		"test.seal",
+		input,
+	)
+
+	lex := lexer.New(
+		sourceFile,
+		reporter,
+	)
+
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
+	file := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	resolver := New(
+		reporter,
+	)
+
+	resolver.ResolveFile(
+		file,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}

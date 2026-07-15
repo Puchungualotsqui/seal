@@ -878,7 +878,11 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 
 		first := t.Parts[0]
 
-		sym := r.resolveSymbolUse(scope, first.Name, first.Span())
+		sym := r.resolveSymbolUse(
+			scope,
+			first.Name,
+			first.Span(),
+		)
 		if sym == nil {
 			return
 		}
@@ -891,12 +895,18 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 			if sym.Kind.IsRuntime() {
 				r.diags.Add(
 					first.Span(),
-					fmt.Sprintf("%q is a runtime symbol, not a type", first.Name),
+					fmt.Sprintf(
+						"%q is a runtime symbol, not a type",
+						first.Name,
+					),
 				)
 			} else {
 				r.diags.Add(
 					first.Span(),
-					fmt.Sprintf("%q is not a type", first.Name),
+					fmt.Sprintf(
+						"%q is not a type",
+						first.Name,
+					),
 				)
 			}
 
@@ -906,7 +916,10 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 		if sym.Kind != SymbolPackage {
 			r.diags.Add(
 				first.Span(),
-				fmt.Sprintf("%q is not a package", first.Name),
+				fmt.Sprintf(
+					"%q is not a package",
+					first.Name,
+				),
 			)
 			return
 		}
@@ -914,7 +927,10 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 		if sym.Package == nil {
 			r.diags.Add(
 				first.Span(),
-				fmt.Sprintf("package %q has no symbol table", first.Name),
+				fmt.Sprintf(
+					"package %q has no symbol table",
+					first.Name,
+				),
 			)
 			return
 		}
@@ -929,10 +945,15 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 
 		memberName := t.Parts[1].Name
 		member := sym.Package.Symbols[memberName]
+
 		if member == nil {
 			r.diags.Add(
 				t.Parts[1].Span(),
-				fmt.Sprintf("package %s has no type %q", first.Name, memberName),
+				fmt.Sprintf(
+					"package %s has no type %q",
+					first.Name,
+					memberName,
+				),
 			)
 			return
 		}
@@ -951,10 +972,18 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 		)
 
 	case *ast.PointerType:
-		r.resolveTypeWithInterfaceSelf(scope, t.Elem, allowInterfaceSelf)
+		r.resolveTypeWithInterfaceSelf(
+			scope,
+			t.Elem,
+			allowInterfaceSelf,
+		)
 
 	case *ast.GenericType:
-		r.resolveTypeWithInterfaceSelf(scope, t.Base, allowInterfaceSelf)
+		r.resolveTypeWithInterfaceSelf(
+			scope,
+			t.Base,
+			allowInterfaceSelf,
+		)
 
 		for _, arg := range t.Args {
 			r.resolveGenericArgWithInterfaceSelf(
@@ -963,6 +992,18 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 				allowInterfaceSelf,
 			)
 		}
+
+	case *ast.InlineArrayType:
+		r.resolveTypeWithInterfaceSelf(
+			scope,
+			t.Elem,
+			allowInterfaceSelf,
+		)
+
+		r.resolveExpr(
+			scope,
+			t.Length,
+		)
 	}
 }
 
@@ -1009,14 +1050,21 @@ func (r *Resolver) resolveCallCallee(scope *Scope, callee ast.Expr) {
 	r.resolveExpr(scope, callee)
 }
 
-func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
+func (r *Resolver) resolveExpr(
+	scope *Scope,
+	expr ast.Expr,
+) {
 	if expr == nil {
 		return
 	}
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		r.resolveSymbolUse(scope, e.Name.Name, e.Name.Span())
+		r.resolveSymbolUse(
+			scope,
+			e.Name.Name,
+			e.Name.Span(),
+		)
 
 	case *ast.DotIdentExpr:
 		// .None / .ErrorReading need type context.
@@ -1032,28 +1080,71 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 		return
 
 	case *ast.UnaryExpr:
-		r.resolveExpr(scope, e.Expr)
+		r.resolveExpr(
+			scope,
+			e.Expr,
+		)
 
 	case *ast.BinaryExpr:
-		r.resolveExpr(scope, e.Left)
-		r.resolveExpr(scope, e.Right)
+		r.resolveExpr(
+			scope,
+			e.Left,
+		)
+
+		r.resolveExpr(
+			scope,
+			e.Right,
+		)
 
 	case *ast.CallExpr:
-		r.resolveCallCallee(scope, e.Callee)
+		r.resolveCallCallee(
+			scope,
+			e.Callee,
+		)
 
 		for _, arg := range e.Args {
-			r.resolveExpr(scope, arg)
+			r.resolveExpr(
+				scope,
+				arg,
+			)
 		}
 
 	case *ast.GenericExpr:
-		r.resolveExpr(scope, e.Base)
+		r.resolveExpr(
+			scope,
+			e.Base,
+		)
 
 		for _, arg := range e.Args {
-			r.resolveGenericArg(scope, arg)
+			r.resolveGenericArg(
+				scope,
+				arg,
+			)
+		}
+
+	case *ast.InlineArrayExpr:
+		r.resolveType(
+			scope,
+			e.Elem,
+		)
+
+		r.resolveExpr(
+			scope,
+			e.Length,
+		)
+
+		for _, value := range e.Values {
+			r.resolveExpr(
+				scope,
+				value,
+			)
 		}
 
 	case *ast.SpreadExpr:
-		r.resolveExpr(scope, e.Expr)
+		r.resolveExpr(
+			scope,
+			e.Expr,
+		)
 
 	case *ast.SelectorExpr:
 		if id, ok := e.Left.(*ast.IdentExpr); ok {
@@ -1078,7 +1169,9 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 					return
 				}
 
-				member := sym.Package.Symbols[e.Name.Name]
+				member :=
+					sym.Package.Symbols[e.Name.Name]
+
 				if member == nil {
 					r.diags.Add(
 						e.Name.Span(),
@@ -1095,21 +1188,40 @@ func (r *Resolver) resolveExpr(scope *Scope, expr ast.Expr) {
 			}
 		}
 
-		r.resolveExpr(scope, e.Left)
+		r.resolveExpr(
+			scope,
+			e.Left,
+		)
 
 	case *ast.IndexExpr:
-		r.resolveExpr(scope, e.Left)
-		r.resolveExpr(scope, e.Index)
+		r.resolveExpr(
+			scope,
+			e.Left,
+		)
+
+		r.resolveExpr(
+			scope,
+			e.Index,
+		)
 
 	case *ast.CompoundLiteralExpr:
-		r.resolveType(scope, e.Type)
+		r.resolveType(
+			scope,
+			e.Type,
+		)
 
 		for _, field := range e.Fields {
-			r.resolveExpr(scope, field.Value)
+			r.resolveExpr(
+				scope,
+				field.Value,
+			)
 		}
 
 		for _, value := range e.Values {
-			r.resolveExpr(scope, value)
+			r.resolveExpr(
+				scope,
+				value,
+			)
 		}
 	}
 }
