@@ -1233,6 +1233,52 @@ func (g *Generator) inferCallExprType(
 	return CInvalid
 }
 
+func (g *Generator) binaryOperandTypes(
+	e *ast.BinaryExpr,
+) (CType, CType) {
+	if e == nil {
+		return CInvalid, CInvalid
+	}
+
+	left := g.inferExprType(
+		e.Left,
+		nil,
+	)
+
+	right := g.inferExprType(
+		e.Right,
+		nil,
+	)
+
+	// Contextual enum literals such as:
+	//
+	//     state == .Empty
+	//     .Empty == state
+	//
+	// do not carry a standalone type. The checker has already accepted the
+	// expression, so when one operand is an enum and the other is a dot enum
+	// literal, propagate the concrete enum type to the literal.
+	if _, ok := e.Left.(*ast.DotIdentExpr); ok &&
+		!isInvalidCType(right) &&
+		g.isEnumCType(right) {
+		left = g.inferExprType(
+			e.Left,
+			&right,
+		)
+	}
+
+	if _, ok := e.Right.(*ast.DotIdentExpr); ok &&
+		!isInvalidCType(left) &&
+		g.isEnumCType(left) {
+		right = g.inferExprType(
+			e.Right,
+			&left,
+		)
+	}
+
+	return left, right
+}
+
 func (g *Generator) inferExprType(
 	expr ast.Expr,
 	expected *CType,
@@ -1332,7 +1378,10 @@ func (g *Generator) inferExprType(
 
 	case *ast.UnaryExpr:
 		inner :=
-			g.inferExprType(e.Expr, nil)
+			g.inferExprType(
+				e.Expr,
+				nil,
+			)
 
 		switch e.Op {
 		case token.Amp:
@@ -1371,10 +1420,8 @@ func (g *Generator) inferExprType(
 		return inner
 
 	case *ast.BinaryExpr:
-		left :=
-			g.inferExprType(e.Left, nil)
-		right :=
-			g.inferExprType(e.Right, nil)
+		left, right :=
+			g.binaryOperandTypes(e)
 
 		if g.hasOperatorOverload(
 			e.Op.String(),
@@ -1382,7 +1429,10 @@ func (g *Generator) inferExprType(
 			if candidate, ok :=
 				g.resolveOverload(
 					e.Op.String(),
-					[]CType{left, right},
+					[]CType{
+						left,
+						right,
+					},
 				); ok {
 				return g.tasks[candidate].ReturnType
 			}
@@ -1393,7 +1443,10 @@ func (g *Generator) inferExprType(
 			if _, ok :=
 				g.resolveOverload(
 					"==",
-					[]CType{left, right},
+					[]CType{
+						left,
+						right,
+					},
 				); ok {
 				return CBool
 			}
@@ -1474,7 +1527,9 @@ func (g *Generator) inferExprType(
 		return g.indexExprType(e)
 
 	case *ast.CompoundLiteralExpr:
-		return g.cTypeFromAstInContext(e.Type)
+		return g.cTypeFromAstInContext(
+			e.Type,
+		)
 	}
 
 	return CInvalid
@@ -1692,27 +1747,55 @@ func (g *Generator) isUnion(t CType) bool {
 	return ok
 }
 
-func (g *Generator) isEnumCType(t CType) bool {
+func (g *Generator) isEnumCType(
+	t CType,
+) bool {
+	if isInvalidCType(t) {
+		return false
+	}
+
 	if g.enums[t.SealName] != nil {
 		return true
 	}
 
-	for packageName, pkg := range g.packages {
-		if pkg == nil {
-			continue
-		}
+	checkPackages := func(
+		packages map[string]*PackageInfo,
+	) bool {
+		for mapKey, pkg := range packages {
+			if pkg == nil {
+				continue
+			}
 
-		for enumName := range pkg.Enums {
-			if cImportedTypeName(
-				packageName,
-				enumName,
-			) == t.SealName {
-				return true
+			packageName := pkg.Name
+
+			if packageName == "" {
+				packageName = mapKey
+			}
+
+			if packageName == "" {
+				continue
+			}
+
+			for enumName := range pkg.Enums {
+				if cImportedTypeName(
+					packageName,
+					enumName,
+				) == t.SealName {
+					return true
+				}
 			}
 		}
+
+		return false
 	}
 
-	return false
+	if checkPackages(g.packages) {
+		return true
+	}
+
+	return checkPackages(
+		g.workspacePackages,
+	)
 }
 
 func (g *Generator) unionHasMember(unionName string, memberName string) bool {

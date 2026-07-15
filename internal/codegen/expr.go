@@ -762,8 +762,8 @@ func (g *Generator) emitExpr(
 		)
 
 	case *ast.BinaryExpr:
-		leftType := g.inferExprType(e.Left, nil)
-		rightType := g.inferExprType(e.Right, nil)
+		leftType, rightType :=
+			g.binaryOperandTypes(e)
 
 		if value, ok :=
 			g.emitBuiltinTextBinaryExpr(
@@ -774,7 +774,9 @@ func (g *Generator) emitExpr(
 			return value
 		}
 
-		if g.hasOperatorOverload(e.Op.String()) {
+		if g.hasOperatorOverload(
+			e.Op.String(),
+		) {
 			if candidate, ok :=
 				g.resolveOverload(
 					e.Op.String(),
@@ -831,8 +833,27 @@ func (g *Generator) emitExpr(
 			}
 		}
 
-		left := g.emitExpr(e.Left, nil)
-		right := g.emitExpr(e.Right, nil)
+		var leftExpected *CType
+
+		if !isInvalidCType(leftType) {
+			leftExpected = &leftType
+		}
+
+		var rightExpected *CType
+
+		if !isInvalidCType(rightType) {
+			rightExpected = &rightType
+		}
+
+		left := g.emitExpr(
+			e.Left,
+			leftExpected,
+		)
+
+		right := g.emitExpr(
+			e.Right,
+			rightExpected,
+		)
 
 		return fmt.Sprintf(
 			"(%s %s %s)",
@@ -863,9 +884,16 @@ func (g *Generator) emitExpr(
 			}
 		}
 
-		left := g.emitExpr(e.Left, nil)
+		left := g.emitExpr(
+			e.Left,
+			nil,
+		)
+
 		leftType :=
-			g.inferExprType(e.Left, nil)
+			g.inferExprType(
+				e.Left,
+				nil,
+			)
 
 		if leftType.SealName == "string" {
 			g.error(
@@ -910,7 +938,10 @@ func (g *Generator) emitExpr(
 		return g.emitIndexExpr(e)
 
 	case *ast.CompoundLiteralExpr:
-		typ := g.cTypeFromAstInContext(e.Type)
+		typ :=
+			g.cTypeFromAstInContext(
+				e.Type,
+			)
 
 		if _, ok :=
 			g.distincts[typ.SealName]; ok {
@@ -932,7 +963,10 @@ func (g *Generator) emitExpr(
 				typ.SealName,
 			) {
 			payload :=
-				g.emitCompoundLiteral(e, typ)
+				g.emitCompoundLiteral(
+					e,
+					typ,
+				)
 
 			return fmt.Sprintf(
 				"(%s){.tag = %s_Tag_%s, .as.%s = %s}",
@@ -944,7 +978,10 @@ func (g *Generator) emitExpr(
 			)
 		}
 
-		return g.emitCompoundLiteral(e, typ)
+		return g.emitCompoundLiteral(
+			e,
+			typ,
+		)
 	}
 
 	g.error(
