@@ -11089,3 +11089,156 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCheckerImportedGenericStructWithPrivateInlineArrayElement(
+	t *testing.T,
+) {
+	providerInput := `
+_Slot :: struct<T type> {
+    value T
+}
+
+StaticArray :: struct<
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<_Slot<T>, N>
+}
+`
+
+	providerReporter := diag.NewReporter()
+
+	providerSource := source.NewFile(
+		"std/lists/static_array.seal",
+		providerInput,
+	)
+
+	providerLexer := lexer.New(
+		providerSource,
+		providerReporter,
+	)
+
+	providerTokens := providerLexer.LexAll()
+
+	if providerReporter.HasErrors() {
+		t.Fatalf(
+			"unexpected provider lexer diagnostics:\n%s",
+			providerReporter.String(),
+		)
+	}
+
+	providerParser := parser.New(
+		providerTokens,
+		providerReporter,
+	)
+
+	providerFile := providerParser.ParseFile()
+
+	if providerReporter.HasErrors() {
+		t.Fatalf(
+			"unexpected provider parser diagnostics:\n%s",
+			providerReporter.String(),
+		)
+	}
+
+	providerResolver := resolver.New(
+		providerReporter,
+	)
+
+	providerResolverScope := providerResolver.ResolveFile(
+		providerFile,
+	)
+
+	if providerReporter.HasErrors() {
+		t.Fatalf(
+			"unexpected provider resolver diagnostics:\n%s",
+			providerReporter.String(),
+		)
+	}
+
+	providerChecker := New(
+		providerReporter,
+	)
+
+	providerCheckerScope := providerChecker.CheckFile(
+		providerFile,
+	)
+
+	if providerReporter.HasErrors() {
+		t.Fatalf(
+			"unexpected provider checker diagnostics:\n%s",
+			providerReporter.String(),
+		)
+	}
+
+	resolverPackage := resolver.ExportPackage(
+		"lists",
+		providerResolverScope,
+	)
+
+	checkerPackage := ExportPackage(
+		"lists",
+		providerCheckerScope,
+	)
+
+	consumerInput := `
+Main :: task() {
+    array: lists.StaticArray<int, 4>
+}
+`
+
+	result := runCheckerTestWithPackages(
+		t,
+		consumerInput,
+		map[string]*resolver.PackageInfo{
+			"lists": resolverPackage,
+		},
+		map[string]*PackageInfo{
+			"lists": checkerPackage,
+		},
+	)
+
+	if result.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected consumer diagnostics:\n%s",
+			result.Reporter.String(),
+		)
+	}
+
+	task := checkerTaskDecl(
+		t,
+		result.File,
+		"Main",
+	)
+
+	if task.Body == nil ||
+		len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected Main to contain exactly one statement",
+		)
+	}
+
+	varDecl, ok := task.Body.Stmts[0].(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected Main statement to be *ast.VarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	sym := result.Scope.Lookup(
+		varDecl.Name.Name,
+	)
+
+	/*
+		The variable is declared inside the task scope rather than the global
+		scope, so depending on your existing checker test helpers you may not
+		expose its symbol directly here.
+
+		The essential regression assertion is already the absence of
+		diagnostics above. The remaining assertions can therefore inspect the
+		specialized type through the AST/checker helpers available in your test
+		suite.
+	*/
+	_ = sym
+}

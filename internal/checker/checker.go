@@ -11517,8 +11517,20 @@ func (c *Checker) specializeInterfaceType(
 	return typ
 }
 
-func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseType *Type, decl *ast.StructDecl, baseName string) *Type {
-	if len(gen.Args) != len(baseType.GenericParams) {
+func (c *Checker) specializeStructType(
+	scope *Scope,
+	gen *ast.GenericType,
+	baseType *Type,
+	decl *ast.StructDecl,
+	baseName string,
+) *Type {
+	if baseType == nil ||
+		baseType.Kind != TypeStruct {
+		return InvalidType
+	}
+
+	if len(gen.Args) !=
+		len(baseType.GenericParams) {
 		return InvalidType
 	}
 
@@ -11526,20 +11538,33 @@ func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseT
 		baseName = baseType.Name
 	}
 
-	name := c.specializedTypeName(baseName, gen.Args)
+	name := c.specializedTypeName(
+		baseName,
+		gen.Args,
+	)
 
 	if cached := c.specializedTypes[name]; cached != nil {
 		return cached
 	}
 
-	subst := genericArgSubst(baseType.GenericParams, gen.Args)
-	typeSubst := c.genericTypeSubstFromArgs(scope, baseType.GenericParams, gen.Args)
+	subst := genericArgSubst(
+		baseType.GenericParams,
+		gen.Args,
+	)
+
+	typeSubst := c.genericTypeSubstFromArgs(
+		scope,
+		baseType.GenericParams,
+		gen.Args,
+	)
 
 	typ := &Type{
-		Kind:            TypeStruct,
-		Name:            name,
-		GenericParams:   nil,
+		Kind:          TypeStruct,
+		Name:          name,
+		GenericParams: nil,
+
 		GenericBaseName: baseName,
+
 		GenericArguments: c.checkedGenericArguments(
 			scope,
 			baseType.GenericParams,
@@ -11547,39 +11572,140 @@ func (c *Checker) specializeStructType(scope *Scope, gen *ast.GenericType, baseT
 		),
 	}
 
-	// Store before fields so recursive generic structs do not loop forever.
+	/*
+		Cache the specialization before resolving its fields.
+
+		This is required for recursive generic structs such as:
+
+		    Node<T> :: struct {
+		        next *Node<T>
+		    }
+	*/
 	c.specializedTypes[name] = typ
 
+	/*
+		If the source declaration is locally available, resolve fields from
+		the declaration AST.
+
+		This is the preferred path for structs declared in the current
+		package because generic substitutions can be applied directly to the
+		original source types.
+	*/
 	if decl != nil {
 		for _, field := range decl.Fields {
-			fieldType := c.typeFromAstWithGenericArgs(scope, field.Type, subst)
+			fieldType := c.typeFromAstWithGenericArgs(
+				scope,
+				field.Type,
+				subst,
+			)
 
-			typ.Fields = append(typ.Fields, FieldInfo{
-				Name:    field.Name.Name,
-				Type:    fieldType,
-				TypeAst: field.Type,
-				Span:    field.Name.Span(),
-			})
+			typ.Fields = append(
+				typ.Fields,
+				FieldInfo{
+					Name:    field.Name.Name,
+					Type:    fieldType,
+					TypeAst: field.Type,
+					Span:    field.Name.Span(),
+				},
+			)
 		}
 
 		return typ
 	}
 
+	/*
+		An imported generic struct has no declaration node because exported
+		type symbols intentionally discard their source declaration:
+
+		    if out.Kind == SymbolType {
+		        out.Node = nil
+		    }
+
+		Its preserved FieldInfo.TypeAst therefore still contains names in the
+		imported package's lexical namespace. For example:
+
+		    @inline_array<_Slot<T>, N>
+
+		Re-resolving that AST in the caller's scope would incorrectly search
+		for `_Slot` in the importing package.
+
+		Determine whether this is an imported nominal type from its qualified
+		base name:
+
+		    lists.StaticArray
+		    ^^^^^
+	*/
+	packageName := ""
+
+	if dot := strings.Index(
+		baseName,
+		".",
+	); dot > 0 {
+		packageName = baseName[:dot]
+	}
+
 	for _, field := range baseType.Fields {
 		fieldType := InvalidType
 
-		if field.TypeAst != nil {
-			fieldType = c.typeFromAstWithGenericArgs(scope, field.TypeAst, subst)
+		if packageName != "" {
+			/*
+				For imported generic structs, specialize the already-resolved
+				exported checker type instead of re-resolving its source AST in
+				the caller's lexical scope.
+
+				This correctly transforms:
+
+				    @inline_array<_Slot<T>, N>
+
+				from package `lists` with:
+
+				    T = int
+				    N = 4
+
+				into:
+
+				    @inline_array<lists._Slot<int>, 4>
+			*/
+			fieldType =
+				c.substituteImportedGenericSignatureType(
+					scope,
+					packageName,
+					field.Type,
+					typeSubst,
+					subst,
+				)
+		} else if field.TypeAst != nil {
+			/*
+				Defensive local fallback for a declaration whose AST node is
+				unavailable but whose field AST still belongs to the current
+				package.
+			*/
+			fieldType = c.typeFromAstWithGenericArgs(
+				scope,
+				field.TypeAst,
+				subst,
+			)
 		} else {
-			fieldType = c.substituteGenericSignatureType(scope, field.Type, typeSubst, subst)
+			/*
+				Last-resort typed-signature specialization for local types.
+			*/
+			fieldType = c.substituteGenericSignatureType(
+				scope,
+				field.Type,
+				typeSubst,
+				subst,
+			)
 		}
 
-		typ.Fields = append(typ.Fields, FieldInfo{
-			Name:    field.Name,
-			Type:    fieldType,
-			TypeAst: field.TypeAst,
-			Span:    field.Span,
-		})
+		typ.Fields = append(
+			typ.Fields,
+			FieldInfo{
+				Name:    field.Name,
+				Type:    fieldType,
+				TypeAst: field.TypeAst,
+				Span:    field.Span,
+			},
+		)
 	}
 
 	return typ
