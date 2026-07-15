@@ -1,0 +1,548 @@
+Person :: struct {
+    Name string
+}
+
+/*
+PersonString implements the textual representation of Person.
+
+The returned string is borrowed directly from the Person value.
+*/
+PersonString :: pure task(
+    person *Person,
+) string {
+    return person.Name
+}
+
+strings.Stringable :: impl Person {
+    String :: PersonString
+}
+
+/*
+TestPrimitiveOutput exercises every primitive type currently supported
+by fmt's any-based output dispatch.
+*/
+TestPrimitiveOutput :: task() {
+    fmt.Println(
+        "=== Primitive output ===",
+    )
+
+    fmt.Println(
+        "int: %",
+        42,
+    )
+
+    fmt.Println(
+        "negative int: %",
+        -42,
+    )
+
+    positive: uint = 123
+
+    fmt.Println(
+        "uint: %",
+        positive,
+    )
+
+    float32: f32 = 3.5
+
+    fmt.Println(
+        "f32: %",
+        float32,
+    )
+
+    float64: f64 = 123.456
+
+    fmt.Println(
+        "f64: %",
+        float64,
+    )
+
+    fmt.Println(
+        "bool true: %",
+        true,
+    )
+
+    fmt.Println(
+        "bool false: %",
+        false,
+    )
+
+    fmt.Println(
+        "char ASCII: %",
+        'A',
+    )
+
+    fmt.Println(
+        "char Unicode: %",
+        'ñ',
+    )
+
+    fmt.Println(
+        "char emoji: %",
+        '😀',
+    )
+
+    fmt.Println(
+        "string: %",
+        "Seal language",
+    )
+
+    fmt.Println(
+        "Unicode string: %",
+        "mañana 世界 😀",
+    )
+
+    fmt.Println(
+        "cstring: %",
+        c"C string",
+    )
+
+    fmt.Println()
+}
+
+/*
+TestMultipleArguments verifies sequential placeholder consumption.
+*/
+TestMultipleArguments :: task() {
+    fmt.Println(
+        "=== Multiple arguments ===",
+    )
+
+    fmt.Println(
+        "Name: %, age: %, active: %",
+        "David",
+        30,
+        true,
+    )
+
+    fmt.Println(
+        "% + % = %",
+        10,
+        20,
+        30,
+    )
+
+    fmt.Println(
+        "Coordinates: (%, %)",
+        -15,
+        42,
+    )
+
+    fmt.Println(
+        "Mixed: % | % | % | % | %",
+        "Seal",
+        100,
+        3.5,
+        true,
+        '😀',
+    )
+
+    fmt.Println()
+}
+
+/*
+TestAdjacentPlaceholders verifies that placeholders do not require
+separator characters between them.
+*/
+TestAdjacentPlaceholders :: task() {
+    fmt.Println(
+        "=== Adjacent placeholders ===",
+    )
+
+    fmt.Println(
+        "%%%",
+        "A",
+    )
+
+    fmt.Println(
+        "Adjacent values: %%%",
+        "A",
+        "B",
+        "C",
+    )
+
+    fmt.Println(
+        "[%][%][%]",
+        1,
+        2,
+        3,
+    )
+
+    fmt.Println()
+}
+
+/*
+TestPercentEscaping verifies that %% writes one literal percent sign
+without consuming an argument.
+*/
+TestPercentEscaping :: task() {
+    fmt.Println(
+        "=== Percent escaping ===",
+    )
+
+    fmt.Println(
+        "100%% complete",
+    )
+
+    fmt.Println(
+        "Progress: %%%%",
+        50,
+    )
+
+    fmt.Println(
+        "Literal percent before value: %% %",
+        42,
+    )
+
+    fmt.Println(
+        "Value before literal percent: %%%%",
+        75,
+    )
+
+    fmt.Println()
+}
+
+/*
+TestUnicodeFormatStrings verifies that Print traverses the format string
+by Unicode-scalar index rather than UTF-8 byte offset.
+*/
+TestUnicodeFormatStrings :: task() {
+    fmt.Println(
+        "=== Unicode format strings ===",
+    )
+
+    fmt.Println(
+        "mañana: %",
+        "sí",
+    )
+
+    fmt.Println(
+        "世界: %",
+        "Seal",
+    )
+
+    fmt.Println(
+        "😀 valor: %",
+        123,
+    )
+
+    fmt.Println(
+        "ñ😀界 % ñ😀界",
+        "centro",
+    )
+
+    fmt.Println(
+        "Unicode values: %, %, %",
+        "mañana",
+        "世界",
+        '😀',
+    )
+
+    fmt.Println()
+}
+
+/*
+TestEmptyStrings verifies empty format text and empty values.
+*/
+TestEmptyStrings :: task() {
+    fmt.Println(
+        "=== Empty strings ===",
+    )
+
+    fmt.Print("")
+
+    fmt.Println(
+        "Empty string value: >%<",
+        "",
+    )
+
+    fmt.Println(
+        "Empty cstring value: >%<",
+        c"",
+    )
+
+    fmt.Println()
+}
+
+/*
+TestPrintFunctions exercises all four public output entry points.
+*/
+TestPrintFunctions :: task() {
+    fmt.Println(
+        "=== Public print functions ===",
+    )
+
+    fmt.Print(
+        "Print: %",
+        "no automatic newline",
+    )
+
+    fmt.Print(
+        " | continued\n",
+    )
+
+    fmt.Println(
+        "Println: %",
+        "automatic newline",
+    )
+
+    fmt.Printf(
+        "Printf: %",
+        "no automatic newline",
+    )
+
+    fmt.Printf(
+        " | continued\n",
+    )
+
+    fmt.Printfl(
+        "Printfl: %",
+        "automatic newline",
+    )
+
+    fmt.Println()
+}
+
+/*
+TestDefaultPrintln verifies the default empty format argument.
+*/
+TestDefaultPrintln :: task() {
+    fmt.Println(
+        "=== Default newline functions ===",
+    )
+
+    fmt.Print(
+        "Before empty Println",
+    )
+
+    fmt.Println()
+
+    fmt.Print(
+        "Before empty Printfl",
+    )
+
+    fmt.Printfl()
+
+    fmt.Println()
+}
+
+/*
+TestRawPointer verifies raw pointer formatting.
+
+The exact textual address is platform-dependent, so this test is
+intended for execution coverage rather than comparison with a fixed
+string.
+*/
+TestRawPointer :: task() {
+    fmt.Println(
+        "=== Raw pointer ===",
+    )
+
+    value := 42
+
+    pointer := cast<rawptr>(
+        &value,
+    )
+
+    fmt.Println(
+        "non-nil pointer: %",
+        pointer,
+    )
+
+    fmt.Println(
+        "nil pointer: %",
+        cast<rawptr>(nil),
+    )
+
+    fmt.Println()
+}
+
+/*
+TestNumericBoundaries exercises representative zero, negative, and
+large values.
+*/
+TestNumericBoundaries :: task() {
+    fmt.Println(
+        "=== Numeric values ===",
+    )
+
+    zeroInt: int = 0
+    negativeInt: int = -1
+    zeroUint: uint = 0
+
+    fmt.Println(
+        "zero int: %",
+        zeroInt,
+    )
+
+    fmt.Println(
+        "negative int: %",
+        negativeInt,
+    )
+
+    fmt.Println(
+        "zero uint: %",
+        zeroUint,
+    )
+
+    fmt.Println(
+        "f32 zero: %",
+        cast<f32>(0),
+    )
+
+    fmt.Println(
+        "f64 negative: %",
+        cast<f64>(-123.75),
+    )
+
+    fmt.Println()
+}
+
+/*
+TestStringable exercises explicit formatting through the open
+strings.Stringable dynamic interface.
+
+This path requires no fmt-specific compiler magic.
+*/
+TestStringable :: task() {
+    fmt.Println(
+        "=== Stringable ===",
+    )
+
+    person := Person{
+        Name = "David",
+    }
+
+    stringable := cast<strings.Stringable>(
+        &person,
+    )
+
+    fmt.Print(
+        "Person: ",
+    )
+
+    fmt.WriteStringable(
+        stringable,
+    )
+
+    fmt.Println()
+
+    assert(
+        strings.String(stringable) ==
+            "David",
+    )
+
+    fmt.Println(
+        "Stringable assertion passed",
+    )
+
+    fmt.Println()
+}
+
+/*
+TestFormattingExamples combines the package features in realistic output.
+*/
+TestFormattingExamples :: task() {
+    fmt.Println(
+        "=== Realistic formatting examples ===",
+    )
+
+    name := "David"
+    language := "Seal"
+    version: f64 = 0.1
+    testsPassed: uint = 42
+
+    fmt.Println(
+        "Hello, %.",
+        name,
+    )
+
+    fmt.Println(
+        "% version %",
+        language,
+        version,
+    )
+
+    fmt.Println(
+        "Tests passed: %",
+        testsPassed,
+    )
+
+    fmt.Println(
+        "Success: %",
+        true,
+    )
+
+    fmt.Println(
+        "Progress: 100%%",
+    )
+
+    fmt.Println(
+        "Unicode: mañana, 世界, 😀",
+    )
+
+    fmt.Println()
+}
+
+/*
+These tests intentionally panic.
+
+They are not called from Main because a panic terminates execution and
+would prevent the other fmt tests from running.
+
+Call each one individually when testing the corresponding failure mode.
+*/
+
+TestMissingArgumentPanic :: task() {
+    fmt.Print(
+        "Missing value: %",
+    )
+}
+
+TestUnusedArgumentPanic :: task() {
+    fmt.Print(
+        "No placeholder",
+        42,
+    )
+}
+
+Main :: task() {
+    fmt.Println(
+        "================================",
+    )
+
+    fmt.Println(
+        "Seal fmt package tests",
+    )
+
+    fmt.Println(
+        "================================",
+    )
+
+    fmt.Println()
+
+    TestPrimitiveOutput()
+    TestMultipleArguments()
+    TestAdjacentPlaceholders()
+    TestPercentEscaping()
+    TestUnicodeFormatStrings()
+    TestEmptyStrings()
+    TestPrintFunctions()
+    TestDefaultPrintln()
+    TestRawPointer()
+    TestNumericBoundaries()
+    TestStringable()
+    TestFormattingExamples()
+
+    fmt.Println(
+        "================================",
+    )
+
+    fmt.Println(
+        "All non-panicking fmt tests completed.",
+    )
+
+    fmt.Println(
+        "================================",
+    )
+}

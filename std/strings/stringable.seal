@@ -1,0 +1,15 @@
+/*
+Stringable represents a value that can expose a borrowed textual
+representation of itself.
+
+String must not allocate merely to satisfy this interface unless the
+implementation deliberately manages the resulting lifetime elsewhere.
+
+The returned string is borrowed. It must remain valid for the duration
+of its use by the caller.
+*/
+Stringable :: dyn interface {
+    String :: pure task(
+        value *self,
+    ) string
+}

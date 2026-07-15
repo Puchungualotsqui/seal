@@ -1,0 +1,43 @@
+/*
+Low-level output bridge.
+
+All actual format parsing and dispatch remain implemented in Seal.
+The C layer is intentionally restricted to writing primitive values to
+standard output.
+*/
+
+_WriteCString ::
+    extern("seal_fmt_write_cstring")
+    task(value cstring)
+
+_WriteString ::
+    extern("seal_fmt_write_string")
+    task(value string)
+
+_WriteChar ::
+    extern("seal_fmt_write_char")
+    task(value char)
+
+_WriteInt ::
+    extern("seal_fmt_write_int")
+    task(value int)
+
+_WriteUint ::
+    extern("seal_fmt_write_uint")
+    task(value uint)
+
+_WriteF32 ::
+    extern("seal_fmt_write_f32")
+    task(value f32)
+
+_WriteF64 ::
+    extern("seal_fmt_write_f64")
+    task(value f64)
+
+_WriteBool ::
+    extern("seal_fmt_write_bool")
+    task(value bool)
+
+_WriteRawptr ::
+    extern("seal_fmt_write_rawptr")
+    task(value rawptr)

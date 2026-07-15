@@ -1,0 +1,95 @@
+/*
+_WriteAny writes one primitive value supported by Seal's current `any`
+representation.
+
+Unsupported runtime tags are programmer errors and cause a panic rather
+than silently producing no output.
+*/
+_WriteAny :: task(
+    value any,
+) {
+    switch value type {
+    case int:
+        _WriteInt(
+            anyAs<int>(value),
+        )
+
+        return
+
+    case uint:
+        _WriteUint(
+            anyAs<uint>(value),
+        )
+
+        return
+
+    case f32:
+        _WriteF32(
+            anyAs<f32>(value),
+        )
+
+        return
+
+    case f64:
+        _WriteF64(
+            anyAs<f64>(value),
+        )
+
+        return
+
+    case bool:
+        _WriteBool(
+            anyAs<bool>(value),
+        )
+
+        return
+
+    case char:
+        _WriteChar(
+            anyAs<char>(value),
+        )
+
+        return
+
+    case string:
+        _WriteString(
+            anyAs<string>(value),
+        )
+
+        return
+
+    case cstring:
+        _WriteCString(
+            anyAs<cstring>(value),
+        )
+
+        return
+
+    case rawptr:
+        _WriteRawptr(
+            anyAs<rawptr>(value),
+        )
+
+        return
+
+    default:
+        panic("fmt: unsupported value")
+    }
+}
+
+/*
+WriteStringable writes the borrowed textual representation returned by a
+Stringable value.
+
+No allocation is performed by fmt itself.
+
+The implementation of strings.String is responsible for returning a
+string whose backing storage remains valid while it is being written.
+*/
+WriteStringable :: task(
+    value strings.Stringable,
+) {
+    text := strings.String(value)
+
+    _WriteString(text)
+}

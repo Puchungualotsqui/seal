@@ -1,0 +1,114 @@
+/*
+Print writes format to standard output.
+
+A single '%' consumes and writes the next argument.
+
+Two consecutive percent signs, '%%', write one literal percent sign and
+consume no argument.
+
+The format string is traversed by Unicode-scalar index. Therefore
+non-ASCII format text is handled correctly.
+
+Print panics when:
+
+    - a '%' placeholder has no corresponding argument;
+    - arguments remain unused after processing the format string;
+    - an argument contains an unsupported `any` runtime type.
+*/
+Print :: task(
+    format string,
+    args ...any,
+) {
+    formatIndex: int = 0
+    argumentIndex: int = 0
+
+    formatLength := cast<int>(
+        len(format),
+    )
+
+    argumentCount := cast<int>(
+        len(args),
+    )
+
+    for formatIndex < formatLength {
+        current := format[formatIndex]
+
+        if current != '%' {
+            _WriteChar(current)
+
+            formatIndex += 1
+
+            continue
+        }
+
+        nextIndex := formatIndex + 1
+
+        if nextIndex < formatLength &&
+            format[nextIndex] == '%' {
+            _WriteChar('%')
+
+            formatIndex += 2
+
+            continue
+        }
+
+        if argumentIndex >= argumentCount {
+            panic("fmt.Print: missing argument")
+        }
+
+        _WriteAny(
+            args[argumentIndex],
+        )
+
+        argumentIndex += 1
+        formatIndex += 1
+    }
+
+    if argumentIndex < argumentCount {
+        panic("fmt.Print: unused argument")
+    }
+}
+
+/*
+Println behaves like Print and then writes a newline.
+*/
+Println :: task(
+    format string = "",
+    args ...any,
+) {
+    Print(
+        format,
+        args...,
+    )
+
+    _WriteChar('\n')
+}
+
+/*
+Printf is an alias of Print.
+
+It is retained as part of the public API for callers that prefer an
+explicit formatted-output name.
+*/
+Printf :: task(
+    format string,
+    args ...any,
+) {
+    Print(
+        format,
+        args...,
+    )
+}
+
+/*
+Printfl is the newline-terminating formatted-output alias.
+*/
+Printfl :: task(
+    format string = "",
+    args ...any,
+) {
+    Println(
+        format,
+        args...,
+    )
+}
