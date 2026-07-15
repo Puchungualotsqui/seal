@@ -2832,19 +2832,52 @@ func (g *Generator) taskInfoFromGenericArg(
 			return TaskInfo{}, false
 		}
 
-		pkg := g.packages[id.Name.Name]
+		packageName := id.Name.Name
+		taskName := e.Name.Name
+
+		// Cross-package generic specialization requests preserve task
+		// ownership by qualifying task arguments:
+		//
+		//     HashString -> lists.HashString
+		//     PointHash  -> listsExample.PointHash
+		//
+		// When the qualifier names the package currently being generated,
+		// resolve the task through the local task table.
+		if packageName == g.packageName {
+			info, ok := g.tasks[taskName]
+			if !ok {
+				return TaskInfo{}, false
+			}
+
+			return info, true
+		}
+
+		// A task-valued generic argument can belong to a workspace package
+		// that is not a source-level dependency of the package currently
+		// being generated.
+		//
+		// For example:
+		//
+		//     lists.HashMap<Point, string, PointHash, PointEqual>
+		//
+		// is specialized inside package lists, while PointHash and PointEqual
+		// belong to listsExample. Use typePackageInfo so both ordinary visible
+		// packages and workspace-only packages can provide task metadata.
+		pkg := g.typePackageInfo(
+			packageName,
+		)
 		if pkg == nil {
 			return TaskInfo{}, false
 		}
 
-		info, ok := pkg.Tasks[e.Name.Name]
+		info, ok := pkg.Tasks[taskName]
 		if !ok {
 			return TaskInfo{}, false
 		}
 
 		info = g.taskInfoInPackageContext(
-			id.Name.Name,
-			e.Name.Name,
+			packageName,
+			taskName,
 			info,
 		)
 
@@ -2937,7 +2970,9 @@ func (g *Generator) taskInfoFromGenericArg(
 
 		case *ast.SelectorExpr:
 			pkgName, taskName, info, ok :=
-				g.importedGenericTaskInfoFromSelector(base)
+				g.importedGenericTaskInfoFromSelector(
+					base,
+				)
 
 			if !ok {
 				return TaskInfo{}, false

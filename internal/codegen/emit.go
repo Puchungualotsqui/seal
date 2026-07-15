@@ -724,74 +724,210 @@ func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
 	return fmt.Sprintf("%s %s(%s)", ret, name, strings.Join(params, ", "))
 }
 
-func (g *Generator) emitImportedTaskPrototypes() {
-	if len(g.packages) == 0 {
-		return
+func (g *Generator) externalTaskArgumentPrototype(
+	arg ast.GenericArg,
+) (string, bool) {
+	if arg.Kind != ast.GenericArgExpr ||
+		arg.Expr == nil {
+		return "", false
 	}
 
-	names := make(
+	switch e := arg.Expr.(type) {
+	case *ast.SelectorExpr:
+		id, ok := e.Left.(*ast.IdentExpr)
+		if !ok {
+			return "", false
+		}
+
+		packageName := id.Name.Name
+		taskName := e.Name.Name
+
+		if packageName == "" ||
+			packageName == g.packageName {
+			return "", false
+		}
+
+		// Ordinary source-level dependencies are already handled by
+		// emitImportedTaskPrototypes. This helper exists specifically for
+		// workspace-only task dependencies introduced by cross-package
+		// generic specialization requests.
+		if packageInfoBySemanticName(
+			g.packages,
+			packageName,
+		) != nil {
+			return "", false
+		}
+
+		pkg := g.typePackageInfo(
+			packageName,
+		)
+		if pkg == nil {
+			return "", false
+		}
+
+		info, ok := pkg.Tasks[taskName]
+		if !ok {
+			return "", false
+		}
+
+		// Generic task arguments are registered as imported generic task
+		// instances and receive prototypes through
+		// emitImportedGenericTaskPrototypes.
+		if len(info.GenericParams) != 0 {
+			return "", false
+		}
+
+		// Functions already declared by the runtime headers must not receive
+		// another Seal-generated declaration with potentially different ABI
+		// spelling.
+		if cExternDeclaredByRuntimeHeaders(info) {
+			return "", false
+		}
+
+		return g.packageTaskSignature(
+			packageName,
+			taskName,
+			info,
+		), true
+	}
+
+	return "", false
+}
+
+func (g *Generator) emitImportedTaskPrototypes() {
+	seen := map[string]bool{}
+	emitted := false
+
+	if len(g.packages) > 0 {
+		names := make(
+			[]string,
+			0,
+			len(g.packages),
+		)
+
+		for name := range g.packages {
+			names = append(
+				names,
+				name,
+			)
+		}
+
+		sort.Strings(names)
+
+		for _, pkgName := range names {
+			pkg := g.packages[pkgName]
+			if pkg == nil {
+				continue
+			}
+
+			taskNames := make(
+				[]string,
+				0,
+				len(pkg.Tasks),
+			)
+
+			for taskName := range pkg.Tasks {
+				taskNames = append(
+					taskNames,
+					taskName,
+				)
+			}
+
+			sort.Strings(taskNames)
+
+			for _, taskName := range taskNames {
+				info := pkg.Tasks[taskName]
+
+				if taskName == "Main" ||
+					info.IsIntrinsic ||
+					len(info.GenericParams) > 0 {
+					continue
+				}
+
+				// Standard-library externs are declared by the runtime headers
+				// included at the top of every generated translation unit.
+				if cExternDeclaredByRuntimeHeaders(info) {
+					continue
+				}
+
+				signature := g.packageTaskSignature(
+					pkgName,
+					taskName,
+					info,
+				)
+
+				// The same PackageInfo may occasionally be reachable through
+				// more than one metadata-map key. Avoid duplicate C
+				// declarations.
+				if seen[signature] {
+					continue
+				}
+
+				seen[signature] = true
+
+				g.linef(
+					"%s;",
+					signature,
+				)
+
+				emitted = true
+			}
+		}
+	}
+
+	// A cross-package generic specialization can carry a task argument owned
+	// by the caller package:
+	//
+	//     lists.NewHashMapEmpty<
+	//         Point,
+	//         string,
+	//         listsExample.PointHash,
+	//         listsExample.PointEqual,
+	//     >(...)
+	//
+	// The specialization body is emitted into lists.c, so that translation
+	// unit must contain declarations for PointHash and PointEqual even though
+	// listsExample is not a source-level dependency of lists.
+	//
+	// Generic task arguments are already handled through
+	// importedGenericTasks. Here we emit prototypes only for ordinary,
+	// non-generic workspace-owned task arguments.
+	instanceNames := make(
 		[]string,
 		0,
-		len(g.packages),
+		len(g.genericTasks),
 	)
 
-	for name := range g.packages {
-		names = append(
-			names,
+	for name := range g.genericTasks {
+		instanceNames = append(
+			instanceNames,
 			name,
 		)
 	}
 
-	sort.Strings(names)
+	sort.Strings(instanceNames)
 
-	emitted := false
-	seen := map[string]bool{}
-
-	for _, pkgName := range names {
-		pkg := g.packages[pkgName]
-		if pkg == nil {
+	for _, instanceName := range instanceNames {
+		instance := g.genericTasks[instanceName]
+		if instance == nil ||
+			instance.Decl == nil {
 			continue
 		}
 
-		taskNames := make(
-			[]string,
-			0,
-			len(pkg.Tasks),
-		)
-
-		for taskName := range pkg.Tasks {
-			taskNames = append(
-				taskNames,
-				taskName,
-			)
-		}
-
-		sort.Strings(taskNames)
-
-		for _, taskName := range taskNames {
-			info := pkg.Tasks[taskName]
-
-			if taskName == "Main" ||
-				info.IsIntrinsic ||
-				len(info.GenericParams) > 0 {
+		for i, param := range instance.Decl.GenericParams {
+			if param.Category != ast.GenericParamTask ||
+				i >= len(instance.Args) {
 				continue
 			}
 
-			// Standard-library externs are declared by the runtime headers
-			// included at the top of every generated translation unit.
-			if cExternDeclaredByRuntimeHeaders(info) {
-				continue
-			}
+			signature, ok :=
+				g.externalTaskArgumentPrototype(
+					instance.Args[i],
+				)
 
-			signature := g.packageTaskSignature(
-				pkgName,
-				taskName,
-				info,
-			)
-
-			// The same PackageInfo may occasionally be reachable through more
-			// than one metadata-map key. Avoid duplicate C declarations.
-			if seen[signature] {
+			if !ok ||
+				signature == "" ||
+				seen[signature] {
 				continue
 			}
 
