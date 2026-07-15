@@ -196,10 +196,11 @@ type Type struct {
 
 	Elem *Type
 
-	InlineLengthExpr  ast.Expr
-	InlineLengthKey   string
-	InlineLength      int64
-	InlineLengthKnown bool
+	InlineLengthExpr     ast.Expr
+	InlineLengthKey      string
+	InlineLength         int64
+	InlineLengthKnown    bool
+	InlineLengthSymbolic bool
 
 	Fields   []FieldInfo
 	Variants []EnumVariantInfo
@@ -2710,20 +2711,20 @@ func (c *Checker) prepareInterfaceDecl(
 	parent *Scope,
 	d *ast.InterfaceDecl,
 ) {
-	sym := parent.LookupLocal(d.Name.Name)
-	if sym == nil || sym.Type == nil {
+	sym := parent.LookupLocal(
+		d.Name.Name,
+	)
+
+	if sym == nil ||
+		sym.Type == nil {
 		return
 	}
 
-	/*
-		Publish the generic signature before resolving requirements. Other
-		declarations may refer to this interface while declarations are still
-		being prepared.
-	*/
 	sym.Type.GenericParams = append(
 		[]ast.GenericParam(nil),
 		d.GenericParams...,
 	)
+
 	sym.Type.IsDynInterface = d.IsDyn
 
 	scope := c.scopeWithGenericParams(
@@ -2746,6 +2747,15 @@ func (c *Checker) prepareInterfaceDecl(
 		}
 
 		for _, param := range req.Params {
+			c.rejectInlineArraySignatureType(
+				param.Type,
+				param.Type.Span(),
+				fmt.Sprintf(
+					"interface requirement parameter %q",
+					param.Name.Name,
+				),
+			)
+
 			info.Params = append(
 				info.Params,
 				c.typeFromInterfaceRequirementAst(
@@ -2761,6 +2771,12 @@ func (c *Checker) prepareInterfaceDecl(
 		}
 
 		for _, result := range req.Results {
+			c.rejectInlineArraySignatureType(
+				result,
+				result.Span(),
+				"interface requirement result",
+			)
+
 			info.Results = append(
 				info.Results,
 				c.typeFromInterfaceRequirementAst(
@@ -2777,6 +2793,40 @@ func (c *Checker) prepareInterfaceDecl(
 	}
 
 	sym.Type.InterfaceRequirements = requirements
+}
+
+func (c *Checker) substituteInlineArrayType(
+	scope *Scope,
+	typ *Type,
+	argSubst map[string]ast.GenericArg,
+	substituteElem func(*Type) *Type,
+) *Type {
+	if typ == nil ||
+		typ.Kind != TypeInlineArray {
+		return InvalidType
+	}
+
+	elem := substituteElem(
+		typ.Elem,
+	)
+
+	lengthExpr := c.substituteGenericExpr(
+		typ.InlineLengthExpr,
+		argSubst,
+	)
+
+	span := source.Span{}
+
+	if lengthExpr != nil {
+		span = lengthExpr.Span()
+	}
+
+	return c.inlineArrayTypeFromParts(
+		scope,
+		elem,
+		lengthExpr,
+		span,
+	)
 }
 
 func (c *Checker) genericExprReferencesPlaceholder(
@@ -3023,6 +3073,10 @@ func (c *Checker) typeContainsGenericPlaceholderSeen(
 		)
 
 	case TypeInlineArray:
+		if typ.InlineLengthSymbolic {
+			return true
+		}
+
 		return c.typeContainsGenericPlaceholderSeen(
 			typ.Elem,
 			seen,
@@ -3952,27 +4006,51 @@ func overloadTypeAstSignatureKey(
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		if len(t.Parts) == 1 {
-			if ref, ok := refs[t.Parts[0].Name]; ok {
-				return overloadGenericParamRefKey(ref)
+			if ref, ok :=
+				refs[t.Parts[0].Name]; ok {
+				return overloadGenericParamRefKey(
+					ref,
+				)
 			}
 		}
 
 		var parts []string
 
 		for _, part := range t.Parts {
-			parts = append(parts, part.Name)
+			parts = append(
+				parts,
+				part.Name,
+			)
 		}
 
-		return "named:" + strings.Join(parts, ".")
+		return "named:" +
+			strings.Join(
+				parts,
+				".",
+			)
 
 	case *ast.InterfaceSelfType:
 		return "self"
 
 	case *ast.PointerType:
-		return "*" + overloadTypeAstSignatureKey(
-			t.Elem,
-			refs,
-		)
+		return "*" +
+			overloadTypeAstSignatureKey(
+				t.Elem,
+				refs,
+			)
+
+	case *ast.InlineArrayType:
+		return "inline-array:<" +
+			overloadTypeAstSignatureKey(
+				t.Elem,
+				refs,
+			) +
+			"," +
+			overloadExprSignatureKey(
+				t.Length,
+				refs,
+			) +
+			">"
 
 	case *ast.GenericType:
 		var args []string
@@ -3990,10 +4068,76 @@ func overloadTypeAstSignatureKey(
 		return overloadTypeAstSignatureKey(
 			t.Base,
 			refs,
-		) + "<" + strings.Join(args, ",") + ">"
+		) +
+			"<" +
+			strings.Join(
+				args,
+				",",
+			) +
+			">"
 	}
 
 	return "<type>"
+}
+
+func (c *Checker) rejectInlineArraySignatureType(
+	typ ast.Type,
+	span source.Span,
+	context string,
+) {
+	if !typeAstContainsInlineArray(
+		typ,
+	) {
+		return
+	}
+
+	c.diags.Add(
+		span,
+		fmt.Sprintf(
+			"@inline_array cannot be used directly as %s; wrap inline storage in a struct instead",
+			context,
+		),
+	)
+}
+
+func typeAstContainsInlineArray(
+	typ ast.Type,
+) bool {
+	if typ == nil {
+		return false
+	}
+
+	switch t := typ.(type) {
+	case *ast.InlineArrayType:
+		return true
+
+	case *ast.PointerType:
+		return typeAstContainsInlineArray(
+			t.Elem,
+		)
+
+	case *ast.GenericType:
+		if typeAstContainsInlineArray(
+			t.Base,
+		) {
+			return true
+		}
+
+		for _, arg := range t.Args {
+			if arg.Kind != ast.GenericArgType ||
+				arg.Type == nil {
+				continue
+			}
+
+			if typeAstContainsInlineArray(
+				arg.Type,
+			) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func overloadGenericArgAstSignatureKey(
@@ -4163,8 +4307,14 @@ func sameOverloadSignatureType(
 		return a == b
 	}
 
-	aRef, aIsRef := overloadTypePlaceholderRef(a, aRefs)
-	bRef, bIsRef := overloadTypePlaceholderRef(b, bRefs)
+	aRef, aIsRef := overloadTypePlaceholderRef(
+		a,
+		aRefs,
+	)
+	bRef, bIsRef := overloadTypePlaceholderRef(
+		b,
+		bRefs,
+	)
 
 	if aIsRef || bIsRef {
 		return aIsRef &&
@@ -4180,6 +4330,29 @@ func sameOverloadSignatureType(
 	switch a.Kind {
 	case TypePointer,
 		TypeVariadic:
+		return sameOverloadSignatureType(
+			c,
+			a.Elem,
+			b.Elem,
+			aRefs,
+			bRefs,
+		)
+
+	case TypeInlineArray:
+		if a.InlineLengthKnown !=
+			b.InlineLengthKnown {
+			return false
+		}
+
+		if a.InlineLengthKnown {
+			if a.InlineLength != b.InlineLength {
+				return false
+			}
+		} else if a.InlineLengthKey !=
+			b.InlineLengthKey {
+			return false
+		}
+
 		return sameOverloadSignatureType(
 			c,
 			a.Elem,
@@ -4204,12 +4377,15 @@ func sameOverloadSignatureType(
 				left := a.GenericArguments[i]
 				right := b.GenericArguments[i]
 
-				if left.Category != right.Category {
+				if left.Category !=
+					right.Category {
 					return false
 				}
 
 				switch {
-				case isTypeGenericCategory(left.Category):
+				case isTypeGenericCategory(
+					left.Category,
+				):
 					if !sameOverloadSignatureType(
 						c,
 						left.Type,
@@ -4220,7 +4396,8 @@ func sameOverloadSignatureType(
 						return false
 					}
 
-				case left.Category == ast.GenericParamTask:
+				case left.Category ==
+					ast.GenericParamTask:
 					if !sameOverloadSignatureType(
 						c,
 						left.Type,
@@ -4237,6 +4414,7 @@ func sameOverloadSignatureType(
 							left,
 							aRefs,
 						)
+
 					rightKey :=
 						overloadGenericArgumentInfoSignatureKey(
 							right,
@@ -4294,7 +4472,10 @@ func sameOverloadSignatureType(
 		return a.Name == b.Name
 
 	default:
-		return c.sameType(a, b)
+		return c.sameType(
+			a,
+			b,
+		)
 	}
 }
 
@@ -6161,6 +6342,22 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 
 		return typ
 
+	case TypeInlineArray:
+		return c.substituteInlineArrayType(
+			scope,
+			typ,
+			argSubst,
+			func(elem *Type) *Type {
+				return c.substituteImportedGenericSignatureType(
+					scope,
+					packageName,
+					elem,
+					typeSubst,
+					argSubst,
+				)
+			},
+		)
+
 	case TypePointer:
 		return &Type{
 			Kind: TypePointer,
@@ -6390,6 +6587,21 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 			Kind: TypePointer,
 			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
 		}
+
+	case TypeInlineArray:
+		return c.substituteInlineArrayType(
+			scope,
+			typ,
+			argSubst,
+			func(elem *Type) *Type {
+				return c.substituteGenericSignatureType(
+					scope,
+					elem,
+					typeSubst,
+					argSubst,
+				)
+			},
+		)
 
 	case TypeInterfaceSelf:
 		return typ
@@ -6665,8 +6877,14 @@ func (c *Checker) taskTypeFromGenericCall(scope *Scope, d *ast.TaskDecl, args []
 	}
 }
 
-func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
-	genericScope := c.scopeWithGenericParams(scope, d.GenericParams)
+func (c *Checker) taskTypeFromDecl(
+	scope *Scope,
+	d *ast.TaskDecl,
+) *Type {
+	genericScope := c.scopeWithGenericParams(
+		scope,
+		d.GenericParams,
+	)
 
 	var params []*Type
 	var paramDefaults []ast.Expr
@@ -6677,26 +6895,69 @@ func (c *Checker) taskTypeFromDecl(scope *Scope, d *ast.TaskDecl) *Type {
 	isVariadic := false
 
 	for i, param := range d.Params {
-		params = append(params, c.typeFromAst(genericScope, param.Type))
-		paramDefaults = append(paramDefaults, param.Default)
-		paramHasDefault = append(paramHasDefault, param.HasDefault)
-		paramIsVariadic = append(paramIsVariadic, param.IsVariadic)
+		c.rejectInlineArraySignatureType(
+			param.Type,
+			param.Type.Span(),
+			fmt.Sprintf(
+				"task parameter %q",
+				param.Name.Name,
+			),
+		)
+
+		params = append(
+			params,
+			c.typeFromAst(
+				genericScope,
+				param.Type,
+			),
+		)
+
+		paramDefaults = append(
+			paramDefaults,
+			param.Default,
+		)
+
+		paramHasDefault = append(
+			paramHasDefault,
+			param.HasDefault,
+		)
+
+		paramIsVariadic = append(
+			paramIsVariadic,
+			param.IsVariadic,
+		)
 
 		if param.IsVariadic {
 			isVariadic = true
-			if requiredParams == len(d.Params) {
+
+			if requiredParams ==
+				len(d.Params) {
 				requiredParams = i
 			}
 		}
 
-		if param.HasDefault && requiredParams == len(d.Params) {
+		if param.HasDefault &&
+			requiredParams == len(d.Params) {
 			requiredParams = i
 		}
 	}
 
 	var results []*Type
+
 	for _, result := range d.Results {
-		results = append(results, c.typeFromAst(genericScope, result))
+		c.rejectInlineArraySignatureType(
+			result,
+			result.Span(),
+			"task result",
+		)
+
+		results = append(
+			results,
+			c.typeFromAst(
+				genericScope,
+				result,
+			),
+		)
 	}
 
 	return &Type{
@@ -7714,6 +7975,10 @@ func (c *Checker) isValidInlineArrayElementType(
 
 	switch typ.Kind {
 	case TypeInvalid:
+		/*
+			An invalid type has already produced its own diagnostic.
+			Accept it here to avoid cascading diagnostics.
+		*/
 		return true
 
 	case TypeVoid,
@@ -7725,9 +7990,24 @@ func (c *Checker) isValidInlineArrayElementType(
 		TypeTask,
 		TypePackage,
 		TypeValueParam,
-		TypeInterfaceSelf,
-		TypeInlineArray:
+		TypeInterfaceSelf:
 		return false
+
+	case TypeInlineArray:
+		/*
+			Nested inline arrays are valid recursively:
+
+			    @inline_array<
+			        @inline_array<int, 4>,
+			        8
+			    >
+
+			The innermost stored type must itself be valid.
+		*/
+		return typ.Elem != nil &&
+			c.isValidInlineArrayElementType(
+				typ.Elem,
+			)
 
 	default:
 		return true
@@ -7744,12 +8024,16 @@ func (c *Checker) inlineArrayTypeFromParts(
 		Kind:             TypeInlineArray,
 		Elem:             elem,
 		InlineLengthExpr: lengthExpr,
-		InlineLengthKey:  inlineArrayLengthKey(lengthExpr),
+		InlineLengthKey: inlineArrayLengthKey(
+			lengthExpr,
+		),
 	}
 
 	if elem == nil {
 		result.Elem = InvalidType
-	} else if !c.isValidInlineArrayElementType(elem) {
+	} else if !c.isValidInlineArrayElementType(
+		elem,
+	) {
 		c.diags.Add(
 			span,
 			fmt.Sprintf(
@@ -7782,19 +8066,20 @@ func (c *Checker) inlineArrayTypeFromParts(
 	)
 
 	/*
-		A generic value parameter such as N in:
+		A generic value parameter such as N is symbolically compile-time:
 
 		    StackArray<T, N> {
 		        _data @inline_array<T, N>
 		    }
 
-		is symbolically compile-time. Its actual value becomes available when
-		the surrounding generic declaration is specialized.
+		The exact value becomes available when the enclosing generic
+		declaration is specialized.
 	*/
 	if c.genericExprReferencesPlaceholder(
 		scope,
 		lengthExpr,
 	) {
+		result.InlineLengthSymbolic = true
 		return result
 	}
 
@@ -7827,6 +8112,7 @@ func (c *Checker) inlineArrayTypeFromParts(
 
 	result.InlineLength = value.IntValue
 	result.InlineLengthKnown = true
+	result.InlineLengthSymbolic = false
 	result.InlineLengthKey = strconv.FormatInt(
 		value.IntValue,
 		10,
@@ -14354,12 +14640,16 @@ func (c *Checker) assignableEitherWay(a *Type, b *Type) bool {
 	return c.assignable(a, b) || c.assignable(b, a)
 }
 
-func (c *Checker) sameType(a *Type, b *Type) bool {
+func (c *Checker) sameType(
+	a *Type,
+	b *Type,
+) bool {
 	if a == nil || b == nil {
 		return false
 	}
 
-	if a.Kind == TypeInvalid || b.Kind == TypeInvalid {
+	if a.Kind == TypeInvalid ||
+		b.Kind == TypeInvalid {
 		return true
 	}
 
@@ -14369,11 +14659,27 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 
 	switch a.Kind {
 	case TypePointer:
-		return c.sameType(a.Elem, b.Elem)
+		return c.sameType(
+			a.Elem,
+			b.Elem,
+		)
 
 	case TypeInlineArray:
-		if a.InlineLengthKey != b.InlineLengthKey {
+		if a.InlineLengthKnown !=
+			b.InlineLengthKnown {
 			return false
+		}
+
+		if a.InlineLengthKnown {
+			if a.InlineLength !=
+				b.InlineLength {
+				return false
+			}
+		} else {
+			if a.InlineLengthKey !=
+				b.InlineLengthKey {
+				return false
+			}
 		}
 
 		return c.sameType(
@@ -14382,17 +14688,24 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 		)
 
 	case TypeVariadic:
-		return c.sameType(a.Elem, b.Elem)
+		return c.sameType(
+			a.Elem,
+			b.Elem,
+		)
 
 	case TypeInterfaceSelf:
 		return true
 
-	case TypeStruct, TypeInterface:
-		if a.GenericBaseName != "" || b.GenericBaseName != "" {
+	case TypeStruct,
+		TypeInterface:
+		if a.GenericBaseName != "" ||
+			b.GenericBaseName != "" {
 			if a.GenericBaseName == "" ||
 				b.GenericBaseName == "" ||
-				a.GenericBaseName != b.GenericBaseName ||
-				len(a.GenericArguments) != len(b.GenericArguments) {
+				a.GenericBaseName !=
+					b.GenericBaseName ||
+				len(a.GenericArguments) !=
+					len(b.GenericArguments) {
 				return false
 			}
 
@@ -14400,18 +14713,28 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 				left := a.GenericArguments[i]
 				right := b.GenericArguments[i]
 
-				if left.Category != right.Category {
+				if left.Category !=
+					right.Category {
 					return false
 				}
 
 				switch {
-				case isTypeGenericCategory(left.Category):
-					if !c.sameType(left.Type, right.Type) {
+				case isTypeGenericCategory(
+					left.Category,
+				):
+					if !c.sameType(
+						left.Type,
+						right.Type,
+					) {
 						return false
 					}
 
-				case left.Category == ast.GenericParamTask:
-					if !c.sameType(left.Type, right.Type) {
+				case left.Category ==
+					ast.GenericParamTask:
+					if !c.sameType(
+						left.Type,
+						right.Type,
+					) {
 						return false
 					}
 
@@ -14435,18 +14758,25 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 		return a.Name == b.Name
 
 	case TypeTask:
-		if len(a.Params) != len(b.Params) || len(a.Results) != len(b.Results) {
+		if len(a.Params) != len(b.Params) ||
+			len(a.Results) != len(b.Results) {
 			return false
 		}
 
 		for i := range a.Params {
-			if !c.sameType(a.Params[i], b.Params[i]) {
+			if !c.sameType(
+				a.Params[i],
+				b.Params[i],
+			) {
 				return false
 			}
 		}
 
 		for i := range a.Results {
-			if !c.sameType(a.Results[i], b.Results[i]) {
+			if !c.sameType(
+				a.Results[i],
+				b.Results[i],
+			) {
 				return false
 			}
 		}
