@@ -9,7 +9,7 @@ outlive that storage.
 
 Empty results are represented by the ordinary empty string.
 */
-BorrowSlice :: task(
+BorrowSlice :: pure task(
     value string,
     start int,
     end int,

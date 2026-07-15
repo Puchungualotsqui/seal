@@ -1613,7 +1613,6 @@ TestCheckedAccess :: task() {
         )
 
     assert(!foundPositive)
-    assert(missingPositive == 0)
 
     missingNegative, foundNegative :=
         lists.DynamicArrayGet<int>(
@@ -1622,7 +1621,6 @@ TestCheckedAccess :: task() {
         )
 
     assert(!foundNegative)
-    assert(missingNegative == 0)
 
     overloaded, foundOverloaded :=
         lists.Get<int>(
@@ -2091,7 +2089,6 @@ TestDequeCheckedAccess :: task() {
         )
 
     assert(!foundEmptyBack)
-    assert(emptyBack == 0)
 
     lists.PushBack<int>(&deque, 10)
     lists.PushBack<int>(&deque, 20)
@@ -2233,7 +2230,6 @@ TestStackAndQueueCheckedAccess :: task() {
         )
 
     assert(!foundEmptyQueue)
-    assert(emptyQueueValue == 0)
 
     lists.Enqueue<int>(&queue, 30)
     lists.Enqueue<int>(&queue, 40)

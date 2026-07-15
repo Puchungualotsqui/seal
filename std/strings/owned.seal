@@ -29,7 +29,7 @@ View returns a borrowed string view over an OwnedString.
 
 The view becomes invalid when owner is destroyed.
 */
-View :: task(
+View :: pure task(
     owner *OwnedString,
 ) string {
     if owner.Data == nil {
@@ -51,7 +51,7 @@ CView returns a borrowed cstring view over an OwnedCString.
 
 The view becomes invalid when owner is destroyed.
 */
-CView :: task(
+CView :: pure task(
     owner *OwnedCString,
 ) cstring {
     if owner.Data == nil {

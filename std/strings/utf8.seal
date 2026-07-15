@@ -1,7 +1,7 @@
 /*
 _IsContinuationByte reports whether value is a UTF-8 continuation byte.
 */
-_IsContinuationByte :: task(
+_IsContinuationByte :: pure task(
     value u8,
 ) bool {
     return value >= 0x80 &&
@@ -14,7 +14,7 @@ beginning at byteOffset.
 
 byteOffset must be less than byteLength.
 */
-_Utf8WidthAt :: task(
+_Utf8WidthAt :: pure task(
     data rawptr,
     byteLength uint,
     byteOffset uint,
@@ -147,7 +147,7 @@ returned.
 
 Negative positions are interpreted relative to the scalar length.
 */
-ByteOffset :: task(
+ByteOffset :: pure task(
     value string,
     scalarIndex int,
 ) uint {
@@ -199,7 +199,7 @@ known UTF-8 scalar boundary.
 
 byteOffset may equal size(value).
 */
-_ScalarIndexAtByteOffset :: task(
+_ScalarIndexAtByteOffset :: pure task(
     value string,
     targetByteOffset uint,
 ) int {

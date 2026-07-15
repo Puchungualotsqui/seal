@@ -1,7 +1,7 @@
 /*
 _IndexOfByte returns the first matching UTF-8 byte offset.
 */
-_IndexOfByte :: task(
+_IndexOfByte :: pure task(
     value string,
     needle string,
 ) uint, bool {
@@ -41,7 +41,7 @@ _IndexOfByte :: task(
 /*
 _LastIndexOfByte returns the final matching UTF-8 byte offset.
 */
-_LastIndexOfByte :: task(
+_LastIndexOfByte :: pure task(
     value string,
     needle string,
 ) uint, bool {
@@ -85,7 +85,7 @@ _LastIndexOfByte :: task(
 IndexOf returns the Unicode-scalar index of the first occurrence of
 needle.
 */
-IndexOf :: task(
+IndexOf :: pure task(
     value string,
     needle string,
 ) int, bool {
@@ -112,7 +112,7 @@ needle.
 
 An empty needle is found at len(value).
 */
-LastIndexOf :: task(
+LastIndexOf :: pure task(
     value string,
     needle string,
 ) int, bool {
@@ -139,7 +139,7 @@ Count reports the number of non-overlapping occurrences of needle.
 An empty needle returns zero because an unbounded empty-match model is
 not useful for this low-level API.
 */
-Count :: task(
+Count :: pure task(
     value string,
     needle string,
 ) uint {

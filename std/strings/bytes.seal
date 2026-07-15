@@ -68,7 +68,7 @@ _CopyBytes :: task(
 /*
 _BytesEqual compares two byte ranges.
 */
-_BytesEqual :: task(
+_BytesEqual :: pure task(
     left rawptr,
     right rawptr,
     byteLength uint,
@@ -90,7 +90,7 @@ _BytesEqual :: task(
 /*
 _BytesEqualAt compares needle with a range beginning at startByte.
 */
-_BytesEqualAt :: task(
+_BytesEqualAt :: pure task(
     valueData rawptr,
     startByte uint,
     needleData rawptr,
@@ -111,4 +111,42 @@ _BytesEqualAt :: task(
     }
 
     return true
+}
+
+/*
+_BorrowByteRange creates a borrowed string view over a byte range.
+
+The range must be fully contained inside value.
+
+The returned string points into value's backing storage and must not
+outlive that storage.
+
+An empty range is represented by the ordinary empty string.
+*/
+_BorrowByteRange :: pure task(
+    value string,
+    startByte uint,
+    byteLength uint,
+) string {
+    valueLength := size(value)
+
+    if startByte > valueLength ||
+        byteLength > valueLength - startByte {
+        panic("strings: byte range out of bounds")
+    }
+
+    if byteLength == 0 {
+        return ""
+    }
+
+    data := cast<rawptr>(value)
+
+    rangeData := cast<rawptr>(
+        &data[cast<int>(startByte)]
+    )
+
+    return cast<string>(
+        rangeData,
+        byteLength,
+    )
 }

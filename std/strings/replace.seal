@@ -1,0 +1,152 @@
+/*
+ReplaceAll creates an owned string in which every non-overlapping
+occurrence of needle is replaced with replacement.
+
+An empty needle produces an unchanged owned copy. This is consistent
+with Count, where an empty needle has zero occurrences.
+*/
+ReplaceAll :: task(
+    allocator mem.Allocator,
+    value string,
+    needle string,
+    replacement string,
+) OwnedString {
+    valueLength := size(value)
+    needleLength := size(needle)
+
+    if needleLength == 0 ||
+        needleLength > valueLength {
+        return Clone(
+            allocator,
+            value,
+        )
+    }
+
+    matchCount := Count(
+        value,
+        needle,
+    )
+
+    if matchCount == 0 {
+        return Clone(
+            allocator,
+            value,
+        )
+    }
+
+    replacementLength := size(replacement)
+
+    /*
+    Because Count reports non-overlapping matches, the removed byte count
+    cannot exceed valueLength.
+    */
+    removedLength :=
+        needleLength *
+        matchCount
+
+    remainingLength :=
+        valueLength -
+        removedLength
+
+    replacementBytes :=
+        replacementLength *
+        matchCount
+
+    if matchCount > 0 &&
+        replacementBytes /
+            matchCount !=
+            replacementLength {
+        panic("strings.ReplaceAll: length overflow")
+    }
+
+    totalLength :=
+        remainingLength +
+        replacementBytes
+
+    if totalLength < remainingLength {
+        panic("strings.ReplaceAll: length overflow")
+    }
+
+    destination := _AllocateBytes(
+        allocator,
+        totalLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    valueData := cast<rawptr>(value)
+    needleData := cast<rawptr>(needle)
+
+    readOffset: uint = 0
+    writeOffset: uint = 0
+
+    finalStart :=
+        valueLength -
+        needleLength
+
+    for readOffset <= finalStart {
+        if _BytesEqualAt(
+            valueData,
+            readOffset,
+            needleData,
+            needleLength,
+        ) {
+            if replacementLength > 0 {
+                replacementDestination :=
+                    cast<rawptr>(
+                        &destination[
+                            cast<int>(
+                                writeOffset
+                            )
+                        ]
+                    )
+
+                _CopyBytes(
+                    replacementDestination,
+                    cast<rawptr>(replacement),
+                    replacementLength,
+                )
+
+                writeOffset +=
+                    replacementLength
+            }
+
+            readOffset += needleLength
+
+            continue
+        }
+
+        destination[
+            cast<int>(writeOffset)
+        ] = valueData[
+            cast<int>(readOffset)
+        ]
+
+        writeOffset += 1
+        readOffset += 1
+    }
+
+    /*
+    Copy the portion after the final possible needle start.
+    */
+    for readOffset < valueLength {
+        destination[
+            cast<int>(writeOffset)
+        ] = valueData[
+            cast<int>(readOffset)
+        ]
+
+        writeOffset += 1
+        readOffset += 1
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = totalLength,
+    }
+}

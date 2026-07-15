@@ -1,0 +1,135 @@
+/*
+Join creates an owned string containing every value separated by
+separator.
+
+The input Slice is borrowed and is not modified.
+
+An empty input produces an allocated empty OwnedString.
+*/
+Join :: task(
+    allocator mem.Allocator,
+    values lists.Slice<string>,
+    separator string,
+) OwnedString {
+    count := len(values)
+
+    if count == 0 {
+        return Clone(
+            allocator,
+            "",
+        )
+    }
+
+    totalLength: uint = 0
+    index: uint = 0
+
+    for index < count {
+        value := lists.SliceGetUnsafe<string>(
+            &values,
+            index,
+        )
+
+        valueLength := size(value)
+
+        newTotal := totalLength +
+            valueLength
+
+        if newTotal < totalLength {
+            panic("strings.Join: length overflow")
+        }
+
+        totalLength = newTotal
+        index += 1
+    }
+
+    separatorLength := size(separator)
+
+    if count > 1 &&
+        separatorLength > 0 {
+        separatorCount := count - 1
+
+        separatorBytes :=
+            separatorLength *
+            separatorCount
+
+        if separatorBytes /
+            separatorCount !=
+            separatorLength {
+            panic("strings.Join: length overflow")
+        }
+
+        newTotal := totalLength +
+            separatorBytes
+
+        if newTotal < totalLength {
+            panic("strings.Join: length overflow")
+        }
+
+        totalLength = newTotal
+    }
+
+    destination := _AllocateBytes(
+        allocator,
+        totalLength,
+    )
+
+    if destination == nil {
+        return OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    writeOffset: uint = 0
+    index = 0
+
+    for index < count {
+        if index > 0 &&
+            separatorLength > 0 {
+            separatorDestination :=
+                cast<rawptr>(
+                    &destination[
+                        cast<int>(writeOffset)
+                    ]
+                )
+
+            _CopyBytes(
+                separatorDestination,
+                cast<rawptr>(separator),
+                separatorLength,
+            )
+
+            writeOffset += separatorLength
+        }
+
+        value := lists.SliceGetUnsafe<string>(
+            &values,
+            index,
+        )
+
+        valueLength := size(value)
+
+        if valueLength > 0 {
+            valueDestination := cast<rawptr>(
+                &destination[
+                    cast<int>(writeOffset)
+                ]
+            )
+
+            _CopyBytes(
+                valueDestination,
+                cast<rawptr>(value),
+                valueLength,
+            )
+
+            writeOffset += valueLength
+        }
+
+        index += 1
+    }
+
+    return OwnedString{
+        Data = destination,
+        ByteLength = totalLength,
+    }
+}

@@ -75,7 +75,7 @@ BorrowString constructs a borrowed string view over a cstring.
 
 No allocation or copy occurs.
 */
-BorrowString :: task(
+BorrowString :: pure task(
     value cstring,
 ) string {
     byteLength := size(value)
@@ -94,7 +94,7 @@ BorrowString :: task(
 HasNullByte reports whether value's stored UTF-8 bytes contain a null
 byte.
 */
-HasNullByte :: task(
+HasNullByte :: pure task(
     value string,
 ) bool {
     data := cast<rawptr>(value)

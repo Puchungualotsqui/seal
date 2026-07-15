@@ -1,0 +1,129 @@
+/*
+Split divides value around each non-overlapping occurrence of separator.
+
+The returned DynamicArray owns only its slot storage. Each contained
+string is a borrowed view into value and must not outlive value's backing
+storage.
+
+Empty fields are preserved:
+
+    Split("a,,b", ",")
+        -> "a", "", "b"
+
+    Split(",a,", ",")
+        -> "", "a", ""
+
+An empty separator splits value into individual Unicode scalars.
+
+An empty value split by an empty separator produces an empty result.
+*/
+Split :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value string,
+    separator string,
+) lists.DynamicArray<string> {
+    result :=
+        lists.NewDynamicArrayEmpty<string>(
+            allocator,
+            deallocator,
+        )
+
+    valueLength := size(value)
+    separatorLength := size(separator)
+
+    /*
+    An empty separator divides the string at Unicode-scalar boundaries.
+    */
+    if separatorLength == 0 {
+        if valueLength == 0 {
+            return result
+        }
+
+        data := cast<rawptr>(value)
+
+        byteOffset: uint = 0
+
+        for byteOffset < valueLength {
+            scalarWidth := _Utf8WidthAt(
+                data,
+                valueLength,
+                byteOffset,
+            )
+
+            scalar := _BorrowByteRange(
+                value,
+                byteOffset,
+                scalarWidth,
+            )
+
+            lists.Append<string>(
+                &result,
+                scalar,
+            )
+
+            byteOffset += scalarWidth
+        }
+
+        return result
+    }
+
+    /*
+    A separator longer than the complete value cannot match.
+    */
+    if separatorLength > valueLength {
+        lists.Append<string>(
+            &result,
+            value,
+        )
+
+        return result
+    }
+
+    valueData := cast<rawptr>(value)
+    separatorData := cast<rawptr>(separator)
+
+    fieldStart: uint = 0
+    searchStart: uint = 0
+
+    finalStart := valueLength -
+        separatorLength
+
+    for searchStart <= finalStart {
+        if _BytesEqualAt(
+            valueData,
+            searchStart,
+            separatorData,
+            separatorLength,
+        ) {
+            field := _BorrowByteRange(
+                value,
+                fieldStart,
+                searchStart - fieldStart,
+            )
+
+            lists.Append<string>(
+                &result,
+                field,
+            )
+
+            searchStart += separatorLength
+            fieldStart = searchStart
+        } else {
+            searchStart += 1
+        }
+    }
+
+    tail := _BorrowByteRange(
+        value,
+        fieldStart,
+        valueLength - fieldStart,
+    )
+
+    lists.Append<string>(
+        &result,
+        tail,
+    )
+
+    return result
+}

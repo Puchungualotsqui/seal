@@ -1,16 +1,16 @@
-IsEmpty :: task(
+IsEmpty :: pure task(
     value string,
 ) bool {
     return size(value) == 0
 }
 
-IsEmptyC :: task(
+IsEmptyC :: pure task(
     value cstring,
 ) bool {
     return size(value) == 0
 }
 
-StartsWith :: task(
+StartsWith :: pure task(
     value string,
     prefix string,
 ) bool {
@@ -32,7 +32,7 @@ StartsWith :: task(
     )
 }
 
-EndsWith :: task(
+EndsWith :: pure task(
     value string,
     suffix string,
 ) bool {
@@ -62,7 +62,7 @@ EndsWith :: task(
     )
 }
 
-Contains :: task(
+Contains :: pure task(
     value string,
     needle string,
 ) bool {
