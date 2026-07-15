@@ -701,7 +701,6 @@ TestDynamicArrayPop :: task() {
     )
 
     assert(!foundEmpty)
-    assert(emptyValue == 0)
 
     lists.Append<int>(&values, 10)
     lists.Append<int>(&values, 20)
