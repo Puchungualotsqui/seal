@@ -30,7 +30,7 @@
 22. [`any`](#22-any)
 23. [Pointers and low-level memory access](#23-pointers-and-low-level-memory-access)
 24. [Strings and C strings](#24-strings-and-c-strings)
-25. [Arrays after native-array removal](#25-arrays-after-native-array-removal)
+25. [`@inline_array`](#25-inline_array)
 26. [Operator and task overloads](#26-operator-and-task-overloads)
 27. [Indexing and `len` resolution](#27-indexing-and-len-resolution)
 28. [Interfaces](#28-interfaces)
@@ -2293,9 +2293,9 @@ The current implementation favors a small, C-compatible representation over cach
 
 ---
 
-## 25. Arrays after native-array removal
+## 25. `@inline_array`
 
-The following old language forms are obsolete:
+Seal has no array primitive. The old forms:
 
 ```seal
 [N]T
@@ -2303,72 +2303,79 @@ The following old language forms are obsolete:
 [1, 2, 3]
 ```
 
-Compiler-native fixed arrays, inferred arrays, and array literals were removed from the AST, parser, checker, and C backend.
+remain obsolete.
 
-Arrays are now intended to be implemented by the standard library as a generic type:
+For low-level fixed-size inline storage, Seal provides the compiler directive:
 
 ```seal
-Array<T, N>
+@inline_array<T, N>
 ```
 
-Example use:
+Example:
 
 ```seal
-values: array.Array<int, 4>
+values := @inline_array<int, 4>(
+    10,
+    20,
+    30,
+    40,
+)
 ```
 
-The exact constructor API belongs to the standard library. It could use tasks such as:
+The length must be a non-negative compile-time integer. Generic compile-time lengths are supported:
 
 ```seal
-values := array.New<int, 4>()
-```
-
-or another explicit initialization model.
-
-### 25.1 Expected array overloads
-
-A standard-library array package can define tasks conceptually like:
-
-```seal
-ArrayAt :: pure task <T type, N int>(
-    values *Array<T, N>,
-    index int,
-) T {
-    // ...
-}
-
-ArraySet :: task <T type, N int>(
-    values *Array<T, N>,
-    index int,
-    value T,
-) {
-    // ...
-}
-
-ArrayLen :: pure task <T type, N int>(
-    values *Array<T, N>,
-) uint {
-    return cast<uint>(N)
+Storage :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<T, N>
 }
 ```
 
-and bind them through overload declarations:
+Inline arrays may be nested:
 
 ```seal
-[] :: overload {
-    ArrayAt
-}
+matrix := @inline_array<
+    @inline_array<int, 3>,
+    2
+>(
+    @inline_array<int, 3>(1, 2, 3),
+    @inline_array<int, 3>(4, 5, 6),
+)
+```
 
-[]= :: overload {
-    ArraySet
-}
+They support direct indexing, indexed assignment, and `len`:
 
-len :: overload {
-    ArrayLen
+```seal
+value := matrix[1][2]
+matrix[0][1] = 99
+
+rows := len(matrix)
+columns := len(matrix[0])
+```
+
+`@inline_array` is intentionally a directive rather than a primitive type because it is not a general-purpose first-class array value. Important restrictions include:
+
+* the length is fixed at compile time;
+* the storage cannot grow or shrink;
+* whole-array assignment is not supported;
+* a raw inline array cannot be used directly as a task parameter or result;
+* non-empty initialization requires exactly the declared number of values;
+* ownership, allocation, resizing, slicing, and higher-level collection behavior are not provided.
+
+Wrapping inline storage in a struct removes the task-signature restriction because the struct itself is an ordinary value:
+
+```seal
+Buffer :: struct <
+    T type,
+    N int[N >= 0],
+> {
+    data @inline_array<T, N>
 }
 ```
 
-The storage representation of `Array<T, N>` is a standard-library design choice rather than a compiler-native array representation.
+The intended role of `@inline_array` is to provide exact inline storage for structs and other low-level abstractions, not to replace higher-level collection types.
 
 ---
 
@@ -2475,8 +2482,8 @@ Indexing and `len` use exact semantic resolutions produced by the checker.
 
 The checker distinguishes:
 
-* compiler-provided text indexing;
-* compiler-provided text length;
+* compiler-provided `@inline_array` indexing, assignment, and length;
+* compiler-provided text indexing and length;
 * compiler-provided variadic indexing and length where applicable;
 * raw-pointer byte indexing;
 * user-defined `[]` overloads;
@@ -2486,7 +2493,37 @@ The checker distinguishes:
 
 The checker records the selected meaning. The C backend consumes that decision rather than repeating overload resolution.
 
-### 27.1 Built-in text indexing
+### 27.1 `@inline_array` indexing and length
+
+An inline array has built-in indexed reads and writes:
+
+```seal
+values := @inline_array<int, 4>(
+    10,
+    20,
+    30,
+    40,
+)
+
+value := values[2]
+values[1] = 99
+```
+
+Nested indexing follows the stored element types recursively:
+
+```seal
+value := matrix[1][2]
+```
+
+`len` returns the logical compile-time element count as `uint`:
+
+```seal
+count := len(values)
+```
+
+Indexed inline-array elements remain addressable when their containing storage is addressable. This allows mixed expressions where built-in inline-array indexing produces a struct receiver for an overloaded `[]`, `[]=`, or `len` operation.
+
+### 27.2 Built-in text indexing
 
 `string` and `cstring` have built-in read-only indexing:
 
@@ -2508,7 +2545,7 @@ Negative indexes are supported.
 
 Neither type supports built-in index assignment.
 
-### 27.2 Raw-pointer indexing
+### 27.3 Raw-pointer indexing
 
 `rawptr` uses built-in byte indexing:
 
@@ -2519,7 +2556,7 @@ pointer[index] = 255
 
 The index type is `int` and the indexed value type is `u8`.
 
-### 27.3 `[]` read overload
+### 27.4 `[]` read overload
 
 A user-defined index reader must have a compatible shape:
 
@@ -2542,7 +2579,7 @@ value := container[index]
 
 Built-in `string`, `cstring`, and `rawptr` indexing takes precedence over user-defined container behavior for those primitive types.
 
-### 27.4 `[]=` write overload
+### 27.5 `[]=` write overload
 
 A user-defined index setter has a compatible shape:
 
@@ -2573,7 +2610,7 @@ are not yet lowered as read-modify-write overload sequences.
 
 `string` and `cstring` cannot use indexed assignment because they are immutable built-in text types.
 
-### 27.5 Built-in text `len`
+### 27.6 Built-in text `len`
 
 `len(string)` and `len(cstring)` are built-in operations returning `uint`:
 
@@ -2586,7 +2623,7 @@ The result is the number of Unicode scalar values.
 
 It is not the UTF-8 byte count. Use `size` for bytes.
 
-### 27.6 Built-in variadic `len`
+### 27.7 Built-in variadic `len`
 
 A variadic value also has built-in length:
 
@@ -2598,7 +2635,7 @@ Count :: task(values ...int) uint {
 
 The result is the number of variadic elements.
 
-### 27.7 User-defined `len` overload
+### 27.8 User-defined `len` overload
 
 A user-defined `len` task must:
 
@@ -2622,7 +2659,7 @@ Use:
 count := len(container)
 ```
 
-### 27.8 Ordinary `len` task shadowing
+### 27.9 Ordinary `len` task shadowing
 
 An ordinary task named `len` shadows the primitive built-in name when it resolves normally in that scope.
 
@@ -3252,6 +3289,7 @@ number := anyAs<int>(value)
 
 `len` may resolve to:
 
+* built-in element count for `@inline_array`;
 * built-in Unicode-scalar length for `string`;
 * built-in Unicode-scalar length for `cstring`;
 * built-in element count for variadic values;
@@ -3261,6 +3299,14 @@ number := anyAs<int>(value)
 Examples:
 
 ```seal
+inlineCount := len(
+    @inline_array<int, 3>(
+        10,
+        20,
+        30,
+    ),
+)
+
 characters := len("mañana")
 cCharacters := len(c"mañana")
 items := len(variadicValues)
@@ -3274,7 +3320,14 @@ len  → Unicode scalar count
 size → UTF-8 byte count
 ```
 
+For `@inline_array<T, N>`:
+
+```text
+len → N
+```
+
 The checker records which meaning applies to each call.
+
 
 ### 36.7 `panic`
 
@@ -3787,9 +3840,9 @@ testing
 
 are still under development.
 
-### 40.2 No compiler-native arrays
+### 40.2 No array primitive
 
-These forms have been removed:
+These old array forms remain removed:
 
 ```seal
 [N]T
@@ -3797,7 +3850,11 @@ These forms have been removed:
 [1, 2, 3]
 ```
 
-Use standard-library generic containers instead.
+Seal provides `@inline_array<T, N>` only as a restricted compiler directive for fixed inline storage.
+
+It is not a general-purpose array primitive and deliberately lacks features such as dynamic sizing, whole-array assignment, direct task parameter/result use, ownership, slicing, and allocation behavior.
+
+Higher-level array and collection abstractions should wrap this storage or use allocator-backed representations as appropriate.
 
 ### 40.3 Text operations are scalar-based but not grapheme-aware
 
@@ -4282,6 +4339,40 @@ Apply :: task <F task[(int) int]>(value int) int {
 }
 ```
 
+### Inline fixed-size storage
+
+```seal
+values := @inline_array<int, 4>(
+    10,
+    20,
+    30,
+    40,
+)
+```
+
+### Nested inline storage
+
+```seal
+matrix := @inline_array<
+    @inline_array<int, 3>,
+    2
+>(
+    @inline_array<int, 3>(1, 2, 3),
+    @inline_array<int, 3>(4, 5, 6),
+)
+```
+
+### Inline-array indexing and length
+
+```seal
+value := matrix[1][2]
+matrix[0][1] = 99
+
+rows := len(matrix)
+columns := len(matrix[0])
+```
+
+
 ### Named overload
 
 ```seal
@@ -4469,6 +4560,7 @@ generic constraints
 single and multiple return values
 static and dynamic interfaces
 delegated implementations
+restricted compiler-directed inline storage with @inline_array<T, N>
 named and operator overloads
 tagged unions
 distinct types
@@ -4483,7 +4575,7 @@ The next major stage is to make the language comfortable to use by building:
 
 ```text
 a coherent standard library
-Array<T, N>
+higher-level collections built on suitable storage abstractions
 string operations
 memory and I/O packages
 Option and Result
