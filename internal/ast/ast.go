@@ -268,6 +268,39 @@ func (s *DeclStmt) Span() source.Span {
 	return s.Loc
 }
 
+type InlineArrayType struct {
+	Elem   Type
+	Length Expr
+	Loc    source.Span
+}
+
+func (t *InlineArrayType) Span() source.Span {
+	if t == nil {
+		return source.Span{}
+	}
+
+	return t.Loc
+}
+
+func (t *InlineArrayType) typeNode() {}
+
+type InlineArrayExpr struct {
+	Elem   Type
+	Length Expr
+	Values []Expr
+	Loc    source.Span
+}
+
+func (e *InlineArrayExpr) Span() source.Span {
+	if e == nil {
+		return source.Span{}
+	}
+
+	return e.Loc
+}
+
+func (*InlineArrayExpr) exprNode() {}
+
 type Field struct {
 	Name Ident
 	Type Type

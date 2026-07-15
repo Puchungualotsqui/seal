@@ -49,6 +49,7 @@ const (
 
 	TypeNil
 	TypeEnumLiteral
+	TypeInlineArray
 
 	TypeUntypedInt
 	TypeUntypedFloat
@@ -195,6 +196,11 @@ type Type struct {
 
 	Elem *Type
 
+	InlineLengthExpr  ast.Expr
+	InlineLengthKey   string
+	InlineLength      int64
+	InlineLengthKnown bool
+
 	Fields   []FieldInfo
 	Variants []EnumVariantInfo
 	Members  []*Type
@@ -260,47 +266,61 @@ func (t *Type) String() string {
 	switch t.Kind {
 	case TypeVoid:
 		return "void"
+
 	case TypeBool:
 		return "bool"
 
 	case TypeInt:
 		return "int"
+
 	case TypeUint:
 		return "uint"
 
 	case TypeI8:
 		return "i8"
+
 	case TypeI16:
 		return "i16"
+
 	case TypeI32:
 		return "i32"
+
 	case TypeI64:
 		return "i64"
 
 	case TypeU8:
 		return "u8"
+
 	case TypeU16:
 		return "u16"
+
 	case TypeU32:
 		return "u32"
+
 	case TypeU64:
 		return "u64"
 
 	case TypeF32:
 		return "f32"
+
 	case TypeF64:
 		return "f64"
 
 	case TypeChar:
 		return "char"
+
 	case TypeString:
 		return "string"
+
 	case TypeCstring:
 		return "cstring"
+
 	case TypeRawptr:
 		return "rawptr"
+
 	case TypeAny:
 		return "any"
+
 	case TypeInvalid:
 		return "<invalid>"
 
@@ -309,10 +329,41 @@ func (t *Type) String() string {
 
 	case TypeUntypedInt:
 		return "untyped int"
+
 	case TypeUntypedFloat:
 		return "untyped float"
+
 	case TypePointer:
+		if t.Elem == nil {
+			return "*<invalid>"
+		}
+
 		return "*" + t.Elem.String()
+
+	case TypeInlineArray:
+		elem := "<invalid>"
+		if t.Elem != nil {
+			elem = t.Elem.String()
+		}
+
+		length := t.InlineLengthKey
+
+		if length == "" {
+			if t.InlineLengthKnown {
+				length = strconv.FormatInt(
+					t.InlineLength,
+					10,
+				)
+			} else {
+				length = "<invalid>"
+			}
+		}
+
+		return fmt.Sprintf(
+			"@inline_array<%s, %s>",
+			elem,
+			length,
+		)
 
 	case TypeVariadic:
 		if t.Elem == nil {
@@ -320,34 +371,59 @@ func (t *Type) String() string {
 		}
 
 		return "..." + t.Elem.String()
+
 	case TypeTask:
 		var params []string
+
 		for i, p := range t.Params {
-			if i < len(t.ParamIsVariadic) && t.ParamIsVariadic[i] {
-				params = append(params, "..."+p.String())
+			if i < len(t.ParamIsVariadic) &&
+				t.ParamIsVariadic[i] {
+				params = append(
+					params,
+					"..."+p.String(),
+				)
 			} else {
-				params = append(params, p.String())
+				params = append(
+					params,
+					p.String(),
+				)
 			}
 		}
 
 		var results []string
+
 		for _, r := range t.Results {
-			results = append(results, r.String())
+			results = append(
+				results,
+				r.String(),
+			)
 		}
 
 		if len(results) == 0 {
-			return fmt.Sprintf("task(%s)", strings.Join(params, ", "))
+			return fmt.Sprintf(
+				"task(%s)",
+				strings.Join(params, ", "),
+			)
 		}
 
-		return fmt.Sprintf("task(%s) %s", strings.Join(params, ", "), strings.Join(results, ", "))
+		return fmt.Sprintf(
+			"task(%s) %s",
+			strings.Join(params, ", "),
+			strings.Join(results, ", "),
+		)
+
 	case TypePackage:
 		return "package " + t.Name
+
 	case TypeNil:
 		return "nil"
+
 	case TypeEnumLiteral:
 		return "." + t.Name
+
 	case TypeInterfaceSelf:
 		return "self"
+
 	case TypeStruct,
 		TypeEnum,
 		TypeUnion,
@@ -355,6 +431,7 @@ func (t *Type) String() string {
 		TypeTypeParam,
 		TypeValueParam:
 		return t.Name
+
 	default:
 		return "<unknown>"
 	}
@@ -468,6 +545,9 @@ const (
 
 	IndexResolutionVariadicRead
 	IndexResolutionVariadicWrite
+
+	IndexResolutionInlineArrayRead
+	IndexResolutionInlineArrayWrite
 
 	IndexResolutionPrimitiveByteRead
 	IndexResolutionPrimitiveByteWrite
@@ -601,6 +681,8 @@ const (
 	LenResolutionInvalid LenResolutionKind = iota
 
 	LenResolutionVariadic
+
+	LenResolutionInlineArray
 
 	// UTF-8 Unicode scalar count.
 	LenResolutionString
@@ -2760,6 +2842,34 @@ func (c *Checker) genericExprReferencesPlaceholder(
 			e.Left,
 		)
 
+	case *ast.InlineArrayExpr:
+		elem := c.typeFromAst(
+			scope,
+			e.Elem,
+		)
+
+		if c.typeContainsGenericPlaceholder(elem) {
+			return true
+		}
+
+		if c.genericExprReferencesPlaceholder(
+			scope,
+			e.Length,
+		) {
+			return true
+		}
+
+		for _, value := range e.Values {
+			if c.genericExprReferencesPlaceholder(
+				scope,
+				value,
+			) {
+				return true
+			}
+		}
+
+		return false
+
 	case *ast.SpreadExpr:
 		return c.genericExprReferencesPlaceholder(
 			scope,
@@ -2907,6 +3017,12 @@ func (c *Checker) typeContainsGenericPlaceholderSeen(
 
 	case TypePointer,
 		TypeVariadic:
+		return c.typeContainsGenericPlaceholderSeen(
+			typ.Elem,
+			seen,
+		)
+
+	case TypeInlineArray:
 		return c.typeContainsGenericPlaceholderSeen(
 			typ.Elem,
 			seen,
@@ -5643,23 +5759,37 @@ func isInterfaceSelfPointerAst(t ast.Type) bool {
 	return ok
 }
 
-func typeAstContainsInterfaceSelf(t ast.Type) bool {
+func typeAstContainsInterfaceSelf(
+	t ast.Type,
+) bool {
 	switch x := t.(type) {
 	case *ast.InterfaceSelfType:
 		return true
 
 	case *ast.PointerType:
-		return typeAstContainsInterfaceSelf(x.Elem)
+		return typeAstContainsInterfaceSelf(
+			x.Elem,
+		)
+
+	case *ast.InlineArrayType:
+		return typeAstContainsInterfaceSelf(
+			x.Elem,
+		)
 
 	case *ast.GenericType:
-		if typeAstContainsInterfaceSelf(x.Base) {
+		if typeAstContainsInterfaceSelf(
+			x.Base,
+		) {
 			return true
 		}
 
 		for _, arg := range x.Args {
-			if arg.Kind == ast.GenericArgType &&
+			if arg.Kind ==
+				ast.GenericArgType &&
 				arg.Type != nil &&
-				typeAstContainsInterfaceSelf(arg.Type) {
+				typeAstContainsInterfaceSelf(
+					arg.Type,
+				) {
 				return true
 			}
 		}
@@ -7010,18 +7140,26 @@ func (c *Checker) checkAssignStmt(
 				"indexed compound assignment is not supported; use an explicit bracket read and bracket assignment",
 			)
 
-			c.checkExpr(scope, index.Left)
+			c.checkExpr(
+				scope,
+				index.Left,
+			)
 
 			indexType := c.checkExpr(
 				scope,
 				index.Index,
 			)
+
 			c.checkBracketIndexType(
 				indexType,
 				index.Index.Span(),
 			)
 
-			c.checkExpr(scope, s.Right)
+			c.checkExpr(
+				scope,
+				s.Right,
+			)
+
 			return
 		}
 
@@ -7030,6 +7168,7 @@ func (c *Checker) checkAssignStmt(
 			index,
 			s.Right,
 		)
+
 		return
 	}
 
@@ -7071,8 +7210,25 @@ func (c *Checker) checkAssignStmt(
 		}
 	}
 
-	leftType := c.checkExpr(scope, s.Left)
-	rightType := c.checkExpr(scope, s.Right)
+	leftType := c.checkExpr(
+		scope,
+		s.Left,
+	)
+
+	rightType := c.checkExpr(
+		scope,
+		s.Right,
+	)
+
+	if leftType != nil &&
+		leftType.Kind == TypeInlineArray {
+		c.diags.Add(
+			s.Left.Span(),
+			"@inline_array storage cannot be assigned as a whole; assign individual elements instead",
+		)
+
+		return
+	}
 
 	c.checkAssignable(
 		leftType,
@@ -7110,6 +7266,23 @@ func (c *Checker) checkIndexAssignment(
 
 	switch receiverType.Kind {
 	case TypeInvalid:
+		return
+
+	case TypeInlineArray:
+		if receiverType.Elem == nil {
+			return
+		}
+
+		c.checkAssignable(
+			receiverType.Elem,
+			valueType,
+			value.Span(),
+		)
+
+		c.indexResolutions[index] = IndexResolution{
+			Kind: IndexResolutionInlineArrayWrite,
+		}
+
 		return
 
 	case TypeString:
@@ -7513,6 +7686,213 @@ func (c *Checker) checkCharLiteral(
 	}
 }
 
+func inlineArrayLengthKey(
+	expr ast.Expr,
+) string {
+	if expr == nil {
+		return ""
+	}
+
+	if literal, ok := expr.(*ast.IntLitExpr); ok {
+		value, err := parseSealBigIntLiteral(
+			literal.Value,
+		)
+		if err == nil {
+			return value.String()
+		}
+	}
+
+	return exprDisplay(expr)
+}
+
+func (c *Checker) isValidInlineArrayElementType(
+	typ *Type,
+) bool {
+	if typ == nil {
+		return false
+	}
+
+	switch typ.Kind {
+	case TypeInvalid:
+		return true
+
+	case TypeVoid,
+		TypeNil,
+		TypeEnumLiteral,
+		TypeUntypedInt,
+		TypeUntypedFloat,
+		TypeVariadic,
+		TypeTask,
+		TypePackage,
+		TypeValueParam,
+		TypeInterfaceSelf,
+		TypeInlineArray:
+		return false
+
+	default:
+		return true
+	}
+}
+
+func (c *Checker) inlineArrayTypeFromParts(
+	scope *Scope,
+	elem *Type,
+	lengthExpr ast.Expr,
+	span source.Span,
+) *Type {
+	result := &Type{
+		Kind:             TypeInlineArray,
+		Elem:             elem,
+		InlineLengthExpr: lengthExpr,
+		InlineLengthKey:  inlineArrayLengthKey(lengthExpr),
+	}
+
+	if elem == nil {
+		result.Elem = InvalidType
+	} else if !c.isValidInlineArrayElementType(elem) {
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"%s cannot be used as @inline_array element type",
+				elem.String(),
+			),
+		)
+
+		result.Elem = InvalidType
+	}
+
+	if lengthExpr == nil {
+		c.diags.Add(
+			span,
+			"@inline_array requires a compile-time length",
+		)
+
+		return result
+	}
+
+	lengthType := c.checkExpr(
+		scope,
+		lengthExpr,
+	)
+
+	c.checkAssignable(
+		IntType,
+		lengthType,
+		lengthExpr.Span(),
+	)
+
+	/*
+		A generic value parameter such as N in:
+
+		    StackArray<T, N> {
+		        _data @inline_array<T, N>
+		    }
+
+		is symbolically compile-time. Its actual value becomes available when
+		the surrounding generic declaration is specialized.
+	*/
+	if c.genericExprReferencesPlaceholder(
+		scope,
+		lengthExpr,
+	) {
+		return result
+	}
+
+	value, ok := c.evalGenericConstExpr(
+		scope,
+		lengthExpr,
+	)
+
+	if !ok ||
+		value.Kind != genericConstInt {
+		c.diags.Add(
+			lengthExpr.Span(),
+			"@inline_array length must be evaluable as a compile-time int",
+		)
+
+		return result
+	}
+
+	if value.IntValue < 0 {
+		c.diags.Add(
+			lengthExpr.Span(),
+			fmt.Sprintf(
+				"@inline_array length cannot be negative, got %d",
+				value.IntValue,
+			),
+		)
+
+		return result
+	}
+
+	result.InlineLength = value.IntValue
+	result.InlineLengthKnown = true
+	result.InlineLengthKey = strconv.FormatInt(
+		value.IntValue,
+		10,
+	)
+
+	return result
+}
+
+func (c *Checker) checkInlineArrayExpr(
+	scope *Scope,
+	e *ast.InlineArrayExpr,
+) *Type {
+	if e == nil {
+		return InvalidType
+	}
+
+	elem := c.typeFromAst(
+		scope,
+		e.Elem,
+	)
+
+	result := c.inlineArrayTypeFromParts(
+		scope,
+		elem,
+		e.Length,
+		e.Span(),
+	)
+
+	if len(e.Values) > 0 {
+		if !result.InlineLengthKnown {
+			c.diags.Add(
+				e.Span(),
+				"non-empty @inline_array initializer requires a concrete compile-time length",
+			)
+		} else if int64(len(e.Values)) !=
+			result.InlineLength {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"@inline_array<%s, %d> requires exactly %d initializer value(s), got %d",
+					result.Elem.String(),
+					result.InlineLength,
+					result.InlineLength,
+					len(e.Values),
+				),
+			)
+		}
+	}
+
+	for _, value := range e.Values {
+		got := c.checkExprWithExpected(
+			scope,
+			value,
+			result.Elem,
+		)
+
+		c.checkAssignable(
+			result.Elem,
+			got,
+			value.Span(),
+		)
+	}
+
+	return result
+}
+
 func (c *Checker) checkExpr(
 	scope *Scope,
 	expr ast.Expr,
@@ -7540,6 +7920,7 @@ func (c *Checker) checkExpr(
 					e.Name.Name,
 				),
 			)
+
 			return InvalidType
 		}
 
@@ -7555,12 +7936,23 @@ func (c *Checker) checkExpr(
 			Name: e.Name.Name,
 		}
 
+	case *ast.InlineArrayExpr:
+		return c.checkInlineArrayExpr(
+			scope,
+			e,
+		)
+
 	case *ast.SpreadExpr:
 		c.diags.Add(
 			e.Span(),
 			"spread can only be used as a call argument",
 		)
-		c.checkExpr(scope, e.Expr)
+
+		c.checkExpr(
+			scope,
+			e.Expr,
+		)
+
 		return InvalidType
 
 	case *ast.GenericExpr:
@@ -7568,6 +7960,7 @@ func (c *Checker) checkExpr(
 			e.Span(),
 			"generic expression cannot be used as a value",
 		)
+
 		return InvalidType
 
 	case *ast.IntLitExpr:
@@ -7582,6 +7975,7 @@ func (c *Checker) checkExpr(
 					err,
 				),
 			)
+
 			return InvalidType
 		}
 
@@ -7611,22 +8005,40 @@ func (c *Checker) checkExpr(
 		return NilType
 
 	case *ast.UnaryExpr:
-		return c.checkUnaryExpr(scope, e)
+		return c.checkUnaryExpr(
+			scope,
+			e,
+		)
 
 	case *ast.BinaryExpr:
-		return c.checkBinaryExpr(scope, e)
+		return c.checkBinaryExpr(
+			scope,
+			e,
+		)
 
 	case *ast.CallExpr:
-		return c.checkCallExpr(scope, e)
+		return c.checkCallExpr(
+			scope,
+			e,
+		)
 
 	case *ast.SelectorExpr:
-		return c.checkSelectorExpr(scope, e)
+		return c.checkSelectorExpr(
+			scope,
+			e,
+		)
 
 	case *ast.IndexExpr:
-		return c.checkIndexExpr(scope, e)
+		return c.checkIndexExpr(
+			scope,
+			e,
+		)
 
 	case *ast.CompoundLiteralExpr:
-		return c.checkCompoundLiteralExpr(scope, e)
+		return c.checkCompoundLiteralExpr(
+			scope,
+			e,
+		)
 	}
 
 	return InvalidType
@@ -9947,6 +10359,13 @@ func (c *Checker) checkLenCall(
 		}
 		return UintType
 
+	case TypeInlineArray:
+		c.lenResolutions[call] = LenResolution{
+			Kind: LenResolutionInlineArray,
+		}
+
+		return UintType
+
 	case TypeCstring:
 		c.lenResolutions[call] = LenResolution{
 			Kind: LenResolutionCstring,
@@ -10190,6 +10609,17 @@ func (c *Checker) checkIndexExpr(
 			Kind: IndexResolutionCstringRead,
 		}
 		return CharType
+
+	case TypeInlineArray:
+		if receiverType.Elem == nil {
+			return InvalidType
+		}
+
+		c.indexResolutions[e] = IndexResolution{
+			Kind: IndexResolutionInlineArrayRead,
+		}
+
+		return receiverType.Elem
 
 	case TypeVariadic:
 		if receiverType.Elem == nil {
@@ -10455,6 +10885,7 @@ func (c *Checker) typeFromAstContext(
 				t.Span(),
 				`"self" type is only available inside interface requirements`,
 			)
+
 			return InvalidType
 		}
 
@@ -10462,6 +10893,20 @@ func (c *Checker) typeFromAstContext(
 			Kind: TypeInterfaceSelf,
 			Name: "self",
 		}
+
+	case *ast.InlineArrayType:
+		elem := c.typeFromAstContext(
+			scope,
+			t.Elem,
+			allowInterfaceSelf,
+		)
+
+		return c.inlineArrayTypeFromParts(
+			scope,
+			elem,
+			t.Length,
+			t.Span(),
+		)
 
 	case *ast.NamedType:
 		if len(t.Parts) == 0 {
@@ -10474,6 +10919,7 @@ func (c *Checker) typeFromAstContext(
 					t.Span(),
 					"package-qualified types currently support exactly one package and one member",
 				)
+
 				return InvalidType
 			}
 
@@ -10484,24 +10930,36 @@ func (c *Checker) typeFromAstContext(
 			if sym == nil {
 				c.diags.Add(
 					first.Span(),
-					fmt.Sprintf("undefined type or package %q", first.Name),
+					fmt.Sprintf(
+						"undefined type or package %q",
+						first.Name,
+					),
 				)
+
 				return InvalidType
 			}
 
 			if sym.Kind != SymbolPackage {
 				c.diags.Add(
 					first.Span(),
-					fmt.Sprintf("%q is not a package", first.Name),
+					fmt.Sprintf(
+						"%q is not a package",
+						first.Name,
+					),
 				)
+
 				return InvalidType
 			}
 
 			if sym.Package == nil {
 				c.diags.Add(
 					first.Span(),
-					fmt.Sprintf("package %q has no symbol table", first.Name),
+					fmt.Sprintf(
+						"package %q has no symbol table",
+						first.Name,
+					),
 				)
+
 				return InvalidType
 			}
 
@@ -10515,6 +10973,7 @@ func (c *Checker) typeFromAstContext(
 						member.Name,
 					),
 				)
+
 				return InvalidType
 			}
 
@@ -10527,6 +10986,7 @@ func (c *Checker) typeFromAstContext(
 						member.Name,
 					),
 				)
+
 				return InvalidType
 			}
 
@@ -10537,20 +10997,29 @@ func (c *Checker) typeFromAstContext(
 		}
 
 		name := t.Parts[0]
+
 		sym := scope.Lookup(name.Name)
 		if sym == nil {
 			c.diags.Add(
 				name.Span(),
-				fmt.Sprintf("undefined type %q", name.Name),
+				fmt.Sprintf(
+					"undefined type %q",
+					name.Name,
+				),
 			)
+
 			return InvalidType
 		}
 
 		if sym.Kind != SymbolType {
 			c.diags.Add(
 				name.Span(),
-				fmt.Sprintf("%q is not a type", name.Name),
+				fmt.Sprintf(
+					"%q is not a type",
+					name.Name,
+				),
 			)
+
 			return InvalidType
 		}
 
@@ -10863,39 +11332,93 @@ func genericArgSubst(params []ast.GenericParam, args []ast.GenericArg) map[strin
 	return subst
 }
 
-func (c *Checker) typeFromAstWithGenericArgs(scope *Scope, typ ast.Type, subst map[string]ast.GenericArg) *Type {
+func (c *Checker) typeFromAstWithGenericArgs(
+	scope *Scope,
+	typ ast.Type,
+	subst map[string]ast.GenericArg,
+) *Type {
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		if len(t.Parts) == 1 {
 			if arg, ok := subst[t.Parts[0].Name]; ok {
-				return c.typeFromGenericArg(scope, arg)
+				return c.typeFromGenericArg(
+					scope,
+					arg,
+				)
 			}
 		}
 
-		return c.typeFromAst(scope, t)
+		return c.typeFromAst(
+			scope,
+			t,
+		)
 
 	case *ast.PointerType:
 		return &Type{
 			Kind: TypePointer,
-			Elem: c.typeFromAstWithGenericArgs(scope, t.Elem, subst),
+			Elem: c.typeFromAstWithGenericArgs(
+				scope,
+				t.Elem,
+				subst,
+			),
 		}
+
+	case *ast.InlineArrayType:
+		elem := c.substituteTypeAst(
+			t.Elem,
+			subst,
+		)
+
+		length := c.substituteGenericExpr(
+			t.Length,
+			subst,
+		)
+
+		return c.typeFromAst(
+			scope,
+			&ast.InlineArrayType{
+				Elem:   elem,
+				Length: length,
+				Loc:    t.Loc,
+			},
+		)
 
 	case *ast.GenericType:
-		args := make([]ast.GenericArg, 0, len(t.Args))
+		args := make(
+			[]ast.GenericArg,
+			0,
+			len(t.Args),
+		)
+
 		for _, arg := range t.Args {
-			args = append(args, c.substituteGenericArg(arg, subst))
+			args = append(
+				args,
+				c.substituteGenericArg(
+					arg,
+					subst,
+				),
+			)
 		}
 
-		base := c.substituteTypeAst(t.Base, subst)
+		base := c.substituteTypeAst(
+			t.Base,
+			subst,
+		)
 
-		return c.typeFromAst(scope, &ast.GenericType{
-			Base: base,
-			Args: args,
-			Loc:  t.Loc,
-		})
+		return c.typeFromAst(
+			scope,
+			&ast.GenericType{
+				Base: base,
+				Args: args,
+				Loc:  t.Loc,
+			},
+		)
 	}
 
-	return c.typeFromAst(scope, typ)
+	return c.typeFromAst(
+		scope,
+		typ,
+	)
 }
 
 func (c *Checker) substituteGenericArg(arg ast.GenericArg, subst map[string]ast.GenericArg) ast.GenericArg {
@@ -10924,12 +11447,17 @@ func (c *Checker) substituteGenericArg(arg ast.GenericArg, subst map[string]ast.
 	return arg
 }
 
-func (c *Checker) substituteTypeAst(typ ast.Type, subst map[string]ast.GenericArg) ast.Type {
+func (c *Checker) substituteTypeAst(
+	typ ast.Type,
+	subst map[string]ast.GenericArg,
+) ast.Type {
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		if len(t.Parts) == 1 {
-			if arg, ok := subst[t.Parts[0].Name]; ok {
-				if argType := genericArgAsTypeAst(arg); argType != nil {
+			if arg, ok :=
+				subst[t.Parts[0].Name]; ok {
+				if argType :=
+					genericArgAsTypeAst(arg); argType != nil {
 					return argType
 				}
 			}
@@ -10942,18 +11470,48 @@ func (c *Checker) substituteTypeAst(typ ast.Type, subst map[string]ast.GenericAr
 
 	case *ast.PointerType:
 		return &ast.PointerType{
-			Elem: c.substituteTypeAst(t.Elem, subst),
-			Loc:  t.Loc,
+			Elem: c.substituteTypeAst(
+				t.Elem,
+				subst,
+			),
+			Loc: t.Loc,
+		}
+
+	case *ast.InlineArrayType:
+		return &ast.InlineArrayType{
+			Elem: c.substituteTypeAst(
+				t.Elem,
+				subst,
+			),
+			Length: c.substituteGenericExpr(
+				t.Length,
+				subst,
+			),
+			Loc: t.Loc,
 		}
 
 	case *ast.GenericType:
-		args := make([]ast.GenericArg, 0, len(t.Args))
+		args := make(
+			[]ast.GenericArg,
+			0,
+			len(t.Args),
+		)
+
 		for _, arg := range t.Args {
-			args = append(args, c.substituteGenericArg(arg, subst))
+			args = append(
+				args,
+				c.substituteGenericArg(
+					arg,
+					subst,
+				),
+			)
 		}
 
 		return &ast.GenericType{
-			Base: c.substituteTypeAst(t.Base, subst),
+			Base: c.substituteTypeAst(
+				t.Base,
+				subst,
+			),
 			Args: args,
 			Loc:  t.Loc,
 		}
@@ -11038,6 +11596,36 @@ func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.Gene
 			Left: c.substituteGenericExpr(e.Left, subst),
 			Name: e.Name,
 			Loc:  e.Loc,
+		}
+
+	case *ast.InlineArrayExpr:
+		values := make(
+			[]ast.Expr,
+			0,
+			len(e.Values),
+		)
+
+		for _, value := range e.Values {
+			values = append(
+				values,
+				c.substituteGenericExpr(
+					value,
+					subst,
+				),
+			)
+		}
+
+		return &ast.InlineArrayExpr{
+			Elem: c.substituteTypeAst(
+				e.Elem,
+				subst,
+			),
+			Length: c.substituteGenericExpr(
+				e.Length,
+				subst,
+			),
+			Values: values,
+			Loc:    e.Loc,
 		}
 
 	case *ast.IndexExpr:
@@ -11155,15 +11743,24 @@ func genericArgDisplay(
 	return "<invalid>"
 }
 
-func typeDisplay(typ ast.Type) string {
+func typeDisplay(
+	typ ast.Type,
+) string {
 	switch t := typ.(type) {
 	case *ast.NamedType:
 		var parts []string
+
 		for _, part := range t.Parts {
-			parts = append(parts, part.Name)
+			parts = append(
+				parts,
+				part.Name,
+			)
 		}
 
-		return strings.Join(parts, ".")
+		return strings.Join(
+			parts,
+			".",
+		)
 
 	case *ast.InterfaceSelfType:
 		return "self"
@@ -11171,13 +11768,27 @@ func typeDisplay(typ ast.Type) string {
 	case *ast.PointerType:
 		return "*" + typeDisplay(t.Elem)
 
+	case *ast.InlineArrayType:
+		return fmt.Sprintf(
+			"@inline_array<%s, %s>",
+			typeDisplay(t.Elem),
+			exprDisplay(t.Length),
+		)
+
 	case *ast.GenericType:
 		var args []string
+
 		for _, arg := range t.Args {
-			args = append(args, genericArgDisplay(arg))
+			args = append(
+				args,
+				genericArgDisplay(arg),
+			)
 		}
 
-		return typeDisplay(t.Base) + "<" + strings.Join(args, ", ") + ">"
+		return typeDisplay(t.Base) +
+			"<" +
+			strings.Join(args, ", ") +
+			">"
 	}
 
 	return "<type>"
@@ -11250,6 +11861,23 @@ func exprDisplay(expr ast.Expr) string {
 
 	case *ast.CompoundLiteralExpr:
 		return typeDisplay(e.Type) + "{...}"
+
+	case *ast.InlineArrayExpr:
+		var values []string
+
+		for _, value := range e.Values {
+			values = append(
+				values,
+				exprDisplay(value),
+			)
+		}
+
+		return fmt.Sprintf(
+			"@inline_array<%s, %s>(%s)",
+			typeDisplay(e.Elem),
+			exprDisplay(e.Length),
+			strings.Join(values, ", "),
+		)
 	}
 
 	return "<expr>"
@@ -13742,6 +14370,16 @@ func (c *Checker) sameType(a *Type, b *Type) bool {
 	switch a.Kind {
 	case TypePointer:
 		return c.sameType(a.Elem, b.Elem)
+
+	case TypeInlineArray:
+		if a.InlineLengthKey != b.InlineLengthKey {
+			return false
+		}
+
+		return c.sameType(
+			a.Elem,
+			b.Elem,
+		)
 
 	case TypeVariadic:
 		return c.sameType(a.Elem, b.Elem)

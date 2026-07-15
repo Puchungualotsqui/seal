@@ -8,6 +8,7 @@ import (
 	"seal/internal/diag"
 	"seal/internal/lexer"
 	"seal/internal/source"
+	"seal/internal/token"
 )
 
 func parse(t *testing.T, input string) (*ast.File, *diag.Reporter) {
@@ -2173,6 +2174,404 @@ Contains :: task(
 		t.Fatalf(
 			"second if-body statement is %T, expected *ast.BreakStmt",
 			ifStmt.Then.Stmts[1],
+		)
+	}
+}
+
+func TestParseInlineArrayExpr(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if task.Body == nil {
+		t.Fatalf("expected task body")
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	decl, ok := task.Body.Stmts[0].(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected VarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	inline, ok := decl.Value.(*ast.InlineArrayExpr)
+	if !ok {
+		t.Fatalf(
+			"expected InlineArrayExpr, got %T",
+			decl.Value,
+		)
+	}
+
+	elem, ok := inline.Elem.(*ast.NamedType)
+	if !ok {
+		t.Fatalf(
+			"element type = %T, want *ast.NamedType",
+			inline.Elem,
+		)
+	}
+
+	if len(elem.Parts) != 1 ||
+		elem.Parts[0].Name != "int" {
+		t.Fatalf(
+			"element type = %#v, want int",
+			elem.Parts,
+		)
+	}
+
+	length, ok := inline.Length.(*ast.IntLitExpr)
+	if !ok {
+		t.Fatalf(
+			"length expression = %T, want *ast.IntLitExpr",
+			inline.Length,
+		)
+	}
+
+	if length.Value != "4" {
+		t.Fatalf(
+			"length = %q, want 4",
+			length.Value,
+		)
+	}
+
+	if len(inline.Values) != 4 {
+		t.Fatalf(
+			"initializer count = %d, want 4",
+			len(inline.Values),
+		)
+	}
+
+	for i, value := range inline.Values {
+		if _, ok := value.(*ast.IntLitExpr); !ok {
+			t.Fatalf(
+				"initializer %d = %T, want *ast.IntLitExpr",
+				i,
+				value,
+			)
+		}
+	}
+}
+
+func TestParseInlineArrayZeroInitializer(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    values := @inline_array<u8, 256>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	decl, ok := task.Body.Stmts[0].(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected VarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	inline, ok := decl.Value.(*ast.InlineArrayExpr)
+	if !ok {
+		t.Fatalf(
+			"expected InlineArrayExpr, got %T",
+			decl.Value,
+		)
+	}
+
+	if len(inline.Values) != 0 {
+		t.Fatalf(
+			"initializer count = %d, want 0",
+			len(inline.Values),
+		)
+	}
+}
+
+func TestParseInlineArrayStructFieldType(t *testing.T) {
+	file, reporter := parse(t, `
+Buffer :: struct {
+    data @inline_array<u8, 256>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	decl, ok := file.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf(
+			"expected StructDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(decl.Fields) != 1 {
+		t.Fatalf(
+			"expected 1 field, got %d",
+			len(decl.Fields),
+		)
+	}
+
+	inline, ok := decl.Fields[0].Type.(*ast.InlineArrayType)
+	if !ok {
+		t.Fatalf(
+			"field type = %T, want *ast.InlineArrayType",
+			decl.Fields[0].Type,
+		)
+	}
+
+	elem, ok := inline.Elem.(*ast.NamedType)
+	if !ok {
+		t.Fatalf(
+			"element type = %T, want *ast.NamedType",
+			inline.Elem,
+		)
+	}
+
+	if len(elem.Parts) != 1 ||
+		elem.Parts[0].Name != "u8" {
+		t.Fatalf(
+			"element type = %#v, want u8",
+			elem.Parts,
+		)
+	}
+
+	length, ok := inline.Length.(*ast.IntLitExpr)
+	if !ok {
+		t.Fatalf(
+			"length expression = %T, want *ast.IntLitExpr",
+			inline.Length,
+		)
+	}
+
+	if length.Value != "256" {
+		t.Fatalf(
+			"length = %q, want 256",
+			length.Value,
+		)
+	}
+}
+
+func TestParseGenericInlineArrayStructFieldType(t *testing.T) {
+	file, reporter := parse(t, `
+StackArray :: struct<T type, N int[N >= 0]> {
+    data @inline_array<T, N>
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	decl, ok := file.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf(
+			"expected StructDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(decl.GenericParams) != 2 {
+		t.Fatalf(
+			"generic parameter count = %d, want 2",
+			len(decl.GenericParams),
+		)
+	}
+
+	if len(decl.Fields) != 1 {
+		t.Fatalf(
+			"field count = %d, want 1",
+			len(decl.Fields),
+		)
+	}
+
+	inline, ok := decl.Fields[0].Type.(*ast.InlineArrayType)
+	if !ok {
+		t.Fatalf(
+			"field type = %T, want *ast.InlineArrayType",
+			decl.Fields[0].Type,
+		)
+	}
+
+	elem, ok := inline.Elem.(*ast.NamedType)
+	if !ok {
+		t.Fatalf(
+			"element type = %T, want *ast.NamedType",
+			inline.Elem,
+		)
+	}
+
+	if len(elem.Parts) != 1 ||
+		elem.Parts[0].Name != "T" {
+		t.Fatalf(
+			"element type = %#v, want T",
+			elem.Parts,
+		)
+	}
+
+	length, ok := inline.Length.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"length expression = %T, want *ast.IdentExpr",
+			inline.Length,
+		)
+	}
+
+	if length.Name.Name != "N" {
+		t.Fatalf(
+			"length identifier = %q, want N",
+			length.Name.Name,
+		)
+	}
+}
+
+func TestParseInlineArrayExpressionLength(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    values := @inline_array<int, 2 + 2>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task := file.Decls[0].(*ast.TaskDecl)
+	decl := task.Body.Stmts[0].(*ast.VarDeclStmt)
+
+	inline, ok := decl.Value.(*ast.InlineArrayExpr)
+	if !ok {
+		t.Fatalf(
+			"value = %T, want *ast.InlineArrayExpr",
+			decl.Value,
+		)
+	}
+
+	binary, ok := inline.Length.(*ast.BinaryExpr)
+	if !ok {
+		t.Fatalf(
+			"length = %T, want *ast.BinaryExpr",
+			inline.Length,
+		)
+	}
+
+	if binary.Op != token.Plus {
+		t.Fatalf(
+			"length operator = %v, want token.Plus",
+			binary.Op,
+		)
+	}
+}
+
+func TestRejectInlineArrayMissingElementType(t *testing.T) {
+	_, reporter := parse(t, `
+Main :: task() {
+    values := @inline_array<, 4>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"expected element type as first @inline_array argument",
+	) {
+		t.Fatalf(
+			"expected element type diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayMissingLength(t *testing.T) {
+	_, reporter := parse(t, `
+Main :: task() {
+    values := @inline_array<int,>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"expected compile-time length as second @inline_array argument",
+	) {
+		t.Fatalf(
+			"expected length diagnostic, got:\n%s",
+			reporter.String(),
 		)
 	}
 }

@@ -748,6 +748,116 @@ func (p *Parser) parseImplDecl(interfaceType ast.Type, start int) ast.Decl {
 	}
 }
 
+func (p *Parser) parseInlineArraySpec(
+	start int,
+) (
+	ast.Type,
+	ast.Expr,
+	int,
+	bool,
+) {
+	name := p.expectIdent(
+		"expected directive name after '@'",
+	)
+	if name.Name == "" {
+		return nil, nil, start, false
+	}
+
+	if name.Name != "inline_array" {
+		p.diags.Add(
+			name.Span(),
+			fmt.Sprintf(
+				"unknown type or expression directive @%s",
+				name.Name,
+			),
+		)
+
+		return nil, nil, name.Span().End, false
+	}
+
+	if !p.expect(
+		token.Lt,
+		"expected '<' after @inline_array",
+	) {
+		return nil, nil, name.Span().End, false
+	}
+
+	elem := p.parseType()
+	if elem == nil {
+		p.errorHere(
+			"expected element type as first @inline_array argument",
+		)
+
+		p.synchronizeUntil(
+			token.Comma,
+			token.Gt,
+		)
+
+		return nil, nil, p.peek().Span.Start, false
+	}
+
+	if !p.expect(
+		token.Comma,
+		"expected ',' after @inline_array element type",
+	) {
+		return nil, nil, elem.Span().End, false
+	}
+
+	length := p.parseExprUntil(
+		0,
+		token.Gt,
+	)
+	if length == nil {
+		p.errorHere(
+			"expected compile-time length as second @inline_array argument",
+		)
+
+		return nil, nil, elem.Span().End, false
+	}
+
+	gt := p.expectToken(
+		token.Gt,
+		"expected '>' after @inline_array arguments",
+	)
+
+	return elem, length, gt.Span.End, true
+}
+
+func (p *Parser) parseInlineArrayExpr(
+	start int,
+) ast.Expr {
+	elem, length, _, ok :=
+		p.parseInlineArraySpec(start)
+
+	if !ok {
+		return nil
+	}
+
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @inline_array<T, N>",
+	) {
+		return nil
+	}
+
+	values := p.parseCallArgs()
+
+	endTok := p.expectToken(
+		token.RParen,
+		"expected ')' after @inline_array values",
+	)
+
+	return &ast.InlineArrayExpr{
+		Elem:   elem,
+		Length: length,
+		Values: values,
+		Loc: p.span(
+			start,
+			endTok.Span.End,
+		),
+	}
+}
+
 func (p *Parser) parseUsingPath() []ast.Ident {
 	var path []ast.Ident
 
@@ -1236,13 +1346,8 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 			"'dyn' is only valid in an interface declaration",
 		)
 
-		// Recover from:
-		//
-		//     cast<dyn Positioned>(value)
-		//
-		// Consume the following type without producing an additional
-		// generic-argument diagnostic.
 		if p.at(token.Star) ||
+			p.at(token.At) ||
 			p.at(token.LBracket) ||
 			p.at(token.KeywordSelf) ||
 			p.at(token.Ident) {
@@ -1261,7 +1366,9 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 	}
 
 	switch p.peek().Kind {
-	case token.Star, token.KeywordSelf:
+	case token.At,
+		token.Star,
+		token.KeywordSelf:
 		t := p.parseType()
 		if t == nil {
 			return ast.GenericArg{}
@@ -1301,7 +1408,11 @@ func (p *Parser) parseGenericArg() ast.GenericArg {
 		}
 	}
 
-	expr := p.parseExprUntil(0, token.Comma, token.Gt)
+	expr := p.parseExprUntil(
+		0,
+		token.Comma,
+		token.Gt,
+	)
 	if expr == nil {
 		p.errorHere("expected generic argument")
 		return ast.GenericArg{}
@@ -1491,6 +1602,23 @@ func (p *Parser) parseType() ast.Type {
 	var t ast.Type
 
 	switch {
+	case p.match(token.At):
+		elem, length, end, ok :=
+			p.parseInlineArraySpec(start)
+
+		if !ok {
+			return nil
+		}
+
+		t = &ast.InlineArrayType{
+			Elem:   elem,
+			Length: length,
+			Loc: p.span(
+				start,
+				end,
+			),
+		}
+
 	case p.match(token.Star):
 		elem := p.parseType()
 		if elem == nil {
@@ -2438,6 +2566,9 @@ func (p *Parser) parsePrefixUntil(
 	start := p.peek().Span.Start
 
 	switch {
+	case p.match(token.At):
+		return p.parseInlineArrayExpr(start)
+
 	case p.at(token.Ident) ||
 		p.at(token.KeywordSelf):
 		tok := p.advance()
@@ -2512,14 +2643,6 @@ func (p *Parser) parsePrefixUntil(
 		}
 
 	case p.match(token.LParen):
-		// Parentheses create their own expression boundary.
-		//
-		// In particular, they allow an otherwise ambiguous
-		// compound literal to appear in a control-flow
-		// condition:
-		//
-		//     if (Flags{Enabled = true}.Enabled) {
-		//
 		expr := p.parseExprUntil(
 			0,
 			token.RParen,
@@ -2535,18 +2658,6 @@ func (p *Parser) parsePrefixUntil(
 	case p.isUnaryOp(p.peek().Kind):
 		op := p.advance()
 
-		// Propagate the enclosing expression stops into the
-		// unary operand.
-		//
-		// Without this, parsing:
-		//
-		//     if !success {
-		//
-		// causes the operand parser to interpret:
-		//
-		//     success {
-		//
-		// as the beginning of a compound literal.
 		expr := p.parseExprUntil(
 			7,
 			stops...,

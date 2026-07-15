@@ -9429,3 +9429,872 @@ Main :: task() {
 		})
 	}
 }
+
+func checkerInlineArrayFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.InlineArrayExpr {
+	t.Helper()
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	inline, ok := decl.Value.(*ast.InlineArrayExpr)
+	if !ok {
+		t.Fatalf(
+			"variable value type = %T, want *ast.InlineArrayExpr",
+			decl.Value,
+		)
+	}
+
+	return inline
+}
+
+func TestCheckInlineArrayExpr(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	inline := checkerInlineArrayFromVarStmt(
+		t,
+		stmt,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(inline)
+	if !ok {
+		t.Fatalf(
+			"inline array expression has no checker type",
+		)
+	}
+
+	if typ.Kind != TypeInlineArray {
+		t.Fatalf(
+			"inline array type kind = %v, want TypeInlineArray",
+			typ.Kind,
+		)
+	}
+
+	if typ.Elem == nil ||
+		typ.Elem.Kind != TypeInt {
+		t.Fatalf(
+			"inline array element type = %v, want int",
+			typ.Elem,
+		)
+	}
+
+	if !typ.InlineLengthKnown {
+		t.Fatalf(
+			"expected concrete inline array length",
+		)
+	}
+
+	if typ.InlineLength != 4 {
+		t.Fatalf(
+			"inline array length = %d, want 4",
+			typ.InlineLength,
+		)
+	}
+
+	if typ.InlineLengthKey != "4" {
+		t.Fatalf(
+			"inline array length key = %q, want %q",
+			typ.InlineLengthKey,
+			"4",
+		)
+	}
+}
+
+func TestCheckInlineArrayZeroInitializer(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<u8, 256>()
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	inline := checkerInlineArrayFromVarStmt(
+		t,
+		stmt,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(inline)
+	if !ok {
+		t.Fatalf(
+			"inline array expression has no checker type",
+		)
+	}
+
+	if typ.Kind != TypeInlineArray {
+		t.Fatalf(
+			"type kind = %v, want TypeInlineArray",
+			typ.Kind,
+		)
+	}
+
+	if typ.Elem == nil ||
+		typ.Elem.Kind != TypeU8 {
+		t.Fatalf(
+			"element type = %v, want u8",
+			typ.Elem,
+		)
+	}
+
+	if !typ.InlineLengthKnown ||
+		typ.InlineLength != 256 {
+		t.Fatalf(
+			"length = %d, known = %v; want 256, true",
+			typ.InlineLength,
+			typ.InlineLengthKnown,
+		)
+	}
+}
+
+func TestCheckInlineArrayConstantLengthExpression(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 2 + 2>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	inline := checkerInlineArrayFromVarStmt(
+		t,
+		stmt,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(inline)
+	if !ok {
+		t.Fatalf(
+			"inline array expression has no checker type",
+		)
+	}
+
+	if !typ.InlineLengthKnown {
+		t.Fatalf(
+			"expected concrete inline array length",
+		)
+	}
+
+	if typ.InlineLength != 4 {
+		t.Fatalf(
+			"inline array length = %d, want 4",
+			typ.InlineLength,
+		)
+	}
+
+	if typ.InlineLengthKey != "4" {
+		t.Fatalf(
+			"inline array length key = %q, want 4",
+			typ.InlineLengthKey,
+		)
+	}
+}
+
+func TestCheckInlineArrayNamedConstantLength(t *testing.T) {
+	run := runCheckerTest(t, `
+COUNT :: 4
+
+Main :: task() {
+    values := @inline_array<int, COUNT>(
+        10,
+        20,
+        30,
+        40,
+    )
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	inline := checkerInlineArrayFromVarStmt(
+		t,
+		stmt,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(inline)
+	if !ok {
+		t.Fatalf(
+			"inline array expression has no checker type",
+		)
+	}
+
+	if !typ.InlineLengthKnown ||
+		typ.InlineLength != 4 {
+		t.Fatalf(
+			"length = %d, known = %v; want 4, true",
+			typ.InlineLength,
+			typ.InlineLengthKnown,
+		)
+	}
+}
+
+func TestRejectInlineArrayTooFewInitializers(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+    )
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"requires exactly 4 initializer value(s), got 2",
+	) {
+		t.Fatalf(
+			"expected initializer-count diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayTooManyInitializers(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, 2>(
+        10,
+        20,
+        30,
+    )
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"requires exactly 2 initializer value(s), got 3",
+	) {
+		t.Fatalf(
+			"expected initializer-count diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayWrongElementType(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, 3>(
+        10,
+        true,
+        30,
+    )
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"cannot assign bool to int",
+	) {
+		t.Fatalf(
+			"expected element type diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayNegativeLength(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, -1>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"@inline_array length cannot be negative, got -1",
+	) {
+		t.Fatalf(
+			"expected negative-length diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayRuntimeLength(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    count := 4
+    values := @inline_array<int, count>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"@inline_array length must be evaluable as a compile-time int",
+	) {
+		t.Fatalf(
+			"expected compile-time length diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestRejectInlineArrayNonIntegerLength(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, true>()
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"cannot assign bool to int",
+	) {
+		t.Fatalf(
+			"expected integer-length diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckZeroLengthInlineArray(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 0>()
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	inline := checkerInlineArrayFromVarStmt(
+		t,
+		stmt,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(inline)
+	if !ok {
+		t.Fatalf(
+			"inline array expression has no checker type",
+		)
+	}
+
+	if !typ.InlineLengthKnown ||
+		typ.InlineLength != 0 {
+		t.Fatalf(
+			"length = %d, known = %v; want 0, true",
+			typ.InlineLength,
+			typ.InlineLengthKnown,
+		)
+	}
+}
+
+func TestCheckGenericStructWithInlineArrayField(t *testing.T) {
+	run := runCheckerTest(t, `
+StackArray :: struct<T type, N int[N >= 0]> {
+    data @inline_array<T, N>
+}
+
+Main :: task() {
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	sym := run.Scope.Lookup("StackArray")
+	if sym == nil {
+		t.Fatalf("StackArray symbol was not found")
+	}
+
+	if sym.Type == nil {
+		t.Fatalf("StackArray has no checker type")
+	}
+
+	if sym.Type.Kind != TypeStruct {
+		t.Fatalf(
+			"StackArray kind = %v, want TypeStruct",
+			sym.Type.Kind,
+		)
+	}
+
+	if len(sym.Type.Fields) != 1 {
+		t.Fatalf(
+			"StackArray field count = %d, want 1",
+			len(sym.Type.Fields),
+		)
+	}
+
+	field := sym.Type.Fields[0]
+
+	if field.Type == nil ||
+		field.Type.Kind != TypeInlineArray {
+		t.Fatalf(
+			"field type = %v, want TypeInlineArray",
+			field.Type,
+		)
+	}
+
+	if field.Type.Elem == nil ||
+		field.Type.Elem.Kind != TypeTypeParam ||
+		field.Type.Elem.Name != "T" {
+		t.Fatalf(
+			"field element type = %v, want type parameter T",
+			field.Type.Elem,
+		)
+	}
+
+	if field.Type.InlineLengthKnown {
+		t.Fatalf(
+			"generic inline-array length should remain symbolic",
+		)
+	}
+
+	if field.Type.InlineLengthKey != "N" {
+		t.Fatalf(
+			"field length key = %q, want N",
+			field.Type.InlineLengthKey,
+		)
+	}
+}
+
+func TestCheckGenericStructInlineArrayFieldSpecialization(t *testing.T) {
+	run := runCheckerTest(t, `
+StackArray :: struct<T type, N int[N >= 0]> {
+    data @inline_array<T, N>
+}
+
+Main :: task() {
+    values: StackArray<int, 4>
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	typ := run.Checker.typeFromAst(
+		run.Scope,
+		decl.Type,
+	)
+
+	if typ == nil ||
+		typ.Kind != TypeStruct {
+		t.Fatalf(
+			"variable type = %v, want specialized struct",
+			typ,
+		)
+	}
+
+	if len(typ.Fields) != 1 {
+		t.Fatalf(
+			"specialized struct field count = %d, want 1",
+			len(typ.Fields),
+		)
+	}
+
+	fieldType := typ.Fields[0].Type
+
+	if fieldType == nil ||
+		fieldType.Kind != TypeInlineArray {
+		t.Fatalf(
+			"specialized field type = %v, want TypeInlineArray",
+			fieldType,
+		)
+	}
+
+	if fieldType.Elem == nil ||
+		fieldType.Elem.Kind != TypeInt {
+		t.Fatalf(
+			"specialized element type = %v, want int",
+			fieldType.Elem,
+		)
+	}
+
+	if !fieldType.InlineLengthKnown {
+		t.Fatalf(
+			"specialized inline-array length should be concrete",
+		)
+	}
+
+	if fieldType.InlineLength != 4 {
+		t.Fatalf(
+			"specialized inline-array length = %d, want 4",
+			fieldType.InlineLength,
+		)
+	}
+}
+
+func TestCheckInlineArrayIndexRead(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+
+    value := values[2]
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	index := checkerIndexFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		index,
+		IndexResolutionInlineArrayRead,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(index)
+	if !ok {
+		t.Fatalf(
+			"index expression has no checker type",
+		)
+	}
+
+	if typ.Kind != TypeInt {
+		t.Fatalf(
+			"index expression type = %v, want int",
+			typ,
+		)
+	}
+}
+
+func TestCheckInlineArrayIndexWrite(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+
+    values[2] = 100
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	index := checkerIndexFromAssignStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertIndexResolutionKind(
+		t,
+		run.Checker,
+		index,
+		IndexResolutionInlineArrayWrite,
+	)
+}
+
+func TestRejectInlineArrayIndexWriteWrongType(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+
+    values[2] = true
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"cannot assign bool to int",
+	) {
+		t.Fatalf(
+			"expected indexed assignment diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckInlineArrayLen(t *testing.T) {
+	run := runCheckerTest(t, `
+Main :: task() {
+    values := @inline_array<int, 4>(
+        10,
+        20,
+        30,
+        40,
+    )
+
+    count := len(values)
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	call := checkerCallFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			1,
+		),
+	)
+
+	assertLenResolutionKind(
+		t,
+		run.Checker,
+		call,
+		LenResolutionInlineArray,
+	)
+
+	typ, ok := run.Checker.ExprTypeFor(call)
+	if !ok {
+		t.Fatalf(
+			"len call has no checker type",
+		)
+	}
+
+	if typ.Kind != TypeUint {
+		t.Fatalf(
+			"len result type = %v, want uint",
+			typ,
+		)
+	}
+}
+
+func TestRejectWholeInlineArrayAssignment(t *testing.T) {
+	reporter := checkSource(t, `
+Main :: task() {
+    left := @inline_array<int, 4>(
+        1,
+        2,
+        3,
+        4,
+    )
+
+    right := @inline_array<int, 4>(
+        5,
+        6,
+        7,
+        8,
+    )
+
+    left = right
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf("expected diagnostics")
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"@inline_array storage cannot be assigned as a whole",
+	) {
+		t.Fatalf(
+			"expected whole-array assignment diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckInlineArrayAsStructFieldInitializer(t *testing.T) {
+	run := runCheckerTest(t, `
+StackArray :: struct<T type, N int[N >= 0]> {
+    data @inline_array<T, N>
+}
+
+Main :: task() {
+    values := StackArray<int, 4>{
+        data = @inline_array<int, 4>(
+            10,
+            20,
+            30,
+            40,
+        )
+    }
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckInlineArrayAsZeroInitializedStructField(t *testing.T) {
+	run := runCheckerTest(t, `
+StackArray :: struct<T type, N int[N >= 0]> {
+    data @inline_array<T, N>
+}
+
+Main :: task() {
+    values := StackArray<int, 4>{
+        data = @inline_array<int, 4>()
+    }
+}
+`)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
