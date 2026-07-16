@@ -3229,13 +3229,17 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct Player {",
+		"typedef struct Player Player;",
+		"struct Player {",
 		"intptr_t health;",
-		"} Player;",
+		"};",
 		"intptr_t HealthOf_Player(Player target);",
 		"Player p = (Player){.health = 10};",
 		"intptr_t h = HealthOf_Player(p);",
@@ -3246,9 +3250,44 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
+
+	typedefIndex := strings.Index(
+		out,
+		"typedef struct Player Player;",
+	)
+
+	definitionIndex := strings.Index(
+		out,
+		"struct Player {",
+	)
+
+	if typedefIndex < 0 ||
+		definitionIndex < 0 ||
+		typedefIndex > definitionIndex {
+		t.Fatalf(
+			"expected Player typedef before its definition, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef struct Player {",
+	) {
+		t.Fatalf(
+			"expected Player to use a separate forward typedef and definition, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenericFieldConstraintPointerCodegen(t *testing.T) {
@@ -3269,13 +3308,17 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct Enemy {",
+		"typedef struct Enemy Enemy;",
+		"struct Enemy {",
 		"intptr_t health;",
-		"} Enemy;",
+		"};",
 		"intptr_t ReadHealth_Enemy(Enemy * target);",
 		"Enemy e = (Enemy){.health = 25};",
 		"intptr_t h = ReadHealth_Enemy((&e));",
@@ -3285,9 +3328,322 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
+
+	typedefIndex := strings.Index(
+		out,
+		"typedef struct Enemy Enemy;",
+	)
+
+	definitionIndex := strings.Index(
+		out,
+		"struct Enemy {",
+	)
+
+	if typedefIndex < 0 ||
+		definitionIndex < 0 ||
+		typedefIndex > definitionIndex {
+		t.Fatalf(
+			"expected Enemy typedef before its definition, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef struct Enemy {",
+	) {
+		t.Fatalf(
+			"expected Enemy to use a separate forward typedef and definition, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestImportedStructSatisfiesGenericFieldConstraintCodegen(
+	t *testing.T,
+) {
+	typesPkg, resolverPkg, checkerPkg :=
+		exportCGenPackage(
+			t,
+			"types",
+			`
+Player :: struct {
+    health int
+}
+`,
+		)
+
+	out, reporter := generateWithPackages(
+		t,
+		`
+HealthOf :: task <T type[health int]>(target T) int {
+    return target.health
+}
+
+Main :: task() {
+    p := types.Player{health = 10}
+    h := HealthOf<types.Player>(p)
+    assert(h == 10)
+}
+`,
+		map[string]*PackageInfo{
+			"types": typesPkg,
+		},
+		map[string]*resolver.PackageInfo{
+			"types": resolverPkg,
+		},
+		map[string]*checker.PackageInfo{
+			"types": checkerPkg,
+		},
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct types_Player types_Player;",
+		"struct types_Player {",
+		"intptr_t health;",
+		"};",
+		"intptr_t HealthOf_types_Player(types_Player target);",
+		"types_Player p = (types_Player){.health = 10};",
+		"intptr_t h = HealthOf_types_Player(p);",
+		"intptr_t HealthOf_types_Player(types_Player target) {",
+		"(target).health",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	typedefIndex := strings.Index(
+		out,
+		"typedef struct types_Player types_Player;",
+	)
+
+	definitionIndex := strings.Index(
+		out,
+		"struct types_Player {",
+	)
+
+	if typedefIndex < 0 ||
+		definitionIndex < 0 ||
+		typedefIndex > definitionIndex {
+		t.Fatalf(
+			"expected imported types_Player typedef before its definition, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef struct types_Player {",
+	) {
+		t.Fatalf(
+			"expected imported types_Player to use a separate forward typedef and definition, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateInterfaceStoredAndPassedFromStruct(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+    X :: task(value *self) int
+}
+
+Transform :: struct {
+    x int
+}
+
+ReadX :: task(value *Transform) int {
+    return value.x
+}
+
+Positioned :: impl Transform {
+    X :: ReadX
+}
+
+PositionHolder :: struct {
+    value Positioned
+}
+
+ReadHolder :: task(holder PositionHolder) int {
+    return X(holder.value)
+}
+
+Main :: task() {
+    transform := Transform{x = 42}
+    positioned := cast<Positioned>(&transform)
+
+    holder := PositionHolder{
+        value = positioned,
+    }
+
+    result := ReadHolder(holder)
+
+    assert(result == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct Transform Transform;",
+		"typedef struct PositionHolder PositionHolder;",
+
+		"struct Transform {",
+		"intptr_t x;",
+		"};",
+
+		"struct PositionHolder {",
+		"Positioned value;",
+		"};",
+
+		"static intptr_t Positioned_X(Positioned receiver);",
+		"intptr_t ReadHolder(PositionHolder holder);",
+
+		"PositionHolder holder = (PositionHolder){.value = positioned};",
+		"Positioned_X((holder).value)",
+		"intptr_t result = ReadHolder(holder);",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	transformTypedefIndex := strings.Index(
+		out,
+		"typedef struct Transform Transform;",
+	)
+
+	holderTypedefIndex := strings.Index(
+		out,
+		"typedef struct PositionHolder PositionHolder;",
+	)
+
+	transformDefinitionIndex := strings.Index(
+		out,
+		"struct Transform {",
+	)
+
+	holderDefinitionIndex := strings.Index(
+		out,
+		"struct PositionHolder {",
+	)
+
+	if transformTypedefIndex < 0 ||
+		holderTypedefIndex < 0 ||
+		transformDefinitionIndex < 0 ||
+		holderDefinitionIndex < 0 {
+		t.Fatalf(
+			"expected struct typedefs and definitions, got:\n%s",
+			out,
+		)
+	}
+
+	if transformTypedefIndex > transformDefinitionIndex {
+		t.Fatalf(
+			"expected Transform typedef before its definition, got:\n%s",
+			out,
+		)
+	}
+
+	if holderTypedefIndex > holderDefinitionIndex {
+		t.Fatalf(
+			"expected PositionHolder typedef before its definition, got:\n%s",
+			out,
+		)
+	}
+
+	dispatcherPrototypeIndex := strings.Index(
+		out,
+		"static intptr_t Positioned_X(Positioned receiver);",
+	)
+
+	wrapperDefinitionIndex := strings.Index(
+		out,
+		"static intptr_t Positioned_Transform_X(",
+	)
+
+	dispatcherDefinitionIndex := strings.Index(
+		out,
+		"static intptr_t Positioned_X(Positioned receiver) {",
+	)
+
+	if dispatcherPrototypeIndex < 0 {
+		t.Fatalf(
+			"expected Positioned dispatcher prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if wrapperDefinitionIndex < 0 {
+		t.Fatalf(
+			"expected Transform interface wrapper, got:\n%s",
+			out,
+		)
+	}
+
+	if dispatcherDefinitionIndex < 0 {
+		t.Fatalf(
+			"expected Positioned dispatcher definition, got:\n%s",
+			out,
+		)
+	}
+
+	if dispatcherPrototypeIndex > wrapperDefinitionIndex {
+		t.Fatalf(
+			"expected dispatcher prototype before interface wrapper, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef struct PositionHolder {",
+	) {
+		t.Fatalf(
+			"expected PositionHolder to use a separate forward typedef and definition, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
 }
 
 func TestGenericFieldConstraintMutationCodegen(t *testing.T) {
@@ -3449,52 +3805,6 @@ Main :: task() {
 
 	if strings.Contains(out, "typedef struct /*invalid*/ int") {
 		t.Fatalf("generated invalid generic struct typedef:\n%s", out)
-	}
-}
-
-func TestImportedStructSatisfiesGenericFieldConstraintCodegen(t *testing.T) {
-	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
-Player :: struct {
-    health int
-}
-`)
-
-	out, reporter := generateWithPackages(t, `
-HealthOf :: task <T type[health int]>(target T) int {
-    return target.health
-}
-
-Main :: task() {
-    p := types.Player{health = 10}
-    h := HealthOf<types.Player>(p)
-    assert(h == 10)
-}
-`, map[string]*PackageInfo{
-		"types": typesPkg,
-	}, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*checker.PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct types_Player {",
-		"intptr_t health;",
-		"} types_Player;",
-		"intptr_t HealthOf_types_Player(types_Player target);",
-		"types_Player p = (types_Player){.health = 10};",
-		"intptr_t h = HealthOf_types_Player(p);",
-		"(target).health",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
 	}
 }
 
@@ -4602,74 +4912,6 @@ Main :: task() {
 
 		"Positioned copy = value;",
 		"Positioned_X(value)",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf(
-				"expected generated C to contain %q, got:\n%s",
-				want,
-				out,
-			)
-		}
-	}
-
-	compileGeneratedC(t, out)
-}
-
-func TestGenerateInterfaceStoredAndPassedFromStruct(t *testing.T) {
-	out, reporter := generate(t, `
-Positioned :: interface {
-	X :: task(value *self) int
-}
-
-Transform :: struct {
-	x int
-}
-
-ReadX :: task(value *Transform) int {
-	return value.x
-}
-
-Positioned :: impl Transform {
-	X :: ReadX
-}
-
-PositionHolder :: struct {
-	value Positioned
-}
-
-ReadHolder :: task(holder PositionHolder) int {
-	return X(holder.value)
-}
-
-Main :: task() {
-	transform := Transform{x = 42}
-	positioned := cast<Positioned>(&transform)
-
-	holder := PositionHolder{
-		value = positioned,
-	}
-
-	result := ReadHolder(holder)
-
-	assert(result == 42)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct PositionHolder {",
-		"Positioned value;",
-		"} PositionHolder;",
-
-		"intptr_t ReadHolder(PositionHolder holder);",
-		"PositionHolder holder = (PositionHolder){.value = positioned};",
-		"Positioned_X((holder).value)",
-		"intptr_t result = ReadHolder(holder);",
 	}
 
 	for _, want := range checks {
@@ -7785,5 +8027,460 @@ Main :: task() {
 	}
 
 	compileGeneratedC(t, out)
+	runGeneratedC(t, out)
+}
+
+func TestGenerateSelfReferentialStruct(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Node :: struct {
+    Value int
+    Next *Node
+}
+
+Main :: task() {
+    node := Node{
+        Value = 10,
+        Next = nil,
+    }
+
+    assert(node.Value == 10)
+    assert(node.Next == nil)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"typedef struct Node Node;",
+	) {
+		t.Fatalf(
+			"expected Node forward typedef, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"struct Node {",
+	) {
+		t.Fatalf(
+			"expected complete Node definition, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"Node * Next;",
+	) {
+		t.Fatalf(
+			"expected recursive Node pointer field, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"typedef struct Node {",
+	) {
+		t.Fatalf(
+			"recursive struct must not use a trailing typedef definition, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMutuallyRecursiveStructs(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Left :: struct {
+    RightValue *Right
+}
+
+Right :: struct {
+    LeftValue *Left
+}
+
+Main :: task() {
+    left := Left{
+        RightValue = nil,
+    }
+
+    right := Right{
+        LeftValue = &left,
+    }
+
+    left.RightValue = &right
+
+    assert(left.RightValue == &right)
+    assert(right.LeftValue == &left)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	leftTypedef :=
+		strings.Index(
+			out,
+			"typedef struct Left Left;",
+		)
+
+	rightTypedef :=
+		strings.Index(
+			out,
+			"typedef struct Right Right;",
+		)
+
+	firstDefinition :=
+		strings.Index(
+			out,
+			"struct Left {",
+		)
+
+	if leftTypedef < 0 ||
+		rightTypedef < 0 ||
+		firstDefinition < 0 {
+		t.Fatalf(
+			"expected mutual struct declarations, got:\n%s",
+			out,
+		)
+	}
+
+	if leftTypedef > firstDefinition ||
+		rightTypedef > firstDefinition {
+		t.Fatalf(
+			"expected all typedefs before struct definitions, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"Right * RightValue;",
+	) {
+		t.Fatalf(
+			"expected Left to reference Right, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"Left * LeftValue;",
+	) {
+		t.Fatalf(
+			"expected Right to reference Left, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestEmitImportedSelfReferentialStruct(
+	t *testing.T,
+) {
+	sourceFile := source.NewFile(
+		"mem.seal",
+		`
+Node :: struct {
+    Next *Node
+}
+`,
+	)
+
+	reporter := diag.NewReporter()
+
+	lex := lexer.New(
+		sourceFile,
+		reporter,
+	)
+
+	tokens := lex.LexAll()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"lexer diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
+	parsed := p.ParseFile()
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"parser diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	pkg :=
+		ExportPackageInfo(
+			"mem",
+			parsed,
+			reporter,
+		)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"package export diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	g := NewWithPackages(
+		reporter,
+		"app",
+		map[string]*PackageInfo{
+			"mem": pkg,
+		},
+	)
+
+	g.emitImportedStructs()
+
+	out := g.out.String()
+
+	if !strings.Contains(
+		out,
+		"typedef struct mem_Node mem_Node;",
+	) {
+		t.Fatalf(
+			"expected imported Node forward typedef, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"struct mem_Node {",
+	) {
+		t.Fatalf(
+			"expected imported Node definition, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"mem_Node * Next;",
+	) {
+		t.Fatalf(
+			"expected imported recursive pointer, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(
+		t,
+		out,
+	)
+}
+
+func TestGenerateInterfaceWrapperCallingInterface(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Allocator :: interface {
+    Alloc :: task(
+        self *self,
+        allocationSize uint,
+    ) rawptr
+}
+
+Deallocator :: interface {
+    Free :: task(
+        self *self,
+        pointer rawptr,
+    )
+}
+
+Heap :: struct {
+    Unused u8
+}
+
+Allocator :: impl Heap {
+    Alloc :: task(
+        self *Heap,
+        allocationSize uint,
+    ) rawptr {
+        return nil
+    }
+}
+
+Deallocator :: impl Heap {
+    Free :: task(
+        self *Heap,
+        pointer rawptr,
+    ) {
+    }
+}
+
+Adapter :: struct {
+    BackingAllocator Allocator
+    BackingDeallocator Deallocator
+}
+
+Allocator :: impl Adapter {
+    Alloc :: task(
+        self *Adapter,
+        allocationSize uint,
+    ) rawptr {
+        return Alloc(
+            self.BackingAllocator,
+            allocationSize,
+        )
+    }
+}
+
+Deallocator :: impl Adapter {
+    Free :: task(
+        self *Adapter,
+        pointer rawptr,
+    ) {
+        Free(
+            self.BackingDeallocator,
+            pointer,
+        )
+    }
+}
+
+Main :: task() {
+    heap := Heap{
+        Unused = 0,
+    }
+
+    allocator := cast<Allocator>(
+        &heap,
+    )
+
+    deallocator := cast<Deallocator>(
+        &heap,
+    )
+
+    adapter := Adapter{
+        BackingAllocator = allocator,
+        BackingDeallocator = deallocator,
+    }
+
+    adapterAllocator :=
+        cast<Allocator>(
+            &adapter,
+        )
+
+    adapterDeallocator :=
+        cast<Deallocator>(
+            &adapter,
+        )
+
+    pointer := Alloc(
+        adapterAllocator,
+        16,
+    )
+
+    assert(pointer == nil)
+
+    Free(
+        adapterDeallocator,
+        pointer,
+    )
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	allocatorPrototype :=
+		strings.Index(
+			out,
+			"static void * Allocator_Alloc(Allocator receiver, uintptr_t arg1);",
+		)
+
+	allocatorWrapper :=
+		strings.Index(
+			out,
+			"static void * Allocator_Adapter_Alloc(void *data, uintptr_t arg1) {",
+		)
+
+	if allocatorPrototype < 0 {
+		t.Fatalf(
+			"expected Allocator dispatcher prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if allocatorWrapper < 0 {
+		t.Fatalf(
+			"expected Adapter allocator wrapper, got:\n%s",
+			out,
+		)
+	}
+
+	if allocatorPrototype >
+		allocatorWrapper {
+		t.Fatalf(
+			"dispatcher prototype must appear before wrapper definition, got:\n%s",
+			out,
+		)
+	}
+
+	deallocatorPrototype :=
+		strings.Index(
+			out,
+			"static void Deallocator_Free(Deallocator receiver, void * arg1);",
+		)
+
+	deallocatorWrapper :=
+		strings.Index(
+			out,
+			"static void Deallocator_Adapter_Free(void *data, void * arg1) {",
+		)
+
+	if deallocatorPrototype < 0 {
+		t.Fatalf(
+			"expected Deallocator dispatcher prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if deallocatorWrapper < 0 {
+		t.Fatalf(
+			"expected Adapter deallocator wrapper, got:\n%s",
+			out,
+		)
+	}
+
+	if deallocatorPrototype >
+		deallocatorWrapper {
+		t.Fatalf(
+			"dispatcher prototype must appear before wrapper definition, got:\n%s",
+			out,
+		)
+	}
+
 	runGeneratedC(t, out)
 }

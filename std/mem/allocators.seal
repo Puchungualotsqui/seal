@@ -1,0 +1,266 @@
+/*
+ZeroingAllocator adapts an Allocator and Deallocator into an allocator
+that also implements ZeroAllocator.
+
+AllocZeroed obtains memory from the backing allocator and fills it with
+zero bytes.
+
+The backing allocator and deallocator must refer to compatible allocator
+state. Memory allocated through this adapter must be freed through this
+adapter or the same backing deallocator.
+*/
+ZeroingAllocator :: struct {
+    BackingAllocator Allocator
+    BackingDeallocator Deallocator
+}
+
+NewZeroingAllocator :: task(
+    allocator Allocator,
+    deallocator Deallocator,
+) ZeroingAllocator {
+    return ZeroingAllocator{
+        BackingAllocator = allocator,
+        BackingDeallocator = deallocator,
+    }
+}
+
+/*
+_CheckedAllocationSize calculates count * elementSize while checking for
+unsigned integer overflow.
+*/
+_CheckedAllocationSize :: task(
+    count uint,
+    elementSize uint,
+) (uint, bool) {
+    if count == 0 ||
+        elementSize == 0 {
+        return 0, true
+    }
+
+    maximum := ~cast<uint>(0)
+
+    if count > maximum / elementSize {
+        return 0, false
+    }
+
+    return count * elementSize, true
+}
+
+Allocator :: impl ZeroingAllocator {
+    Alloc :: task(
+        self *ZeroingAllocator,
+        size uint,
+    ) rawptr {
+        return Alloc(
+            self.BackingAllocator,
+            size,
+        )
+    }
+}
+
+ZeroAllocator :: impl ZeroingAllocator {
+    AllocZeroed :: task(
+        self *ZeroingAllocator,
+        count uint,
+        elementSize uint,
+    ) rawptr {
+        totalSize, valid :=
+            _CheckedAllocationSize(
+                count,
+                elementSize,
+            )
+
+        if !valid {
+            return nil
+        }
+
+        ptr := Alloc(
+            self.BackingAllocator,
+            totalSize,
+        )
+
+        if ptr == nil {
+            return nil
+        }
+
+        MemsetC(
+            ptr,
+            0,
+            totalSize,
+        )
+
+        return ptr
+    }
+}
+
+Deallocator :: impl ZeroingAllocator {
+    Free :: task(
+        self *ZeroingAllocator,
+        ptr rawptr,
+    ) {
+        Free(
+            self.BackingDeallocator,
+            ptr,
+        )
+    }
+}
+
+/*
+ArenaAllocation records one allocation owned by an ArenaAllocator.
+
+The metadata node is allocated separately from the user allocation. This
+is not as fast as a block-based arena, but it preserves the alignment
+provided by the backing allocator and does not require pointer arithmetic.
+*/
+ArenaAllocation :: struct {
+    Pointer rawptr
+    Next *ArenaAllocation
+}
+
+/*
+ArenaAllocator owns every allocation made through it until Reset is called.
+
+Individual allocations cannot be released. Reset releases all allocations
+and all tracking metadata in reverse allocation order.
+
+The backing allocator and deallocator must refer to compatible allocator
+state.
+*/
+ArenaAllocator :: struct {
+    BackingAllocator Allocator
+    BackingDeallocator Deallocator
+    Head *ArenaAllocation
+}
+
+NewArenaAllocator :: task(
+    allocator Allocator,
+    deallocator Deallocator,
+) ArenaAllocator {
+    return ArenaAllocator{
+        BackingAllocator = allocator,
+        BackingDeallocator = deallocator,
+        Head = nil,
+    }
+}
+
+_ArenaAlloc :: task(
+    self *ArenaAllocator,
+    allocationSize uint,
+) rawptr {
+    ptr := Alloc(
+        self.BackingAllocator,
+        allocationSize,
+    )
+
+    if ptr == nil {
+        return nil
+    }
+
+    allocation := cast<*ArenaAllocation>(
+        Alloc(
+            self.BackingAllocator,
+            size(ArenaAllocation),
+        ),
+    )
+
+    if allocation == nil {
+        Free(
+            self.BackingDeallocator,
+            ptr,
+        )
+
+        return nil
+    }
+
+    allocation.Pointer = ptr
+    allocation.Next = self.Head
+
+    self.Head = allocation
+
+    return ptr
+}
+
+/*
+ResetArenaAllocator releases every allocation owned by the arena.
+
+Pointers returned by the arena become invalid after this operation.
+Calling this task on an empty arena is valid.
+*/
+ResetArenaAllocator :: task(
+    self *ArenaAllocator,
+) {
+    allocation := self.Head
+
+    for allocation != nil {
+        next := allocation.Next
+
+        Free(
+            self.BackingDeallocator,
+            allocation.Pointer,
+        )
+
+        Free(
+            self.BackingDeallocator,
+            cast<rawptr>(allocation),
+        )
+
+        allocation = next
+    }
+
+    self.Head = nil
+}
+
+Allocator :: impl ArenaAllocator {
+    Alloc :: task(
+        self *ArenaAllocator,
+        size uint,
+    ) rawptr {
+        return _ArenaAlloc(
+            self,
+            size,
+        )
+    }
+}
+
+ZeroAllocator :: impl ArenaAllocator {
+    AllocZeroed :: task(
+        self *ArenaAllocator,
+        count uint,
+        elementSize uint,
+    ) rawptr {
+        totalSize, valid :=
+            _CheckedAllocationSize(
+                count,
+                elementSize,
+            )
+
+        if !valid {
+            return nil
+        }
+
+        ptr := _ArenaAlloc(
+            self,
+            totalSize,
+        )
+
+        if ptr == nil {
+            return nil
+        }
+
+        MemsetC(
+            ptr,
+            0,
+            totalSize,
+        )
+
+        return ptr
+    }
+}
+
+ResetAllocator :: impl ArenaAllocator {
+    Reset :: task(
+        self *ArenaAllocator,
+    ) {
+        ResetArenaAllocator(self)
+    }
+}

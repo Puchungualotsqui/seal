@@ -75,3 +75,13 @@ FreeTypeWith :: task <T type>(
         cast<rawptr>(ptr),
     )
 }
+
+/*
+ResetWith discards every allocation currently owned by a resettable
+allocator.
+*/
+ResetWith :: task(
+    allocator ResetAllocator,
+) {
+    Reset(allocator)
+}

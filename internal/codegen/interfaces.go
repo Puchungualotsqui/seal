@@ -3873,6 +3873,128 @@ func (g *Generator) emitDelegatedDataProjection(
 	), true
 }
 
+func (g *Generator) interfaceDispatcherSignature(
+	instance *InterfaceInstance,
+	req *ast.TaskSignature,
+) string {
+	if instance == nil ||
+		req == nil {
+		return ""
+	}
+
+	ret :=
+		g.interfaceRequirementReturnType(
+			instance,
+			req,
+		)
+
+	name :=
+		staticInterfaceDispatcherName(
+			instance.CName,
+			req.Name.Name,
+		)
+
+	if instance.IsDyn {
+		name =
+			dynamicInterfaceDispatcherName(
+				instance.CName,
+				req.Name.Name,
+			)
+	}
+
+	receiverType := CType{
+		Name:           instance.CName,
+		SealName:       instance.Key,
+		IsInterface:    true,
+		IsDynInterface: instance.IsDyn,
+	}
+
+	params := []string{
+		receiverType.Decl("receiver"),
+	}
+
+	for i := 1; i < len(req.Params); i++ {
+		paramType :=
+			g.interfaceRequirementParamType(
+				instance,
+				req,
+				i,
+			)
+
+		params = append(
+			params,
+			paramType.Decl(
+				fmt.Sprintf(
+					"arg%d",
+					i,
+				),
+			),
+		)
+	}
+
+	return fmt.Sprintf(
+		"static %s %s(%s)",
+		ret.Name,
+		name,
+		strings.Join(
+			params,
+			", ",
+		),
+	)
+}
+
+func (g *Generator) emitInterfaceDispatcherPrototypes() {
+	keys := make(
+		[]string,
+		0,
+		len(g.interfaceInstances),
+	)
+
+	for key := range g.interfaceInstances {
+		keys = append(
+			keys,
+			key,
+		)
+	}
+
+	sort.Strings(keys)
+
+	emitted := false
+
+	for _, key := range keys {
+		instance :=
+			g.interfaceInstances[key]
+
+		if instance == nil ||
+			instance.Decl == nil {
+			continue
+		}
+
+		for _, req := range instance.Decl.Requirements {
+			signature :=
+				g.interfaceDispatcherSignature(
+					instance,
+					req,
+				)
+
+			if signature == "" {
+				continue
+			}
+
+			g.linef(
+				"%s;",
+				signature,
+			)
+
+			emitted = true
+		}
+	}
+
+	if emitted {
+		g.line("")
+	}
+}
+
 func (g *Generator) emitDynamicInterfaceDispatchers() {
 	keys := make([]string, 0, len(g.interfaceInstances))
 
@@ -3903,53 +4025,37 @@ func (g *Generator) emitDynamicInterfaceDispatcher(
 	instance *InterfaceInstance,
 	req *ast.TaskSignature,
 ) {
-	if instance == nil || req == nil {
+	if instance == nil ||
+		req == nil {
 		return
 	}
 
-	ret := g.interfaceRequirementReturnType(
-		instance,
-		req,
-	)
-
-	name := dynamicInterfaceDispatcherName(
-		instance.CName,
-		req.Name.Name,
-	)
-
-	receiverType := CType{
-		Name:           instance.CName,
-		SealName:       instance.Key,
-		IsInterface:    true,
-		IsDynInterface: true,
-	}
-
-	params := []string{
-		receiverType.Decl("receiver"),
-	}
-
-	for i := 1; i < len(req.Params); i++ {
-		paramType := g.interfaceRequirementParamType(
+	ret :=
+		g.interfaceRequirementReturnType(
 			instance,
 			req,
-			i,
 		)
 
-		params = append(
-			params,
-			paramType.Decl(fmt.Sprintf("arg%d", i)),
+	signature :=
+		g.interfaceDispatcherSignature(
+			instance,
+			req,
 		)
+
+	if signature == "" {
+		return
 	}
 
 	g.linef(
-		"static %s %s(%s) {",
-		ret.Name,
-		name,
-		strings.Join(params, ", "),
+		"%s {",
+		signature,
 	)
 	g.indent++
 
-	fieldName := sanitizeCName(req.Name.Name)
+	fieldName :=
+		sanitizeCName(
+			req.Name.Name,
+		)
 
 	g.linef(
 		"if (receiver.vtable == NULL || receiver.vtable->%s == NULL) {",
@@ -3961,8 +4067,6 @@ func (g *Generator) emitDynamicInterfaceDispatcher(
 		`seal_panic_cstring("dynamic interface dispatch on nil or invalid vtable");`,
 	)
 
-	// seal_panic_cstring aborts, but the fallback keeps ordinary C compilers
-	// satisfied without relying on compiler-specific noreturn annotations.
 	if ret.SealName == "void" {
 		g.line("return;")
 	} else {
@@ -3975,12 +4079,17 @@ func (g *Generator) emitDynamicInterfaceDispatcher(
 	g.indent--
 	g.line("}")
 
-	callArgs := []string{"receiver.data"}
+	callArgs := []string{
+		"receiver.data",
+	}
 
 	for i := 1; i < len(req.Params); i++ {
 		callArgs = append(
 			callArgs,
-			fmt.Sprintf("arg%d", i),
+			fmt.Sprintf(
+				"arg%d",
+				i,
+			),
 		)
 	}
 
@@ -3988,14 +4097,21 @@ func (g *Generator) emitDynamicInterfaceDispatcher(
 		g.linef(
 			"receiver.vtable->%s(%s);",
 			fieldName,
-			strings.Join(callArgs, ", "),
+			strings.Join(
+				callArgs,
+				", ",
+			),
 		)
+
 		g.line("return;")
 	} else {
 		g.linef(
 			"return receiver.vtable->%s(%s);",
 			fieldName,
-			strings.Join(callArgs, ", "),
+			strings.Join(
+				callArgs,
+				", ",
+			),
 		)
 	}
 
@@ -4037,41 +4153,30 @@ func (g *Generator) emitStaticInterfaceDispatcher(
 	req *ast.TaskSignature,
 	impls []*ResolvedImplInstance,
 ) {
-	ret := g.interfaceRequirementReturnType(instance, req)
+	if instance == nil ||
+		req == nil {
+		return
+	}
 
-	name := staticInterfaceDispatcherName(
-		instance.CName,
-		req.Name.Name,
-	)
-
-	var params []string
-	params = append(
-		params,
-		CType{
-			Name:        instance.CName,
-			SealName:    instance.Key,
-			IsInterface: true,
-		}.Decl("receiver"),
-	)
-
-	for i := 1; i < len(req.Params); i++ {
-		paramType := g.interfaceRequirementParamType(
+	ret :=
+		g.interfaceRequirementReturnType(
 			instance,
 			req,
-			i,
 		)
 
-		params = append(
-			params,
-			paramType.Decl(fmt.Sprintf("arg%d", i)),
+	signature :=
+		g.interfaceDispatcherSignature(
+			instance,
+			req,
 		)
+
+	if signature == "" {
+		return
 	}
 
 	g.linef(
-		"static %s %s(%s) {",
-		ret.Name,
-		name,
-		strings.Join(params, ", "),
+		"%s {",
+		signature,
 	)
 	g.indent++
 
@@ -4079,37 +4184,55 @@ func (g *Generator) emitStaticInterfaceDispatcher(
 	g.indent++
 
 	for _, impl := range impls {
-		wrapper := interfaceWrapperName(
-			instance.CName,
-			impl.Target.SealName,
-			req.Name.Name,
-		)
+		wrapper :=
+			interfaceWrapperName(
+				instance.CName,
+				impl.Target.SealName,
+				req.Name.Name,
+			)
 
 		g.linef(
 			"case %s:",
-			interfaceImplTagName(instance, impl.Target),
+			interfaceImplTagName(
+				instance,
+				impl.Target,
+			),
 		)
 		g.indent++
 
-		var args []string
-		args = append(args, "receiver.data")
+		args := []string{
+			"receiver.data",
+		}
 
 		for i := 1; i < len(req.Params); i++ {
-			args = append(args, fmt.Sprintf("arg%d", i))
+			args = append(
+				args,
+				fmt.Sprintf(
+					"arg%d",
+					i,
+				),
+			)
 		}
 
 		if ret.SealName == "void" {
 			g.linef(
 				"%s(%s);",
 				wrapper,
-				strings.Join(args, ", "),
+				strings.Join(
+					args,
+					", ",
+				),
 			)
+
 			g.line("return;")
 		} else {
 			g.linef(
 				"return %s(%s);",
 				wrapper,
-				strings.Join(args, ", "),
+				strings.Join(
+					args,
+					", ",
+				),
 			)
 		}
 

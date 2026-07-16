@@ -498,6 +498,10 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitTaskPrototypes(file)
 	g.emitGenericTaskPrototypes()
 
+	// Inline interface implementation wrappers can call another interface
+	// requirement. Declare every dispatcher before emitting those wrappers.
+	g.emitInterfaceDispatcherPrototypes()
+
 	g.emitImplVTables()
 	g.emitDynamicInterfaceDispatchers()
 	g.emitStaticInterfaceDispatchers()

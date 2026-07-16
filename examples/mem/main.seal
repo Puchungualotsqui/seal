@@ -154,6 +154,314 @@ TestDeferredFree :: task() {
     assert(point.Y == 60)
 }
 
+TestZeroingAllocator :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    backingAllocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    backingDeallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    zeroingAllocator :=
+        mem.NewZeroingAllocator(
+            backingAllocator,
+            backingDeallocator,
+        )
+
+    allocator :=
+        cast<mem.Allocator>(
+            &zeroingAllocator,
+        )
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &zeroingAllocator,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &zeroingAllocator,
+        )
+
+    raw := mem.AllocWith(
+        allocator,
+        16,
+    )
+
+    if raw == nil {
+        panic(c"zeroing allocator allocation failed")
+    }
+
+    raw[0] = 10
+    raw[15] = 20
+
+    assert(raw[0] == 10)
+    assert(raw[15] == 20)
+
+    mem.FreeWith(
+        deallocator,
+        raw,
+    )
+
+    point := mem.NewWith<Point>(
+        zeroAllocator,
+    )
+
+    if point == nil {
+        panic(c"zeroing allocator zeroed allocation failed")
+    }
+
+    assert(point.X == 0)
+    assert(point.Y == 0)
+
+    point.X = 30
+    point.Y = 40
+
+    assert(point.X == 30)
+    assert(point.Y == 40)
+
+    mem.FreeTypeWith<Point>(
+        deallocator,
+        point,
+    )
+}
+
+TestZeroingAllocatorOverflow :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    backingAllocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    backingDeallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    zeroingAllocator :=
+        mem.NewZeroingAllocator(
+            backingAllocator,
+            backingDeallocator,
+        )
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &zeroingAllocator,
+        )
+
+    maximum := ~cast<uint>(0)
+
+    ptr := mem.AllocZeroedWith(
+        zeroAllocator,
+        maximum,
+        2,
+    )
+
+    assert(ptr == nil)
+}
+
+TestArenaAllocator :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    backingAllocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    backingDeallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    arena := mem.NewArenaAllocator(
+        backingAllocator,
+        backingDeallocator,
+    )
+
+    allocator :=
+        cast<mem.Allocator>(
+            &arena,
+        )
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &arena,
+        )
+
+    resetAllocator :=
+        cast<mem.ResetAllocator>(
+            &arena,
+        )
+
+    first := mem.AllocTypeWith<Point>(
+        allocator,
+    )
+
+    if first == nil {
+        panic(c"first arena allocation failed")
+    }
+
+    first.X = 10
+    first.Y = 20
+
+    second := mem.NewWith<Point>(
+        zeroAllocator,
+    )
+
+    if second == nil {
+        panic(c"second arena allocation failed")
+    }
+
+    assert(second.X == 0)
+    assert(second.Y == 0)
+
+    second.X = 30
+    second.Y = 40
+
+    assert(first.X == 10)
+    assert(first.Y == 20)
+    assert(second.X == 30)
+    assert(second.Y == 40)
+
+    mem.ResetWith(
+        resetAllocator,
+    )
+
+    replacement := mem.NewWith<Point>(
+        zeroAllocator,
+    )
+
+    if replacement == nil {
+        panic(c"arena allocation after reset failed")
+    }
+
+    assert(replacement.X == 0)
+    assert(replacement.Y == 0)
+
+    replacement.X = 50
+    replacement.Y = 60
+
+    assert(replacement.X == 50)
+    assert(replacement.Y == 60)
+
+    mem.ResetWith(
+        resetAllocator,
+    )
+
+    /*
+    Resetting an already empty arena must also be valid.
+    */
+    mem.ResetWith(
+        resetAllocator,
+    )
+}
+
+TestArenaDeferredReset :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    backingAllocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    backingDeallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    arena := mem.NewArenaAllocator(
+        backingAllocator,
+        backingDeallocator,
+    )
+
+    allocator :=
+        cast<mem.Allocator>(
+            &arena,
+        )
+
+    resetAllocator :=
+        cast<mem.ResetAllocator>(
+            &arena,
+        )
+
+    defer mem.ResetWith(
+        resetAllocator,
+    )
+
+    first := mem.AllocTypeWith<Point>(
+        allocator,
+    )
+
+    second := mem.AllocTypeWith<Point>(
+        allocator,
+    )
+
+    if first == nil ||
+        second == nil {
+        panic(c"deferred arena allocation failed")
+    }
+
+    first.X = 1
+    first.Y = 2
+
+    second.X = 3
+    second.Y = 4
+
+    assert(first.X == 1)
+    assert(first.Y == 2)
+    assert(second.X == 3)
+    assert(second.Y == 4)
+}
+
+TestArenaZeroedOverflow :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    backingAllocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    backingDeallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    arena := mem.NewArenaAllocator(
+        backingAllocator,
+        backingDeallocator,
+    )
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &arena,
+        )
+
+    resetAllocator :=
+        cast<mem.ResetAllocator>(
+            &arena,
+        )
+
+    maximum := ~cast<uint>(0)
+
+    ptr := mem.AllocZeroedWith(
+        zeroAllocator,
+        maximum,
+        2,
+    )
+
+    assert(ptr == nil)
+
+    mem.ResetWith(
+        resetAllocator,
+    )
+}
+
 Main :: task() {
     TestRawCAllocation()
     TestTypedCAllocation()
@@ -161,4 +469,11 @@ Main :: task() {
     TestAllocatorInterface()
     TestZeroAllocatorInterface()
     TestDeferredFree()
+
+    TestZeroingAllocator()
+    TestZeroingAllocatorOverflow()
+
+    TestArenaAllocator()
+    TestArenaDeferredReset()
+    TestArenaZeroedOverflow()
 }

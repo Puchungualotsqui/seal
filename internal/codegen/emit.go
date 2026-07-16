@@ -305,56 +305,126 @@ func (g *Generator) emitImportedStructs() {
 		return
 	}
 
-	pkgNames := make([]string, 0, len(g.packages))
-	for pkgName := range g.packages {
-		pkgNames = append(pkgNames, pkgName)
+	type importedStructEmission struct {
+		PackageName string
+		CName       string
+		Decl        *ast.StructDecl
 	}
-	sort.Strings(pkgNames)
 
-	emitted := false
+	var entries []importedStructEmission
 
-	for _, pkgName := range pkgNames {
-		pkg := g.packages[pkgName]
+	seen := map[string]bool{}
+
+	for mapKey, pkg := range g.packages {
 		if pkg == nil {
 			continue
 		}
 
-		structNames := make([]string, 0, len(pkg.Structs))
-		for name := range pkg.Structs {
-			structNames = append(structNames, name)
+		packageName := pkg.Name
+		if packageName == "" {
+			packageName = mapKey
 		}
-		sort.Strings(structNames)
 
-		for _, structName := range structNames {
-			decl := pkg.Structs[structName]
-			if decl == nil || decl.IsIntrinsic || len(decl.GenericParams) > 0 {
+		if packageName == "" {
+			continue
+		}
+
+		for structName, decl := range pkg.Structs {
+			if decl == nil ||
+				decl.IsIntrinsic ||
+				len(decl.GenericParams) > 0 {
 				continue
 			}
 
-			cName := cImportedTypeName(pkgName, structName)
+			cName := cImportedTypeName(
+				packageName,
+				structName,
+			)
 
-			g.linef("typedef struct %s {", cName)
-			g.indent++
-
-			for _, field := range decl.Fields {
-				fieldType := g.cTypeFromAstInTypeContext(pkgName, field.Type)
-				g.linef("%s;", fieldType.Decl(field.Name.Name))
+			if seen[cName] {
+				continue
 			}
 
-			g.indent--
-			g.linef("} %s;", cName)
-			g.line("")
+			seen[cName] = true
 
-			emitted = true
+			entries = append(
+				entries,
+				importedStructEmission{
+					PackageName: packageName,
+					CName:       cName,
+					Decl:        decl,
+				},
+			)
 		}
 	}
 
-	if emitted {
+	sort.Slice(
+		entries,
+		func(i int, j int) bool {
+			return entries[i].CName <
+				entries[j].CName
+		},
+	)
+
+	if len(entries) == 0 {
+		return
+	}
+
+	/*
+		Declare all imported struct typedef names before completing any
+		struct body.
+
+		This permits:
+
+			struct Node {
+				Node *Next;
+			};
+
+		and mutually recursive pointer fields.
+	*/
+	for _, entry := range entries {
+		g.linef(
+			"typedef struct %s %s;",
+			entry.CName,
+			entry.CName,
+		)
+	}
+
+	g.line("")
+
+	for _, entry := range entries {
+		g.linef(
+			"struct %s {",
+			entry.CName,
+		)
+		g.indent++
+
+		for _, field := range entry.Decl.Fields {
+			fieldType :=
+				g.cTypeFromAstInTypeContext(
+					entry.PackageName,
+					field.Type,
+				)
+
+			g.linef(
+				"%s;",
+				fieldType.Decl(
+					field.Name.Name,
+				),
+			)
+		}
+
+		g.indent--
+		g.line("};")
 		g.line("")
 	}
 }
 
-func (g *Generator) emitStructs(file *ast.File) {
+func (g *Generator) emitStructs(
+	file *ast.File,
+) {
+	var declarations []*ast.StructDecl
+
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.StructDecl)
 		if !ok {
@@ -369,20 +439,74 @@ func (g *Generator) emitStructs(file *ast.File) {
 			continue
 		}
 
-		if isInvalidCStructName(d.Name.Name) {
+		if isInvalidCStructName(
+			d.Name.Name,
+		) {
 			continue
 		}
 
-		g.linef("typedef struct %s {", d.Name.Name)
+		declarations = append(
+			declarations,
+			d,
+		)
+	}
+
+	if len(declarations) == 0 {
+		return
+	}
+
+	/*
+		Introduce every typedef before completing any struct.
+
+		The old output:
+
+			typedef struct Node {
+				Node *Next;
+			} Node;
+
+		is invalid because Node is not a typedef until after the body.
+
+		The new output is:
+
+			typedef struct Node Node;
+
+			struct Node {
+				Node *Next;
+			};
+	*/
+	for _, declaration := range declarations {
+		g.linef(
+			"typedef struct %s %s;",
+			declaration.Name.Name,
+			declaration.Name.Name,
+		)
+	}
+
+	g.line("")
+
+	for _, declaration := range declarations {
+		g.linef(
+			"struct %s {",
+			declaration.Name.Name,
+		)
 		g.indent++
 
-		for _, field := range d.Fields {
-			fieldType := g.cTypeFromAst(field.Type)
-			g.linef("%s;", fieldType.Decl(field.Name.Name))
+		for _, field := range declaration.Fields {
+			fieldType :=
+				g.cTypeFromAst(
+					field.Type,
+				)
+
+			g.linef(
+				"%s;",
+				fieldType.Decl(
+					field.Name.Name,
+				),
+			)
 		}
 
 		g.indent--
-		g.linef("} %s;", d.Name.Name)
+		g.line("};")
 		g.line("")
 	}
 }

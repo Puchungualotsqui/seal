@@ -624,9 +624,10 @@ Player :: struct {
 	appC := string(appBytes)
 
 	appChecks := []string{
-		"typedef struct types_Player {",
+		"typedef struct types_Player types_Player;",
+		"struct types_Player {",
 		"intptr_t health;",
-		"} types_Player;",
+		"};",
 		"intptr_t app_HealthOf_types_Player(types_Player target);",
 		"types_Player p = (types_Player){.health = 10};",
 		"intptr_t h = app_HealthOf_types_Player(p);",
@@ -646,7 +647,20 @@ Player :: struct {
 
 	typesC := string(typesBytes)
 
-	if !strings.Contains(typesC, "typedef struct Player {") {
-		t.Fatalf("expected types.c to contain Player definition, got:\n%s", typesC)
+	typesChecks := []string{
+		"typedef struct Player Player;",
+		"struct Player {",
+		"intptr_t health;",
+		"};",
+	}
+
+	for _, want := range typesChecks {
+		if !strings.Contains(typesC, want) {
+			t.Fatalf(
+				"expected types.c to contain %q, got:\n%s",
+				want,
+				typesC,
+			)
+		}
 	}
 }
