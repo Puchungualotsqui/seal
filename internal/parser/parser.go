@@ -1738,36 +1738,71 @@ func (p *Parser) parseStmt() ast.Stmt {
 		}
 
 	case p.match(token.KeywordReturn):
-		var values []ast.Expr
+		returnToken := p.previous()
 
-		if !p.at(token.RBrace) &&
-			!p.at(token.EOF) {
+		var values []ast.Expr
+		end := returnToken.Span.End
+
+		/*
+			A value-less return is valid before a structural statement
+			boundary:
+
+			    return
+			    }
+
+			and inside switch cases:
+
+			    case int:
+			        writeInt(value)
+			        return
+
+			    case uint:
+			        ...
+
+			Seal does not use statement terminators, so an ordinary expression
+			token following `return` must continue to be interpreted as a return
+			value.
+		*/
+		if !p.returnStatementHasNoValues() {
 			value := p.parseExpr(0)
-			if value != nil {
+
+			if value == nil {
+				return nil
+			}
+
+			values = append(
+				values,
+				value,
+			)
+
+			end = value.Span().End
+
+			for p.match(token.Comma) {
+				next := p.parseExpr(0)
+
+				if next == nil {
+					p.errorHere(
+						"expected return value after ','",
+					)
+
+					return nil
+				}
+
 				values = append(
 					values,
-					value,
+					next,
 				)
 
-				for p.match(token.Comma) {
-					next := p.parseExpr(0)
-					if next == nil {
-						break
-					}
-
-					values = append(
-						values,
-						next,
-					)
-				}
+				end = next.Span().End
 			}
 		}
 
-		end := p.previous().Span.End
-
 		return &ast.ReturnStmt{
 			Values: values,
-			Loc:    p.span(start, end),
+			Loc: p.span(
+				start,
+				end,
+			),
 		}
 
 	case p.match(token.KeywordDefer):
@@ -1910,6 +1945,19 @@ func (p *Parser) parseStmt() ast.Stmt {
 	}
 
 	return p.parseSimpleStmt()
+}
+
+func (p *Parser) returnStatementHasNoValues() bool {
+	switch p.peek().Kind {
+	case token.RBrace,
+		token.KeywordCase,
+		token.KeywordDefault,
+		token.EOF:
+		return true
+
+	default:
+		return false
+	}
 }
 
 func (p *Parser) parseForStmt(start int) ast.Stmt {
