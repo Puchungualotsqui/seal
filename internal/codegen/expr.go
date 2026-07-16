@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"seal/internal/ast"
 	"seal/internal/builtin"
+	"seal/internal/checker"
 	"seal/internal/source"
 	"seal/internal/token"
 	"strconv"
@@ -700,6 +701,226 @@ func (g *Generator) emitByteIndexExpr(e *ast.IndexExpr, leftType CType, left str
 	return "0"
 }
 
+func isShiftOperator(
+	op token.Kind,
+) bool {
+	return op == token.ShiftLeft ||
+		op == token.ShiftRight
+}
+
+func checkerIntegerCType(
+	typ *checker.Type,
+) (CType, bool) {
+	if typ == nil {
+		return CInvalid, false
+	}
+
+	switch typ.Kind {
+	case checker.TypeInt:
+		return CInt, true
+
+	case checker.TypeUint:
+		return CUint, true
+
+	case checker.TypeI8:
+		return CI8, true
+
+	case checker.TypeI16:
+		return CI16, true
+
+	case checker.TypeI32:
+		return CI32, true
+
+	case checker.TypeI64:
+		return CI64, true
+
+	case checker.TypeU8:
+		return CU8, true
+
+	case checker.TypeU16:
+		return CU16, true
+
+	case checker.TypeU32:
+		return CU32, true
+
+	case checker.TypeU64:
+		return CU64, true
+
+	case checker.TypeChar:
+		return CChar, true
+
+	case checker.TypeUntypedInt:
+		return CInt, true
+
+	default:
+		return CInvalid, false
+	}
+}
+
+func isShiftIntegerCType(
+	typ CType,
+) bool {
+	switch typ.SealName {
+	case "int",
+		"uint",
+		"i8",
+		"i16",
+		"i32",
+		"i64",
+		"u8",
+		"u16",
+		"u32",
+		"u64",
+		"char":
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (g *Generator) shiftResultCType(
+	e *ast.BinaryExpr,
+	leftType CType,
+	expected *CType,
+) CType {
+	if e == nil {
+		return leftType
+	}
+
+	semanticType := g.exprTypes[e]
+
+	if semanticType == nil {
+		return leftType
+	}
+
+	/*
+		An untyped integer shift receives its concrete representation from its
+		context:
+
+		    value u64 := 1 << 63
+		    cast<u64>(1 << 63)
+
+		The checker has already verified that the compile-time value fits that
+		contextual type.
+	*/
+	if semanticType.Kind == checker.TypeUntypedInt {
+		if expected != nil &&
+			isShiftIntegerCType(*expected) {
+			return *expected
+		}
+
+		return CInt
+	}
+
+	if converted, ok :=
+		checkerIntegerCType(
+			semanticType,
+		); ok {
+		return converted
+	}
+
+	return leftType
+}
+
+func (g *Generator) shiftLeftOperandCType(
+	e *ast.BinaryExpr,
+	leftType CType,
+	resultType CType,
+) CType {
+	if e == nil ||
+		e.Left == nil {
+		return leftType
+	}
+
+	semanticType := g.exprTypes[e.Left]
+
+	if semanticType != nil &&
+		semanticType.Kind ==
+			checker.TypeUntypedInt {
+		return resultType
+	}
+
+	return leftType
+}
+
+func (g *Generator) emitShiftBinaryExpr(
+	e *ast.BinaryExpr,
+	leftType CType,
+	rightType CType,
+	expected *CType,
+) string {
+	resultType := g.shiftResultCType(
+		e,
+		leftType,
+		expected,
+	)
+
+	if !isShiftIntegerCType(resultType) {
+		g.error(
+			e.Span(),
+			fmt.Sprintf(
+				"cannot lower shift result type %s",
+				resultType.String(),
+			),
+		)
+
+		return "0"
+	}
+
+	leftOperandType :=
+		g.shiftLeftOperandCType(
+			e,
+			leftType,
+			resultType,
+		)
+
+	var leftExpected *CType
+
+	if !isInvalidCType(leftOperandType) {
+		leftExpected = &leftOperandType
+	}
+
+	var rightExpected *CType
+
+	if !isInvalidCType(rightType) {
+		rightExpected = &rightType
+	}
+
+	left := g.emitExpr(
+		e.Left,
+		leftExpected,
+	)
+
+	right := g.emitExpr(
+		e.Right,
+		rightExpected,
+	)
+
+	/*
+		C applies integer promotions before shifting. Cast the left operand to
+		the Seal result type and cast the result back afterward.
+
+		The outer cast preserves Seal's left-operand result type for narrow
+		integers:
+
+		    u8 << int -> u8
+		    i16 >> uint -> i16
+
+		The shift remains intentionally unsafe. Runtime-negative counts,
+		out-of-range counts, signed left-shift overflow, and shifting negative
+		signed values retain the underlying C behavior.
+	*/
+	return fmt.Sprintf(
+		"((%s)(((%s)(%s)) %s (%s)))",
+		resultType.TypeName(),
+		resultType.TypeName(),
+		left,
+		g.cBinaryOp(e.Op),
+		right,
+	)
+}
+
 func (g *Generator) emitExpr(
 	expr ast.Expr,
 	expected *CType,
@@ -851,6 +1072,21 @@ func (g *Generator) emitExpr(
 		leftType, rightType :=
 			g.binaryOperandTypes(e)
 
+		/*
+			Shifts are primitive operations.
+
+			Handle them before overload resolution so they can never accidentally
+			be dispatched through an overload declaration.
+		*/
+		if isShiftOperator(e.Op) {
+			return g.emitShiftBinaryExpr(
+				e,
+				leftType,
+				rightType,
+				expected,
+			)
+		}
+
 		if value, ok :=
 			g.emitBuiltinTextBinaryExpr(
 				e,
@@ -890,6 +1126,9 @@ func (g *Generator) emitExpr(
 			}
 		}
 
+		/*
+			Seal derives != from an available == overload.
+		*/
 		if e.Op == token.NotEq &&
 			g.hasOperatorOverload("==") {
 			if candidate, ok :=
@@ -2663,7 +2902,7 @@ func (g *Generator) emitGenericIntrinsicCall(
 
 			value := g.emitExpr(
 				args[0],
-				nil,
+				&target,
 			)
 
 			return fmt.Sprintf(

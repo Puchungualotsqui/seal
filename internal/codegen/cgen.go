@@ -78,6 +78,8 @@ type Generator struct {
 	requiredExternalTypes        map[string]externalConcreteType
 	emittedRequiredExternalTypes map[string]bool
 
+	exprTypes map[ast.Expr]*checker.Type
+
 	indexResolutions map[*ast.IndexExpr]checker.IndexResolution
 	lenResolutions   map[*ast.CallExpr]checker.LenResolution
 
@@ -176,12 +178,15 @@ func NewWithPackagesAndSemanticInfo(
 	semantic checker.SemanticInfo,
 ) *Generator {
 	return &Generator{
-		diags:                         diags,
-		packageName:                   packageName,
-		packages:                      packages,
-		workspacePackages:             packages,
-		requiredExternalTypes:         map[string]externalConcreteType{},
-		emittedRequiredExternalTypes:  map[string]bool{},
+		diags:                        diags,
+		packageName:                  packageName,
+		packages:                     packages,
+		workspacePackages:            packages,
+		requiredExternalTypes:        map[string]externalConcreteType{},
+		emittedRequiredExternalTypes: map[string]bool{},
+		exprTypes: cloneExprTypes(
+			semantic.ExprTypes,
+		),
 		indexResolutions:              cloneIndexResolutions(semantic.IndexResolutions),
 		lenResolutions:                cloneLenResolutions(semantic.LenResolutions),
 		genericInstanceRequests:       NewGenericInstanceRequestSet(),
@@ -266,6 +271,25 @@ func packageInfoBySemanticName(
 	}
 
 	return nil
+}
+
+func cloneExprTypes(
+	input map[ast.Expr]*checker.Type,
+) map[ast.Expr]*checker.Type {
+	if len(input) == 0 {
+		return map[ast.Expr]*checker.Type{}
+	}
+
+	out := make(
+		map[ast.Expr]*checker.Type,
+		len(input),
+	)
+
+	for expr, typ := range input {
+		out[expr] = typ
+	}
+
+	return out
 }
 
 func cloneIndexResolutions(

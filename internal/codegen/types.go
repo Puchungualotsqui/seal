@@ -1497,6 +1497,14 @@ func (g *Generator) inferExprType(
 		left, right :=
 			g.binaryOperandTypes(e)
 
+		if isShiftOperator(e.Op) {
+			return g.shiftResultCType(
+				e,
+				left,
+				expected,
+			)
+		}
+
 		if g.hasOperatorOverload(
 			e.Op.String(),
 		) {
@@ -2312,40 +2320,64 @@ func (g *Generator) cUnaryOp(op token.Kind) string {
 	}
 }
 
-func (g *Generator) cBinaryOp(op token.Kind) string {
+func (g *Generator) cBinaryOp(
+	op token.Kind,
+) string {
 	switch op {
 	case token.Plus:
 		return "+"
+
 	case token.Minus:
 		return "-"
+
 	case token.Star:
 		return "*"
+
 	case token.Slash:
 		return "/"
+
 	case token.Percent:
 		return "%"
+
 	case token.EqEq:
 		return "=="
+
 	case token.NotEq:
 		return "!="
+
 	case token.Lt:
 		return "<"
+
 	case token.LtEq:
 		return "<="
+
 	case token.Gt:
 		return ">"
+
 	case token.GtEq:
 		return ">="
+
+	case token.ShiftLeft:
+		return "<<"
+
+	case token.ShiftRight:
+		return ">>"
+
 	case token.AndAnd:
 		return "&&"
+
 	case token.OrOr:
 		return "||"
+
 	case token.Amp:
 		return "&"
+
 	case token.Pipe:
 		return "|"
+
 	case token.Caret:
 		return "^"
+
 	default:
 		return "/*op*/"
 	}

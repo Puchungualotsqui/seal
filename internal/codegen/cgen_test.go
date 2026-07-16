@@ -7527,3 +7527,263 @@ Main :: task() {
 
 	runGeneratedC(t, out)
 }
+
+func TestGenerateShiftOperators(t *testing.T) {
+	out, reporter := generate(t, `
+Main :: task() {
+    left: u64 = 8 << 2
+    right: u64 = left >> 1
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint64_t left = ((uint64_t)(((uint64_t)(8)) << (2)));",
+	) {
+		t.Fatalf(
+			"expected primitive left-shift expression, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint64_t right = ((uint64_t)(((uint64_t)(left)) >> (1)));",
+	) {
+		t.Fatalf(
+			"expected primitive right-shift expression, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+}
+
+func TestGenerateNarrowShiftTruncatesIntermediateResult(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    value: u8 = 255
+    shifted := value << 1
+    restored := shifted >> 1
+
+    assert(shifted == 254)
+    assert(restored == 127)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint8_t shifted = ((uint8_t)(((uint8_t)(value)) << (1)));",
+	) {
+		t.Fatalf(
+			"expected u8 left shift to cast its result back to u8, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint8_t restored = ((uint8_t)(((uint8_t)(shifted)) >> (1)));",
+	) {
+		t.Fatalf(
+			"expected u8 right shift to preserve the left operand type, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateUntypedShiftUsesContextualUnsignedType(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    highBit: u64 = 1 << 63
+    restored := highBit >> 63
+
+    assert(restored == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint64_t highBit = ((uint64_t)(((uint64_t)(1)) << (63)));",
+	) {
+		t.Fatalf(
+			"expected untyped shift to use contextual u64 representation, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint64_t restored = ((uint64_t)(((uint64_t)(highBit)) >> (63)));",
+	) {
+		t.Fatalf(
+			"expected u64 right shift, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateShiftWithRuntimeCount(t *testing.T) {
+	out, reporter := generate(t, `
+ShiftLeft :: task(value u32, count uint) u32 {
+    return value << count
+}
+
+ShiftRight :: task(value u32, count uint) u32 {
+    return value >> count
+}
+
+Main :: task() {
+    count: uint = 4
+
+    left := ShiftLeft(3, count)
+    right := ShiftRight(left, count)
+
+    assert(left == 48)
+    assert(right == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"((uint32_t)(((uint32_t)(value)) << (count)))",
+	) {
+		t.Fatalf(
+			"expected runtime left shift to lower directly to C, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"((uint32_t)(((uint32_t)(value)) >> (count)))",
+	) {
+		t.Fatalf(
+			"expected runtime right shift to lower directly to C, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(out, "count &") ||
+		strings.Contains(out, "count %") {
+		t.Fatalf(
+			"expected unsafe runtime shift without count masking, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateShiftResultUsesLeftOperandType(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    value: u16 = 3
+    count: u64 = 5
+
+    shifted := value << count
+
+    assert(shifted == 96)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"uint16_t shifted = ((uint16_t)(((uint16_t)(value)) << (count)));",
+	) {
+		t.Fatalf(
+			"expected shift result to retain the u16 left operand type, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"uint64_t shifted",
+	) {
+		t.Fatalf(
+			"shift count type must not determine the result type, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateCastProvidesContextToUntypedShift(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    highBit := cast<u64>(1 << 63)
+    restored := highBit >> 63
+
+    assert(restored == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"((uint64_t)(((uint64_t)(1)) << (63)))",
+	) {
+		t.Fatalf(
+			"expected cast target to contextualize the untyped shift as u64, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+	runGeneratedC(t, out)
+}
