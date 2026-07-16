@@ -40,6 +40,10 @@ static bool seal_strconv_is_special_float_text(
     const char *text,
     size_t length
 ) {
+    if (length == 0) {
+        return false;
+    }
+
     size_t offset =
         text[0] == '+' ||
         text[0] == '-';
@@ -307,7 +311,8 @@ static bool seal_strconv_parse_f32_internal(
     size_t length =
         (size_t)input.len;
 
-    if (length == 0 ||
+    if (output == NULL ||
+        length == 0 ||
         memchr(
             input.data,
             '\0',
@@ -382,7 +387,8 @@ static bool seal_strconv_parse_f64_internal(
     size_t length =
         (size_t)input.len;
 
-    if (length == 0 ||
+    if (output == NULL ||
+        length == 0 ||
         memchr(
             input.data,
             '\0',
@@ -456,12 +462,143 @@ static bool seal_strconv_parse_f64_internal(
 TinyCC's Windows runtime does not provide Microsoft's locale-specific
 floating-point functions such as _strtof_l and _strtod_l.
 
-This fallback temporarily changes the process-wide numeric locale to "C".
-It restores the previous locale before returning.
+For ordinary numbers, this fallback temporarily changes the process-wide
+numeric locale to "C" and uses standard strtof and strtod.
 
-Because setlocale changes process-global state, this branch is not safe when
-multiple threads concurrently modify or depend on LC_NUMERIC.
+TinyCC's Windows runtime may also reject "nan" and "inf", so those values
+are constructed directly from their IEEE-754 representations.
+
+Because setlocale changes process-global state, ordinary numeric parsing
+and formatting in this branch are not safe when multiple threads
+concurrently modify or depend on LC_NUMERIC.
 */
+
+typedef enum sealStrconvSpecialFloat {
+    SEAL_STRCONV_SPECIAL_NONE,
+    SEAL_STRCONV_SPECIAL_POSITIVE_NAN,
+    SEAL_STRCONV_SPECIAL_NEGATIVE_NAN,
+    SEAL_STRCONV_SPECIAL_POSITIVE_INFINITY,
+    SEAL_STRCONV_SPECIAL_NEGATIVE_INFINITY
+} sealStrconvSpecialFloat;
+
+static sealStrconvSpecialFloat
+seal_strconv_classify_special_float(
+    const char *text,
+    size_t length
+) {
+    if (length == 0) {
+        return SEAL_STRCONV_SPECIAL_NONE;
+    }
+
+    bool negative =
+        text[0] == '-';
+
+    size_t offset =
+        text[0] == '+' ||
+        text[0] == '-';
+
+    const char *unsigned_text =
+        text + offset;
+
+    size_t unsigned_length =
+        length - offset;
+
+    if (seal_strconv_equal_text(
+            unsigned_text,
+            unsigned_length,
+            "nan"
+        )) {
+        return negative
+            ? SEAL_STRCONV_SPECIAL_NEGATIVE_NAN
+            : SEAL_STRCONV_SPECIAL_POSITIVE_NAN;
+    }
+
+    if (seal_strconv_equal_text(
+            unsigned_text,
+            unsigned_length,
+            "inf"
+        )) {
+        return negative
+            ? SEAL_STRCONV_SPECIAL_NEGATIVE_INFINITY
+            : SEAL_STRCONV_SPECIAL_POSITIVE_INFINITY;
+    }
+
+    return SEAL_STRCONV_SPECIAL_NONE;
+}
+
+static float seal_strconv_special_f32(
+    sealStrconvSpecialFloat special
+) {
+    union {
+        uint32_t bits;
+        float value;
+    } result;
+
+    switch (special) {
+    case SEAL_STRCONV_SPECIAL_POSITIVE_NAN:
+        result.bits =
+            UINT32_C(0x7fc00000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_NEGATIVE_NAN:
+        result.bits =
+            UINT32_C(0xffc00000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_POSITIVE_INFINITY:
+        result.bits =
+            UINT32_C(0x7f800000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_NEGATIVE_INFINITY:
+        result.bits =
+            UINT32_C(0xff800000);
+        break;
+
+    default:
+        result.bits = 0;
+        break;
+    }
+
+    return result.value;
+}
+
+static double seal_strconv_special_f64(
+    sealStrconvSpecialFloat special
+) {
+    union {
+        uint64_t bits;
+        double value;
+    } result;
+
+    switch (special) {
+    case SEAL_STRCONV_SPECIAL_POSITIVE_NAN:
+        result.bits =
+            UINT64_C(0x7ff8000000000000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_NEGATIVE_NAN:
+        result.bits =
+            UINT64_C(0xfff8000000000000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_POSITIVE_INFINITY:
+        result.bits =
+            UINT64_C(0x7ff0000000000000);
+        break;
+
+    case SEAL_STRCONV_SPECIAL_NEGATIVE_INFINITY:
+        result.bits =
+            UINT64_C(0xfff0000000000000);
+        break;
+
+    default:
+        result.bits = 0;
+        break;
+    }
+
+    return result.value;
+}
 
 static char *seal_strconv_copy_cstring(
     const char *value
@@ -714,6 +851,24 @@ static bool seal_strconv_parse_f32_internal(
         return false;
     }
 
+    sealStrconvSpecialFloat special =
+        seal_strconv_classify_special_float(
+            text,
+            length
+        );
+
+    if (special !=
+        SEAL_STRCONV_SPECIAL_NONE) {
+        *output =
+            seal_strconv_special_f32(
+                special
+            );
+
+        free(text);
+
+        return true;
+    }
+
     char *saved =
         seal_strconv_enter_c_numeric_locale();
 
@@ -739,17 +894,11 @@ static bool seal_strconv_parse_f32_internal(
             saved
         );
 
-    bool special =
-        seal_strconv_is_special_float_text(
-            text,
-            length
-        );
-
     bool valid =
         restored &&
         parse_errno != ERANGE &&
         end == text + length &&
-        (special || isfinite(parsed));
+        isfinite(parsed);
 
     free(text);
 
@@ -794,6 +943,24 @@ static bool seal_strconv_parse_f64_internal(
         return false;
     }
 
+    sealStrconvSpecialFloat special =
+        seal_strconv_classify_special_float(
+            text,
+            length
+        );
+
+    if (special !=
+        SEAL_STRCONV_SPECIAL_NONE) {
+        *output =
+            seal_strconv_special_f64(
+                special
+            );
+
+        free(text);
+
+        return true;
+    }
+
     char *saved =
         seal_strconv_enter_c_numeric_locale();
 
@@ -819,17 +986,11 @@ static bool seal_strconv_parse_f64_internal(
             saved
         );
 
-    bool special =
-        seal_strconv_is_special_float_text(
-            text,
-            length
-        );
-
     bool valid =
         restored &&
         parse_errno != ERANGE &&
         end == text + length &&
-        (special || isfinite(parsed));
+        isfinite(parsed);
 
     free(text);
 

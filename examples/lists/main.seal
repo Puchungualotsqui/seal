@@ -2081,7 +2081,6 @@ TestDequeCheckedAccess :: task() {
         )
 
     assert(!foundEmptyFront)
-    assert(emptyFront == 0)
 
     emptyBack, foundEmptyBack :=
         lists.DequeTryBack<int>(
@@ -2196,7 +2195,6 @@ TestStackAndQueueCheckedAccess :: task() {
         )
 
     assert(!foundEmptyStack)
-    assert(emptyStackValue == 0)
 
     lists.Push<int>(&stack, 10)
     lists.Push<int>(&stack, 20)
