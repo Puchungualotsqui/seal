@@ -299,6 +299,46 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			typeName :=
 				typ.Parts[len(typ.Parts)-1].Name
 
+			/*
+				A type can be explicitly qualified with the package currently being
+				generated:
+
+				    io.ByteSpan
+
+				When generating io.c, this is the local C type ByteSpan, not the
+				imported type io_ByteSpan.
+
+				This situation occurs when an implementation declared in another
+				package is materialized into the interface-owning package.
+			*/
+			if pkgName == g.packageName {
+				if iface := g.interfaces[typeName]; iface != nil {
+					instance :=
+						g.registerInterfaceInstance(
+							g.packageName,
+							typeName,
+							iface,
+							nil,
+						)
+
+					if instance == nil {
+						return CInvalid
+					}
+
+					return CType{
+						Name:           instance.CName,
+						SealName:       instance.Key,
+						IsInterface:    true,
+						IsDynInterface: instance.IsDyn,
+					}
+				}
+
+				return CType{
+					Name:     typeName,
+					SealName: typeName,
+				}
+			}
+
 			if pkg :=
 				g.typePackageInfo(pkgName); pkg != nil &&
 				g.packageHasType(pkg, typeName) {
@@ -487,15 +527,20 @@ func (g *Generator) cTypeFromGenericType(
 		packageTypeNameFromAst(
 			typ.Base,
 		); qualified {
-		pkg := g.typePackageInfo(
-			packageName,
-		)
+		/*
+			As with non-generic named types, a type qualified with the current
+			package name is still a local type.
 
-		if pkg != nil {
-			if iface := pkg.Interfaces[typeName]; iface != nil {
+			    io.Buffer<u8>
+
+			must use the local generic instance when generating io.c rather than
+			registering an imported io_Buffer_u8 instance.
+		*/
+		if packageName == g.packageName {
+			if iface := g.interfaces[typeName]; iface != nil {
 				instance :=
 					g.registerInterfaceInstance(
-						packageName,
+						g.packageName,
 						typeName,
 						iface,
 						args,
@@ -513,12 +558,10 @@ func (g *Generator) cTypeFromGenericType(
 				}
 			}
 
-			if decl := pkg.Structs[typeName]; decl != nil &&
+			if decl := g.structs[typeName]; decl != nil &&
 				len(decl.GenericParams) > 0 {
 				name :=
-					g.registerImportedGenericStructInstance(
-						packageName,
-						typeName,
+					g.registerGenericStructInstance(
 						decl,
 						args,
 					)
@@ -526,6 +569,49 @@ func (g *Generator) cTypeFromGenericType(
 				return CType{
 					Name:     name,
 					SealName: name,
+				}
+			}
+		} else {
+			pkg := g.typePackageInfo(
+				packageName,
+			)
+
+			if pkg != nil {
+				if iface := pkg.Interfaces[typeName]; iface != nil {
+					instance :=
+						g.registerInterfaceInstance(
+							packageName,
+							typeName,
+							iface,
+							args,
+						)
+
+					if instance == nil {
+						return CInvalid
+					}
+
+					return CType{
+						Name:           instance.CName,
+						SealName:       instance.Key,
+						IsInterface:    true,
+						IsDynInterface: instance.IsDyn,
+					}
+				}
+
+				if decl := pkg.Structs[typeName]; decl != nil &&
+					len(decl.GenericParams) > 0 {
+					name :=
+						g.registerImportedGenericStructInstance(
+							packageName,
+							typeName,
+							decl,
+							args,
+						)
+
+					return CType{
+						Name:     name,
+						SealName: name,
+					}
 				}
 			}
 		}
