@@ -73,8 +73,10 @@ ByteSpanFrom :: task(
         }, true
     }
 
+    offset_int := cast<int>(offset)
+
     data := cast<rawptr>(
-        &value.Data[offset],
+        &value.Data[offset_int],
     )
 
     return ByteSpan{
