@@ -1,17 +1,40 @@
 /*
 Print writes format to standard output.
 
-A single '%' consumes and writes the next argument.
+The supported format directives are:
 
-Two consecutive percent signs, '%%', write one literal percent sign and
-consume no argument.
+    %v
+        Consumes and writes the next argument.
+
+    %%
+        Writes one literal percent sign and consumes no argument.
+
+Examples:
+
+    Print(
+        "Name: %v",
+        name,
+    )
+
+    Print(
+        "Adjacent: %v%v%v",
+        first,
+        second,
+        third,
+    )
+
+    Print(
+        "Progress: %v%%",
+        progress,
+    )
 
 The format string is traversed by Unicode-scalar index. Therefore
 non-ASCII format text is handled correctly.
 
 Print panics when:
 
-    - a '%' placeholder has no corresponding argument;
+    - a format directive is incomplete or invalid;
+    - a %v directive has no corresponding argument;
     - arguments remain unused after processing the format string;
     - an argument contains an unsupported `any` runtime type.
 */
@@ -43,8 +66,15 @@ Print :: task(
 
         nextIndex := formatIndex + 1
 
-        if nextIndex < formatLength &&
-            format[nextIndex] == '%' {
+        if nextIndex >= formatLength {
+            panic(
+                "fmt.Print: incomplete format directive",
+            )
+        }
+
+        directive := format[nextIndex]
+
+        if directive == '%' {
             _WriteChar('%')
 
             formatIndex += 2
@@ -52,8 +82,16 @@ Print :: task(
             continue
         }
 
+        if directive != 'v' {
+            panic(
+                "fmt.Print: invalid format directive",
+            )
+        }
+
         if argumentIndex >= argumentCount {
-            panic("fmt.Print: missing argument")
+            panic(
+                "fmt.Print: missing argument",
+            )
         }
 
         _WriteAny(
@@ -61,11 +99,13 @@ Print :: task(
         )
 
         argumentIndex += 1
-        formatIndex += 1
+        formatIndex += 2
     }
 
     if argumentIndex < argumentCount {
-        panic("fmt.Print: unused argument")
+        panic(
+            "fmt.Print: unused argument",
+        )
     }
 }
 
@@ -86,9 +126,6 @@ Println :: task(
 
 /*
 Printf is an alias of Print.
-
-It is retained as part of the public API for callers that prefer an
-explicit formatted-output name.
 */
 Printf :: task(
     format string,

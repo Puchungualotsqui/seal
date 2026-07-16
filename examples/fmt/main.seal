@@ -27,74 +27,79 @@ TestPrimitiveOutput :: task() {
     )
 
     fmt.Println(
-        "int: %",
+        "int: %v",
         42,
     )
 
     fmt.Println(
-        "negative int: %",
+        "negative int: %v",
         -42,
     )
 
     positive: uint = 123
 
     fmt.Println(
-        "uint: %",
+        "uint: %v",
         positive,
     )
 
     float32: f32 = 3.5
 
     fmt.Println(
-        "f32: %",
+        "f32: %v",
         float32,
     )
 
     float64: f64 = 123.456
 
     fmt.Println(
-        "f64: %",
+        "f64: %v",
         float64,
     )
 
     fmt.Println(
-        "bool true: %",
+        "bool true: %v",
         true,
     )
 
     fmt.Println(
-        "bool false: %",
+        "bool false: %v",
         false,
     )
 
     fmt.Println(
-        "char ASCII: %",
+        "char ASCII: %v",
         'A',
     )
 
     fmt.Println(
-        "char Unicode: %",
+        "char Unicode: %v",
         'ñ',
     )
 
     fmt.Println(
-        "char emoji: %",
+        "char emoji: %v",
         '😀',
     )
 
     fmt.Println(
-        "string: %",
+        "string: %v",
         "Seal language",
     )
 
     fmt.Println(
-        "Unicode string: %",
+        "Unicode string: %v",
         "mañana 世界 😀",
     )
 
     fmt.Println(
-        "cstring: %",
+        "cstring: %v",
         c"C string",
+    )
+
+    fmt.Println(
+        "Unicode cstring: %v",
+        c"mañana 世界 😀",
     )
 
     fmt.Println()
@@ -109,27 +114,27 @@ TestMultipleArguments :: task() {
     )
 
     fmt.Println(
-        "Name: %, age: %, active: %",
+        "Name: %v, age: %v, active: %v",
         "David",
         30,
         true,
     )
 
     fmt.Println(
-        "% + % = %",
+        "%v + %v = %v",
         10,
         20,
         30,
     )
 
     fmt.Println(
-        "Coordinates: (%, %)",
+        "Coordinates: (%v, %v)",
         -15,
         42,
     )
 
     fmt.Println(
-        "Mixed: % | % | % | % | %",
+        "Mixed: %v | %v | %v | %v | %v",
         "Seal",
         100,
         3.5,
@@ -141,61 +146,45 @@ TestMultipleArguments :: task() {
 }
 
 /*
-TestAdjacentPlaceholders verifies that placeholders do not require
-separator characters between them.
+TestFormatSyntax verifies placeholders, adjacent placeholders, and
+literal percent signs.
 */
-TestAdjacentPlaceholders :: task() {
+TestFormatSyntax :: task() {
     fmt.Println(
-        "=== Adjacent placeholders ===",
+        "=== Format syntax ===",
     )
 
     fmt.Println(
-        "%%%",
+        "literal percent: 100%%",
+    )
+
+    fmt.Println(
+        "percent before value: %%%v",
         "A",
     )
 
     fmt.Println(
-        "Adjacent values: %%%",
+        "value before percent: %v%%",
+        50,
+    )
+
+    fmt.Println(
+        "adjacent values: %v%v%v",
         "A",
         "B",
         "C",
     )
 
     fmt.Println(
-        "[%][%][%]",
+        "wrapped values: [%v][%v][%v]",
         1,
         2,
         3,
     )
 
-    fmt.Println()
-}
-
-/*
-TestPercentEscaping verifies that %% writes one literal percent sign
-without consuming an argument.
-*/
-TestPercentEscaping :: task() {
     fmt.Println(
-        "=== Percent escaping ===",
-    )
-
-    fmt.Println(
-        "100%% complete",
-    )
-
-    fmt.Println(
-        "Progress: %%%%",
-        50,
-    )
-
-    fmt.Println(
-        "Literal percent before value: %% %",
-        42,
-    )
-
-    fmt.Println(
-        "Value before literal percent: %%%%",
+        "mixed: %% %v %% %v%%",
+        "first",
         75,
     )
 
@@ -212,27 +201,27 @@ TestUnicodeFormatStrings :: task() {
     )
 
     fmt.Println(
-        "mañana: %",
+        "mañana: %v",
         "sí",
     )
 
     fmt.Println(
-        "世界: %",
+        "世界: %v",
         "Seal",
     )
 
     fmt.Println(
-        "😀 valor: %",
+        "😀 valor: %v",
         123,
     )
 
     fmt.Println(
-        "ñ😀界 % ñ😀界",
+        "ñ😀界 %v ñ😀界",
         "centro",
     )
 
     fmt.Println(
-        "Unicode values: %, %, %",
+        "Unicode values: %v, %v, %v",
         "mañana",
         "世界",
         '😀',
@@ -242,22 +231,22 @@ TestUnicodeFormatStrings :: task() {
 }
 
 /*
-TestEmptyStrings verifies empty format text and empty values.
+TestEmptyValues verifies empty format text and empty printed values.
 */
-TestEmptyStrings :: task() {
+TestEmptyValues :: task() {
     fmt.Println(
-        "=== Empty strings ===",
+        "=== Empty values ===",
     )
 
     fmt.Print("")
 
     fmt.Println(
-        "Empty string value: >%<",
+        "Empty string value: >%v<",
         "",
     )
 
     fmt.Println(
-        "Empty cstring value: >%<",
+        "Empty cstring value: >%v<",
         c"",
     )
 
@@ -265,15 +254,15 @@ TestEmptyStrings :: task() {
 }
 
 /*
-TestPrintFunctions exercises all four public output entry points.
+TestPublicFunctions exercises all four public output entry points.
 */
-TestPrintFunctions :: task() {
+TestPublicFunctions :: task() {
     fmt.Println(
-        "=== Public print functions ===",
+        "=== Public functions ===",
     )
 
     fmt.Print(
-        "Print: %",
+        "Print: %v",
         "no automatic newline",
     )
 
@@ -282,12 +271,12 @@ TestPrintFunctions :: task() {
     )
 
     fmt.Println(
-        "Println: %",
+        "Println: %v",
         "automatic newline",
     )
 
     fmt.Printf(
-        "Printf: %",
+        "Printf: %v",
         "no automatic newline",
     )
 
@@ -296,7 +285,7 @@ TestPrintFunctions :: task() {
     )
 
     fmt.Printfl(
-        "Printfl: %",
+        "Printfl: %v",
         "automatic newline",
     )
 
@@ -304,11 +293,12 @@ TestPrintFunctions :: task() {
 }
 
 /*
-TestDefaultPrintln verifies the default empty format argument.
+TestDefaultArguments verifies the default empty format argument of
+Println and Printfl.
 */
-TestDefaultPrintln :: task() {
+TestDefaultArguments :: task() {
     fmt.Println(
-        "=== Default newline functions ===",
+        "=== Default arguments ===",
     )
 
     fmt.Print(
@@ -329,13 +319,11 @@ TestDefaultPrintln :: task() {
 /*
 TestRawPointer verifies raw pointer formatting.
 
-The exact textual address is platform-dependent, so this test is
-intended for execution coverage rather than comparison with a fixed
-string.
+The exact textual address is platform-dependent.
 */
 TestRawPointer :: task() {
     fmt.Println(
-        "=== Raw pointer ===",
+        "=== Raw pointers ===",
     )
 
     value := 42
@@ -345,12 +333,12 @@ TestRawPointer :: task() {
     )
 
     fmt.Println(
-        "non-nil pointer: %",
+        "non-nil pointer: %v",
         pointer,
     )
 
     fmt.Println(
-        "nil pointer: %",
+        "nil pointer: %v",
         cast<rawptr>(nil),
     )
 
@@ -358,10 +346,9 @@ TestRawPointer :: task() {
 }
 
 /*
-TestNumericBoundaries exercises representative zero, negative, and
-large values.
+TestNumericValues exercises representative numeric values.
 */
-TestNumericBoundaries :: task() {
+TestNumericValues :: task() {
     fmt.Println(
         "=== Numeric values ===",
     )
@@ -371,27 +358,27 @@ TestNumericBoundaries :: task() {
     zeroUint: uint = 0
 
     fmt.Println(
-        "zero int: %",
+        "zero int: %v",
         zeroInt,
     )
 
     fmt.Println(
-        "negative int: %",
+        "negative int: %v",
         negativeInt,
     )
 
     fmt.Println(
-        "zero uint: %",
+        "zero uint: %v",
         zeroUint,
     )
 
     fmt.Println(
-        "f32 zero: %",
+        "f32 zero: %v",
         cast<f32>(0),
     )
 
     fmt.Println(
-        "f64 negative: %",
+        "f64 negative: %v",
         cast<f64>(-123.75),
     )
 
@@ -401,8 +388,6 @@ TestNumericBoundaries :: task() {
 /*
 TestStringable exercises explicit formatting through the open
 strings.Stringable dynamic interface.
-
-This path requires no fmt-specific compiler magic.
 */
 TestStringable :: task() {
     fmt.Println(
@@ -440,11 +425,11 @@ TestStringable :: task() {
 }
 
 /*
-TestFormattingExamples combines the package features in realistic output.
+TestFormattingExamples combines package features in realistic output.
 */
 TestFormattingExamples :: task() {
     fmt.Println(
-        "=== Realistic formatting examples ===",
+        "=== Formatting examples ===",
     )
 
     name := "David"
@@ -453,28 +438,33 @@ TestFormattingExamples :: task() {
     testsPassed: uint = 42
 
     fmt.Println(
-        "Hello, %.",
+        "Hello, %v.",
         name,
     )
 
     fmt.Println(
-        "% version %",
+        "%v version %v",
         language,
         version,
     )
 
     fmt.Println(
-        "Tests passed: %",
+        "Tests passed: %v",
         testsPassed,
     )
 
     fmt.Println(
-        "Success: %",
+        "Success: %v",
         true,
     )
 
     fmt.Println(
         "Progress: 100%%",
+    )
+
+    fmt.Println(
+        "Downloaded: %v%%",
+        75,
     )
 
     fmt.Println(
@@ -487,15 +477,12 @@ TestFormattingExamples :: task() {
 /*
 These tests intentionally panic.
 
-They are not called from Main because a panic terminates execution and
-would prevent the other fmt tests from running.
-
-Call each one individually when testing the corresponding failure mode.
+They are not called from Main because a panic terminates execution.
 */
 
 TestMissingArgumentPanic :: task() {
     fmt.Print(
-        "Missing value: %",
+        "Missing value: %v",
     )
 }
 
@@ -503,6 +490,18 @@ TestUnusedArgumentPanic :: task() {
     fmt.Print(
         "No placeholder",
         42,
+    )
+}
+
+TestIncompleteDirectivePanic :: task() {
+    fmt.Print(
+        "Incomplete: %",
+    )
+}
+
+TestInvalidDirectivePanic :: task() {
+    fmt.Print(
+        "Invalid: %x",
     )
 }
 
@@ -523,14 +522,13 @@ Main :: task() {
 
     TestPrimitiveOutput()
     TestMultipleArguments()
-    TestAdjacentPlaceholders()
-    TestPercentEscaping()
+    TestFormatSyntax()
     TestUnicodeFormatStrings()
-    TestEmptyStrings()
-    TestPrintFunctions()
-    TestDefaultPrintln()
+    TestEmptyValues()
+    TestPublicFunctions()
+    TestDefaultArguments()
     TestRawPointer()
-    TestNumericBoundaries()
+    TestNumericValues()
     TestStringable()
     TestFormattingExamples()
 
