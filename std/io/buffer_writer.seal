@@ -1,0 +1,308 @@
+/*
+BufferWriter is a growing in-memory writer.
+
+It owns its byte allocation but does not own its backing allocator or
+deallocator.
+
+The backing allocator and deallocator must refer to compatible allocator
+state.
+
+The span returned by BufferWriterBytes remains valid only until:
+
+    the writer grows;
+    the writer is closed; or
+    the backing allocation is otherwise released.
+
+Source memory passed to Write must not alias the writer's current
+allocation.
+*/
+BufferWriter :: struct {
+    BackingAllocator mem.Allocator
+    BackingDeallocator mem.Deallocator
+
+    Data rawptr
+    Length uint
+    Capacity uint
+
+    Closed bool
+}
+
+NewBufferWriter :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) BufferWriter {
+    return BufferWriter{
+        BackingAllocator = allocator,
+        BackingDeallocator = deallocator,
+        Data = nil,
+        Length = 0,
+        Capacity = 0,
+        Closed = false,
+    }
+}
+
+/*
+NewBufferWriterWithCapacity creates a writer with reserved capacity.
+
+The boolean result is false when the initial allocation fails.
+*/
+NewBufferWriterWithCapacity :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    initialCapacity uint,
+) (BufferWriter, bool) {
+    writer :=
+        NewBufferWriter(
+            allocator,
+            deallocator,
+        )
+
+    if initialCapacity == 0 {
+        return writer, true
+    }
+
+    data :=
+        mem.AllocWith(
+            allocator,
+            initialCapacity,
+        )
+
+    if data == nil {
+        return writer, false
+    }
+
+    writer.Data = data
+    writer.Capacity =
+        initialCapacity
+
+    return writer, true
+}
+
+_BufferWriterRequiredCapacity :: task(
+    currentLength uint,
+    additionalLength uint,
+) (uint, bool) {
+    maximum := ~cast<uint>(0)
+
+    if currentLength >
+        maximum -
+        additionalLength {
+        return 0, false
+    }
+
+    return currentLength +
+        additionalLength,
+        true
+}
+
+_BufferWriterEnsureCapacity :: task(
+    self *BufferWriter,
+    requiredCapacity uint,
+) bool {
+    if self.Closed {
+        return false
+    }
+
+    if requiredCapacity <=
+        self.Capacity {
+        return true
+    }
+
+    newCapacity :=
+        self.Capacity
+
+    if newCapacity == 0 {
+        newCapacity = 64
+    }
+
+    maximum := ~cast<uint>(0)
+
+    for newCapacity <
+        requiredCapacity {
+        if newCapacity >
+            maximum / 2 {
+            newCapacity =
+                requiredCapacity
+
+            break
+        }
+
+        newCapacity =
+            newCapacity *
+            2
+    }
+
+    newData :=
+        mem.AllocWith(
+            self.BackingAllocator,
+            newCapacity,
+        )
+
+    if newData == nil {
+        return false
+    }
+
+    if self.Length > 0 {
+        mem.MemmoveC(
+            newData,
+            self.Data,
+            self.Length,
+        )
+    }
+
+    if self.Data != nil {
+        mem.FreeWith(
+            self.BackingDeallocator,
+            self.Data,
+        )
+    }
+
+    self.Data = newData
+    self.Capacity = newCapacity
+
+    return true
+}
+
+/*
+BufferWriterBytes returns the bytes currently stored in the writer.
+*/
+BufferWriterBytes :: task(
+    self *BufferWriter,
+) ByteSpan {
+    if self.Closed {
+        return EmptyByteSpan()
+    }
+
+    return ByteSpan{
+        Data = self.Data,
+        Length = self.Length,
+    }
+}
+
+/*
+BufferWriterCapacity returns the current allocation capacity.
+*/
+BufferWriterCapacity :: task(
+    self *BufferWriter,
+) uint {
+    if self.Closed {
+        return 0
+    }
+
+    return self.Capacity
+}
+
+/*
+ResetBufferWriter discards the current contents while retaining capacity.
+*/
+ResetBufferWriter :: task(
+    self *BufferWriter,
+) bool {
+    if self.Closed {
+        return false
+    }
+
+    self.Length = 0
+
+    return true
+}
+
+Writer :: impl BufferWriter {
+    Write :: task(
+        self *BufferWriter,
+        source ByteSpan,
+    ) (uint, WriteStatus) {
+        if self.Closed ||
+            !ByteSpanIsValid(source) {
+            return 0, .Failed
+        }
+
+        if source.Length == 0 {
+            return 0, .Data
+        }
+
+        requiredCapacity : uint
+        valid : bool
+        requiredCapacity, valid =
+            _BufferWriterRequiredCapacity(
+                self.Length,
+                source.Length,
+            )
+
+        if !valid {
+            return 0, .Failed
+        }
+
+        if !_BufferWriterEnsureCapacity(
+                self,
+                requiredCapacity,
+            ) {
+            return 0, .Failed
+        }
+
+        storage := ByteSpan{
+            Data = self.Data,
+            Length = self.Capacity,
+        }
+
+        destination : ByteSpan
+        destination, valid =
+            ByteSpanRange(
+                storage,
+                self.Length,
+                source.Length,
+            )
+
+        if !valid {
+            return 0, .Failed
+        }
+
+        copied :=
+            CopyByteSpan(
+                destination,
+                source,
+            )
+
+        if copied != source.Length {
+            return 0, .Failed
+        }
+
+        self.Length =
+            self.Length +
+            copied
+
+        return copied, .Data
+    }
+}
+
+Flusher :: impl BufferWriter {
+    Flush :: task(
+        self *BufferWriter,
+    ) bool {
+        return !self.Closed
+    }
+}
+
+Closer :: impl BufferWriter {
+    Close :: task(
+        self *BufferWriter,
+    ) bool {
+        if self.Closed {
+            return true
+        }
+
+        if self.Data != nil {
+            mem.FreeWith(
+                self.BackingDeallocator,
+                self.Data,
+            )
+        }
+
+        self.Data = nil
+        self.Length = 0
+        self.Capacity = 0
+        self.Closed = true
+
+        return true
+    }
+}

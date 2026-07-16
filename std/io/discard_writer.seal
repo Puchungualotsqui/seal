@@ -1,0 +1,33 @@
+/*
+DiscardWriter accepts and discards every valid byte sequence.
+*/
+DiscardWriter :: struct {
+    _unused u8
+}
+
+NewDiscardWriter :: task() DiscardWriter {
+    return DiscardWriter{
+        _unused = 0,
+    }
+}
+
+Writer :: impl DiscardWriter {
+    Write :: task(
+        self *DiscardWriter,
+        source ByteSpan,
+    ) (uint, WriteStatus) {
+        if !ByteSpanIsValid(source) {
+            return 0, .Failed
+        }
+
+        return source.Length, .Data
+    }
+}
+
+Flusher :: impl DiscardWriter {
+    Flush :: task(
+        self *DiscardWriter,
+    ) bool {
+        return true
+    }
+}

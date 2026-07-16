@@ -780,6 +780,24 @@ func (s *MultiVarDeclStmt) Span() source.Span {
 	return s.Loc
 }
 
+// MultiAssignStmt assigns the results of one multi-result task call to
+// existing variables:
+//
+//	value, ok = Read()
+//
+// Unlike MultiVarDeclStmt, this statement does not introduce new symbols.
+type MultiAssignStmt struct {
+	Names []Ident
+	Value Expr
+	Loc   source.Span
+}
+
+func (*MultiAssignStmt) stmtNode() {}
+
+func (s *MultiAssignStmt) Span() source.Span {
+	return s.Loc
+}
+
 type IfStmt struct {
 	Cond Expr
 	Then *BlockStmt

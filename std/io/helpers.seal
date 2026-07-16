@@ -1,0 +1,290 @@
+/*
+ReadExactStatus describes the result of ReadExact.
+
+Complete means the destination was completely filled.
+
+End means the input ended before the destination was filled.
+
+Failed means a read operation failed.
+
+NoProgress means a Reader reported Data without producing bytes.
+
+InvalidBuffer means the destination span was invalid.
+*/
+ReadExactStatus :: enum {
+    Complete
+    End
+    Failed
+    NoProgress
+    InvalidBuffer
+}
+
+/*
+WriteAllStatus describes the result of WriteAll.
+
+Complete means every source byte was accepted.
+
+Failed means a write operation failed.
+
+NoProgress means a Writer reported Data without accepting bytes.
+
+InvalidBuffer means the source span was invalid.
+*/
+WriteAllStatus :: enum {
+    Complete
+    Failed
+    NoProgress
+    InvalidBuffer
+}
+
+/*
+CopyStatus describes the result of CopyWithBuffer.
+
+Complete means the input reached its normal end.
+
+ReadFailed means the Reader failed or violated its contract.
+
+WriteFailed means the Writer failed or violated its contract.
+
+NoProgress means either side reported success without transferring bytes.
+
+InvalidBuffer means the temporary buffer was invalid or empty.
+
+Overflow means the total byte count exceeded uint.
+*/
+CopyStatus :: enum {
+    Complete
+    ReadFailed
+    WriteFailed
+    NoProgress
+    InvalidBuffer
+    Overflow
+}
+
+_CheckedAddUint :: task(
+    left uint,
+    right uint,
+) (uint, bool) {
+    maximum := ~cast<uint>(0)
+
+    if left > maximum - right {
+        return 0, false
+    }
+
+    return left + right, true
+}
+
+/*
+ReadExact fills destination unless the stream ends or fails.
+
+The returned count is the number of bytes initialized before the
+operation stopped.
+*/
+ReadExact :: task(
+    reader Reader,
+    destination ByteSpan,
+) (uint, ReadExactStatus) {
+    if !ByteSpanIsValid(destination) {
+        return 0, .InvalidBuffer
+    }
+
+    offset := cast<uint>(0)
+
+    for offset < destination.Length {
+        remaining, valid :=
+            ByteSpanFrom(
+                destination,
+                offset,
+            )
+
+        if !valid {
+            return offset, .InvalidBuffer
+        }
+
+        count, status :=
+            Read(
+                reader,
+                remaining,
+            )
+
+        if count > remaining.Length {
+            return offset, .Failed
+        }
+
+        if status == .Data {
+            if count == 0 {
+                return offset, .NoProgress
+            }
+
+            offset =
+                offset +
+                count
+
+            continue
+        }
+
+        if status == .End {
+            if count != 0 {
+                return offset, .Failed
+            }
+
+            return offset, .End
+        }
+
+        if count != 0 {
+            return offset, .Failed
+        }
+
+        return offset, .Failed
+    }
+
+    return offset, .Complete
+}
+
+/*
+WriteAll writes every source byte unless the writer fails.
+
+The returned count is the number of bytes accepted before the operation
+stopped.
+*/
+WriteAll :: task(
+    writer Writer,
+    source ByteSpan,
+) (uint, WriteAllStatus) {
+    if !ByteSpanIsValid(source) {
+        return 0, .InvalidBuffer
+    }
+
+    offset := cast<uint>(0)
+
+    for offset < source.Length {
+        remaining, valid :=
+            ByteSpanFrom(
+                source,
+                offset,
+            )
+
+        if !valid {
+            return offset, .InvalidBuffer
+        }
+
+        count, status :=
+            Write(
+                writer,
+                remaining,
+            )
+
+        if count > remaining.Length {
+            return offset, .Failed
+        }
+
+        if status == .Data {
+            if count == 0 {
+                return offset, .NoProgress
+            }
+
+            offset =
+                offset +
+                count
+
+            continue
+        }
+
+        if count != 0 {
+            return offset, .Failed
+        }
+
+        return offset, .Failed
+    }
+
+    return offset, .Complete
+}
+
+/*
+CopyWithBuffer transfers bytes from reader to writer until the reader
+reaches its normal end.
+
+The supplied buffer is temporary scratch space and must be non-empty.
+*/
+CopyWithBuffer :: task(
+    reader Reader,
+    writer Writer,
+    buffer ByteSpan,
+) (uint, CopyStatus) {
+    if !ByteSpanIsValid(buffer) ||
+        buffer.Length == 0 {
+        return 0, .InvalidBuffer
+    }
+
+    total := cast<uint>(0)
+
+    for {
+        count, readStatus :=
+            Read(
+                reader,
+                buffer,
+            )
+
+        if count > buffer.Length {
+            return total, .ReadFailed
+        }
+
+        if readStatus == .Data {
+            if count == 0 {
+                return total, .NoProgress
+            }
+
+            chunk, valid :=
+                ByteSpanPrefix(
+                    buffer,
+                    count,
+                )
+
+            if !valid {
+                return total, .ReadFailed
+            }
+
+            written, writeStatus :=
+                WriteAll(
+                    writer,
+                    chunk,
+                )
+
+            nextTotal, added :=
+                _CheckedAddUint(
+                    total,
+                    written,
+                )
+
+            if !added {
+                return total, .Overflow
+            }
+
+            total = nextTotal
+
+            if writeStatus == .Complete {
+                continue
+            }
+
+            if writeStatus == .NoProgress {
+                return total, .NoProgress
+            }
+
+            return total, .WriteFailed
+        }
+
+        if readStatus == .End {
+            if count != 0 {
+                return total, .ReadFailed
+            }
+
+            return total, .Complete
+        }
+
+        if count != 0 {
+            return total, .ReadFailed
+        }
+
+        return total, .ReadFailed
+    }
+}

@@ -1,0 +1,986 @@
+StallingReader :: struct {
+    _unused u8
+}
+
+io.Reader :: impl StallingReader {
+    Read :: task(
+        self *StallingReader,
+        destination io.ByteSpan,
+    ) (uint, io.ReadStatus) {
+        return 0, .Data
+    }
+}
+
+FailingReader :: struct {
+    _unused u8
+}
+
+io.Reader :: impl FailingReader {
+    Read :: task(
+        self *FailingReader,
+        destination io.ByteSpan,
+    ) (uint, io.ReadStatus) {
+        return 0, .Failed
+    }
+}
+
+StallingWriter :: struct {
+    _unused u8
+}
+
+io.Writer :: impl StallingWriter {
+    Write :: task(
+        self *StallingWriter,
+        source io.ByteSpan,
+    ) (uint, io.WriteStatus) {
+        return 0, .Data
+    }
+}
+
+FailingWriter :: struct {
+    _unused u8
+}
+
+io.Writer :: impl FailingWriter {
+    Write :: task(
+        self *FailingWriter,
+        source io.ByteSpan,
+    ) (uint, io.WriteStatus) {
+        return 0, .Failed
+    }
+}
+
+AllocateBytes :: task(
+    length uint,
+) rawptr {
+    ptr :=
+        mem.CallocC(
+            length,
+            1,
+        )
+
+    if ptr == nil &&
+        length > 0 {
+        panic(c"byte allocation failed")
+    }
+
+    return ptr
+}
+
+TestByteSpan :: task() {
+    source :=
+        AllocateBytes(5)
+
+    destination :=
+        AllocateBytes(5)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 10
+    source[1] = 20
+    source[2] = 30
+    source[3] = 40
+    source[4] = 50
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            5,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            5,
+        )
+
+    assert(
+        io.ByteSpanIsValid(
+            sourceSpan,
+        ),
+    )
+
+    prefix, valid :=
+        io.ByteSpanPrefix(
+            sourceSpan,
+            3,
+        )
+
+    assert(valid)
+    assert(prefix.Length == 3)
+    assert(prefix.Data[0] == 10)
+    assert(prefix.Data[1] == 20)
+    assert(prefix.Data[2] == 30)
+
+    tail, valid :=
+        io.ByteSpanFrom(
+            sourceSpan,
+            2,
+        )
+
+    assert(valid)
+    assert(tail.Length == 3)
+    assert(tail.Data[0] == 30)
+    assert(tail.Data[1] == 40)
+    assert(tail.Data[2] == 50)
+
+    middle, valid :=
+        io.ByteSpanRange(
+            sourceSpan,
+            1,
+            3,
+        )
+
+    assert(valid)
+    assert(middle.Length == 3)
+    assert(middle.Data[0] == 20)
+    assert(middle.Data[1] == 30)
+    assert(middle.Data[2] == 40)
+
+    _, valid =
+        io.ByteSpanRange(
+            sourceSpan,
+            4,
+            2,
+        )
+
+    assert(!valid)
+
+    copied :=
+        io.CopyByteSpan(
+            destinationSpan,
+            sourceSpan,
+        )
+
+    assert(copied == 5)
+
+    assert(destination[0] == 10)
+    assert(destination[1] == 20)
+    assert(destination[2] == 30)
+    assert(destination[3] == 40)
+    assert(destination[4] == 50)
+}
+
+TestBytesReader :: task() {
+    source :=
+        AllocateBytes(4)
+
+    destination :=
+        AllocateBytes(4)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 1
+    source[1] = 2
+    source[2] = 3
+    source[3] = 4
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            4,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            4,
+        )
+
+    bytesReader :=
+        io.NewBytesReader(
+            sourceSpan,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    count, status :=
+        io.Read(
+            reader,
+            destinationSpan,
+        )
+
+    assert(count == 4)
+    assert(status == .Data)
+
+    assert(destination[0] == 1)
+    assert(destination[1] == 2)
+    assert(destination[2] == 3)
+    assert(destination[3] == 4)
+
+    count, status =
+        io.Read(
+            reader,
+            destinationSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .End)
+
+    assert(
+        io.BytesReaderRemaining(
+            &bytesReader,
+        ) == 0,
+    )
+}
+
+TestChunkedReadExact :: task() {
+    source :=
+        AllocateBytes(5)
+
+    destination :=
+        AllocateBytes(5)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 11
+    source[1] = 22
+    source[2] = 33
+    source[3] = 44
+    source[4] = 55
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            5,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            5,
+        )
+
+    bytesReader :=
+        io.NewChunkedBytesReader(
+            sourceSpan,
+            2,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    count, status :=
+        io.ReadExact(
+            reader,
+            destinationSpan,
+        )
+
+    assert(count == 5)
+    assert(status == .Complete)
+
+    assert(destination[0] == 11)
+    assert(destination[1] == 22)
+    assert(destination[2] == 33)
+    assert(destination[3] == 44)
+    assert(destination[4] == 55)
+}
+
+TestReadExactPrematureEnd :: task() {
+    source :=
+        AllocateBytes(2)
+
+    destination :=
+        AllocateBytes(4)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 7
+    source[1] = 8
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            2,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            4,
+        )
+
+    bytesReader :=
+        io.NewBytesReader(
+            sourceSpan,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    count, status :=
+        io.ReadExact(
+            reader,
+            destinationSpan,
+        )
+
+    assert(count == 2)
+    assert(status == .End)
+
+    assert(destination[0] == 7)
+    assert(destination[1] == 8)
+}
+
+TestReadExactFailures :: task() {
+    destination :=
+        AllocateBytes(4)
+
+    defer mem.FreeC(destination)
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            4,
+        )
+
+    stallingReader :=
+        StallingReader{
+            _unused = 0,
+        }
+
+    stalling :=
+        cast<io.Reader>(
+            &stallingReader,
+        )
+
+    count, status :=
+        io.ReadExact(
+            stalling,
+            destinationSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .NoProgress)
+
+    failingReader :=
+        FailingReader{
+            _unused = 0,
+        }
+
+    failing :=
+        cast<io.Reader>(
+            &failingReader,
+        )
+
+    count, status =
+        io.ReadExact(
+            failing,
+            destinationSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .Failed)
+
+    invalidSpan :=
+        io.NewByteSpan(
+            nil,
+            4,
+        )
+
+    count, status =
+        io.ReadExact(
+            failing,
+            invalidSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .InvalidBuffer)
+}
+
+TestFixedBufferWriter :: task() {
+    source :=
+        AllocateBytes(5)
+
+    destination :=
+        AllocateBytes(5)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 10
+    source[1] = 20
+    source[2] = 30
+    source[3] = 40
+    source[4] = 50
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            5,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            5,
+        )
+
+    fixedWriter :=
+        io.NewChunkedFixedBufferWriter(
+            destinationSpan,
+            2,
+        )
+
+    writer :=
+        cast<io.Writer>(
+            &fixedWriter,
+        )
+
+    count, status :=
+        io.WriteAll(
+            writer,
+            sourceSpan,
+        )
+
+    assert(count == 5)
+    assert(status == .Complete)
+
+    assert(destination[0] == 10)
+    assert(destination[1] == 20)
+    assert(destination[2] == 30)
+    assert(destination[3] == 40)
+    assert(destination[4] == 50)
+
+    written :=
+        io.FixedBufferWriterWritten(
+            &fixedWriter,
+        )
+
+    assert(written.Length == 5)
+
+    flusher :=
+        cast<io.Flusher>(
+            &fixedWriter,
+        )
+
+    assert(
+        io.Flush(flusher),
+    )
+}
+
+TestFixedBufferWriterExhaustion :: task() {
+    source :=
+        AllocateBytes(4)
+
+    destination :=
+        AllocateBytes(2)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(destination)
+
+    source[0] = 1
+    source[1] = 2
+    source[2] = 3
+    source[3] = 4
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            4,
+        )
+
+    destinationSpan :=
+        io.NewByteSpan(
+            destination,
+            2,
+        )
+
+    fixedWriter :=
+        io.NewFixedBufferWriter(
+            destinationSpan,
+        )
+
+    writer :=
+        cast<io.Writer>(
+            &fixedWriter,
+        )
+
+    count, status :=
+        io.WriteAll(
+            writer,
+            sourceSpan,
+        )
+
+    assert(count == 2)
+    assert(status == .Failed)
+
+    assert(destination[0] == 1)
+    assert(destination[1] == 2)
+}
+
+TestWriteAllFailures :: task() {
+    source :=
+        AllocateBytes(4)
+
+    defer mem.FreeC(source)
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            4,
+        )
+
+    stallingWriter :=
+        StallingWriter{
+            _unused = 0,
+        }
+
+    stalling :=
+        cast<io.Writer>(
+            &stallingWriter,
+        )
+
+    count, status :=
+        io.WriteAll(
+            stalling,
+            sourceSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .NoProgress)
+
+    failingWriter :=
+        FailingWriter{
+            _unused = 0,
+        }
+
+    failing :=
+        cast<io.Writer>(
+            &failingWriter,
+        )
+
+    count, status =
+        io.WriteAll(
+            failing,
+            sourceSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .Failed)
+
+    invalidSpan :=
+        io.NewByteSpan(
+            nil,
+            4,
+        )
+
+    count, status =
+        io.WriteAll(
+            failing,
+            invalidSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .InvalidBuffer)
+}
+
+TestBufferWriter :: task() {
+    source :=
+        AllocateBytes(10)
+
+    defer mem.FreeC(source)
+
+    index := cast<uint>(0)
+
+    for index < 10 {
+        source[index] =
+            cast<u8>(
+                index + 1,
+            )
+
+        index = index + 1
+    }
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            10,
+        )
+
+    cAllocator :=
+        mem.NewCAllocator()
+
+    allocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    bufferWriter, created :=
+        io.NewBufferWriterWithCapacity(
+            allocator,
+            deallocator,
+            2,
+        )
+
+    assert(created)
+    assert(
+        io.BufferWriterCapacity(
+            &bufferWriter,
+        ) == 2,
+    )
+
+    writer :=
+        cast<io.Writer>(
+            &bufferWriter,
+        )
+
+    count, status :=
+        io.WriteAll(
+            writer,
+            sourceSpan,
+        )
+
+    assert(count == 10)
+    assert(status == .Complete)
+
+    assert(
+        io.BufferWriterCapacity(
+            &bufferWriter,
+        ) >= 10,
+    )
+
+    written :=
+        io.BufferWriterBytes(
+            &bufferWriter,
+        )
+
+    assert(written.Length == 10)
+
+    index = 0
+
+    for index < 10 {
+        assert(
+            written.Data[index] ==
+                cast<u8>(
+                    index + 1,
+                ),
+        )
+
+        index = index + 1
+    }
+
+    flusher :=
+        cast<io.Flusher>(
+            &bufferWriter,
+        )
+
+    assert(
+        io.Flush(flusher),
+    )
+
+    assert(
+        io.ResetBufferWriter(
+            &bufferWriter,
+        ),
+    )
+
+    written =
+        io.BufferWriterBytes(
+            &bufferWriter,
+        )
+
+    assert(written.Length == 0)
+
+    closer :=
+        cast<io.Closer>(
+            &bufferWriter,
+        )
+
+    assert(
+        io.Close(closer),
+    )
+
+    /*
+    Closing twice must be valid.
+    */
+    assert(
+        io.Close(closer),
+    )
+
+    count, status =
+        io.Write(
+            writer,
+            sourceSpan,
+        )
+
+    assert(count == 0)
+    assert(status == .Failed)
+}
+
+TestCopyWithBuffer :: task() {
+    source :=
+        AllocateBytes(9)
+
+    scratch :=
+        AllocateBytes(3)
+
+    defer mem.FreeC(source)
+    defer mem.FreeC(scratch)
+
+    index := cast<uint>(0)
+
+    for index < 9 {
+        source[index] =
+            cast<u8>(
+                100 + index,
+            )
+
+        index = index + 1
+    }
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            9,
+        )
+
+    scratchSpan :=
+        io.NewByteSpan(
+            scratch,
+            3,
+        )
+
+    bytesReader :=
+        io.NewChunkedBytesReader(
+            sourceSpan,
+            2,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    cAllocator :=
+        mem.NewCAllocator()
+
+    allocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
+
+    bufferWriter :=
+        io.NewBufferWriter(
+            allocator,
+            deallocator,
+        )
+
+    writer :=
+        cast<io.Writer>(
+            &bufferWriter,
+        )
+
+    copied, status :=
+        io.CopyWithBuffer(
+            reader,
+            writer,
+            scratchSpan,
+        )
+
+    assert(copied == 9)
+    assert(status == .Complete)
+
+    written :=
+        io.BufferWriterBytes(
+            &bufferWriter,
+        )
+
+    assert(written.Length == 9)
+
+    index = 0
+
+    for index < 9 {
+        assert(
+            written.Data[index] ==
+                cast<u8>(
+                    100 + index,
+                ),
+        )
+
+        index = index + 1
+    }
+
+    closer :=
+        cast<io.Closer>(
+            &bufferWriter,
+        )
+
+    assert(
+        io.Close(closer),
+    )
+}
+
+TestDiscardWriter :: task() {
+    source :=
+        AllocateBytes(6)
+
+    defer mem.FreeC(source)
+
+    sourceSpan :=
+        io.NewByteSpan(
+            source,
+            6,
+        )
+
+    discardWriter :=
+        io.NewDiscardWriter()
+
+    writer :=
+        cast<io.Writer>(
+            &discardWriter,
+        )
+
+    count, status :=
+        io.WriteAll(
+            writer,
+            sourceSpan,
+        )
+
+    assert(count == 6)
+    assert(status == .Complete)
+
+    flusher :=
+        cast<io.Flusher>(
+            &discardWriter,
+        )
+
+    assert(
+        io.Flush(flusher),
+    )
+}
+
+TestEmptyOperations :: task() {
+    empty :=
+        io.EmptyByteSpan()
+
+    bytesReader :=
+        io.NewBytesReader(
+            empty,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    readCount, readStatus :=
+        io.ReadExact(
+            reader,
+            empty,
+        )
+
+    assert(readCount == 0)
+    assert(readStatus == .Complete)
+
+    discardWriter :=
+        io.NewDiscardWriter()
+
+    writer :=
+        cast<io.Writer>(
+            &discardWriter,
+        )
+
+    writeCount, writeStatus :=
+        io.WriteAll(
+            writer,
+            empty,
+        )
+
+    assert(writeCount == 0)
+    assert(writeStatus == .Complete)
+
+    scratch :=
+        AllocateBytes(1)
+
+    defer mem.FreeC(scratch)
+
+    scratchSpan :=
+        io.NewByteSpan(
+            scratch,
+            1,
+        )
+
+    copied, copyStatus :=
+        io.CopyWithBuffer(
+            reader,
+            writer,
+            scratchSpan,
+        )
+
+    assert(copied == 0)
+    assert(copyStatus == .Complete)
+}
+
+TestCopyInvalidBuffer :: task() {
+    empty :=
+        io.EmptyByteSpan()
+
+    bytesReader :=
+        io.NewBytesReader(
+            empty,
+        )
+
+    reader :=
+        cast<io.Reader>(
+            &bytesReader,
+        )
+
+    discardWriter :=
+        io.NewDiscardWriter()
+
+    writer :=
+        cast<io.Writer>(
+            &discardWriter,
+        )
+
+    copied, status :=
+        io.CopyWithBuffer(
+            reader,
+            writer,
+            empty,
+        )
+
+    assert(copied == 0)
+    assert(status == .InvalidBuffer)
+}
+
+Main :: task() {
+    TestByteSpan()
+
+    TestBytesReader()
+    TestChunkedReadExact()
+    TestReadExactPrematureEnd()
+    TestReadExactFailures()
+
+    TestFixedBufferWriter()
+    TestFixedBufferWriterExhaustion()
+    TestWriteAllFailures()
+
+    TestBufferWriter()
+    TestCopyWithBuffer()
+    TestDiscardWriter()
+
+    TestEmptyOperations()
+    TestCopyInvalidBuffer()
+}

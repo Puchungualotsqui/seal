@@ -7013,6 +7013,12 @@ func (c *Checker) checkStmt(
 			s.Decl,
 		)
 
+	case *ast.MultiAssignStmt:
+		c.checkMultiAssignStmt(
+			scope,
+			s,
+		)
+
 	case *ast.BlockStmt:
 		c.checkBlockInScope(
 			scope,
@@ -14675,6 +14681,148 @@ func (c *Checker) valueFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 	}
 
 	return c.checkExpr(scope, arg.Expr)
+}
+
+func (c *Checker) checkMultiAssignStmt(
+	scope *Scope,
+	s *ast.MultiAssignStmt,
+) {
+	if s == nil {
+		return
+	}
+
+	call, ok := s.Value.(*ast.CallExpr)
+	if !ok {
+		c.diags.Add(
+			s.Value.Span(),
+			"multi-value assignment requires a task call",
+		)
+
+		c.checkExpr(
+			scope,
+			s.Value,
+		)
+
+		return
+	}
+
+	resultTypes := c.checkCallResultTypes(
+		scope,
+		call,
+	)
+
+	if len(resultTypes) != len(s.Names) {
+		c.diags.Add(
+			s.Span(),
+			fmt.Sprintf(
+				"multi-value assignment mismatch: expected %d target(s), got %d result value(s)",
+				len(s.Names),
+				len(resultTypes),
+			),
+		)
+	}
+
+	seen := map[string]source.Span{}
+
+	for i, name := range s.Names {
+		if name.Name == "_" {
+			continue
+		}
+
+		if previous, duplicate :=
+			seen[name.Name]; duplicate {
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"duplicate assignment target %q, previous target at %s",
+					name.Name,
+					previous.String(),
+				),
+			)
+
+			continue
+		}
+
+		seen[name.Name] = name.Span()
+
+		sym := scope.Lookup(
+			name.Name,
+		)
+
+		if sym == nil {
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"undefined assignment target %q",
+					name.Name,
+				),
+			)
+
+			continue
+		}
+
+		switch sym.Kind {
+		case SymbolVar:
+			// Valid assignment target.
+
+		case SymbolParam:
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"cannot reassign parameter %q",
+					name.Name,
+				),
+			)
+
+			continue
+
+		case SymbolConst:
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"cannot assign to constant %q",
+					name.Name,
+				),
+			)
+
+			continue
+
+		case SymbolTask,
+			SymbolType,
+			SymbolPackage,
+			SymbolOverload:
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"cannot assign to %q",
+					name.Name,
+				),
+			)
+
+			continue
+
+		default:
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"%q is not an assignable variable",
+					name.Name,
+				),
+			)
+
+			continue
+		}
+
+		if i >= len(resultTypes) {
+			continue
+		}
+
+		c.checkAssignable(
+			sym.Type,
+			resultTypes[i],
+			name.Span(),
+		)
+	}
 }
 
 func (c *Checker) checkMultiVarDeclStmt(scope *Scope, s *ast.MultiVarDeclStmt) {

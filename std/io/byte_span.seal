@@ -1,0 +1,186 @@
+/*
+ByteSpan is a non-owning view over a contiguous sequence of bytes.
+
+ByteSpan does not allocate or release memory. The referenced memory must
+remain valid for the entire time the span is used.
+
+A span is valid when:
+
+    Length is zero; or
+    Data is not nil.
+*/
+ByteSpan :: struct {
+    Data rawptr
+    Length uint
+}
+
+/*
+NewByteSpan creates a non-owning byte view.
+*/
+NewByteSpan :: task(
+    data rawptr,
+    length uint,
+) ByteSpan {
+    return ByteSpan{
+        Data = data,
+        Length = length,
+    }
+}
+
+/*
+EmptyByteSpan returns an empty valid span.
+*/
+EmptyByteSpan :: task() ByteSpan {
+    return ByteSpan{
+        Data = nil,
+        Length = 0,
+    }
+}
+
+/*
+ByteSpanIsValid reports whether the span has a valid pointer-length
+combination.
+*/
+ByteSpanIsValid :: task(
+    value ByteSpan,
+) bool {
+    return value.Length == 0 ||
+        value.Data != nil
+}
+
+/*
+ByteSpanFrom returns the portion of value beginning at offset.
+
+The boolean result is false when value is invalid or offset is outside
+the span.
+*/
+ByteSpanFrom :: task(
+    value ByteSpan,
+    offset uint,
+) (ByteSpan, bool) {
+    if !ByteSpanIsValid(value) {
+        return EmptyByteSpan(), false
+    }
+
+    if offset > value.Length {
+        return EmptyByteSpan(), false
+    }
+
+    if offset == value.Length {
+        return ByteSpan{
+            Data = value.Data,
+            Length = 0,
+        }, true
+    }
+
+    data := cast<rawptr>(
+        &value.Data[offset],
+    )
+
+    return ByteSpan{
+        Data = data,
+        Length = value.Length - offset,
+    }, true
+}
+
+/*
+ByteSpanPrefix returns the first count bytes of value.
+
+The boolean result is false when value is invalid or count exceeds its
+length.
+*/
+ByteSpanPrefix :: task(
+    value ByteSpan,
+    count uint,
+) (ByteSpan, bool) {
+    if !ByteSpanIsValid(value) {
+        return EmptyByteSpan(), false
+    }
+
+    if count > value.Length {
+        return EmptyByteSpan(), false
+    }
+
+    return ByteSpan{
+        Data = value.Data,
+        Length = count,
+    }, true
+}
+
+/*
+ByteSpanRange returns count bytes beginning at offset.
+
+The boolean result is false when value is invalid or the requested range
+is outside the span.
+*/
+ByteSpanRange :: task(
+    value ByteSpan,
+    offset uint,
+    count uint,
+) (ByteSpan, bool) {
+    if !ByteSpanIsValid(value) {
+        return EmptyByteSpan(), false
+    }
+
+    if offset > value.Length {
+        return EmptyByteSpan(), false
+    }
+
+    remaining :=
+        value.Length -
+        offset
+
+    if count > remaining {
+        return EmptyByteSpan(), false
+    }
+
+    tail, valid :=
+        ByteSpanFrom(
+            value,
+            offset,
+        )
+
+    if !valid {
+        return EmptyByteSpan(), false
+    }
+
+    return ByteSpan{
+        Data = tail.Data,
+        Length = count,
+    }, true
+}
+
+/*
+CopyByteSpan copies as many bytes as fit in both spans.
+
+The source and destination may overlap.
+
+It returns zero when either span is invalid.
+*/
+CopyByteSpan :: task(
+    destination ByteSpan,
+    source ByteSpan,
+) uint {
+    if !ByteSpanIsValid(destination) ||
+        !ByteSpanIsValid(source) {
+        return 0
+    }
+
+    count := source.Length
+
+    if count > destination.Length {
+        count = destination.Length
+    }
+
+    if count == 0 {
+        return 0
+    }
+
+    mem.MemmoveC(
+        destination.Data,
+        source.Data,
+        count,
+    )
+
+    return count
+}

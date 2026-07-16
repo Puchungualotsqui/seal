@@ -1452,41 +1452,161 @@ func (g *Generator) emitVarDeclStmt(
 	g.linef("%s;", typ.Decl(s.Name.Name))
 }
 
-func (g *Generator) emitMultiVarDeclStmt(s *ast.MultiVarDeclStmt) {
+func (g *Generator) emitMultiResultBinding(
+	name ast.Ident,
+	itemType CType,
+	resultTemp string,
+	index int,
+) {
+	if name.Name == "_" {
+		return
+	}
+
+	if isInvalidCType(itemType) {
+		g.error(
+			name.Span(),
+			fmt.Sprintf(
+				"cannot lower multi-value binding %q with invalid type",
+				name.Name,
+			),
+		)
+		return
+	}
+
+	g.scope.declare(
+		name.Name,
+		itemType,
+	)
+
+	field := fmt.Sprintf(
+		"%s._%d",
+		resultTemp,
+		index,
+	)
+
+	/*
+		C arrays cannot be assigned:
+
+			int values[4] = result._0; // invalid C
+
+		Declare the destination and copy the array contents instead.
+		The source and destination types were already checked by the
+		Seal checker.
+	*/
+	if itemType.IsInlineArray {
+		g.linef(
+			"%s;",
+			itemType.Decl(name.Name),
+		)
+
+		g.linef(
+			"memcpy(%s, %s, sizeof(%s));",
+			name.Name,
+			field,
+			name.Name,
+		)
+
+		return
+	}
+
+	g.linef(
+		"%s = %s;",
+		itemType.Decl(name.Name),
+		field,
+	)
+}
+
+func (g *Generator) emitMultiVarDeclStmt(
+	s *ast.MultiVarDeclStmt,
+) {
+	if s == nil || s.Value == nil {
+		return
+	}
+
 	call, ok := s.Value.(*ast.CallExpr)
 	if !ok {
-		g.error(s.Value.Span(), "multi-value declaration requires a task call")
+		g.error(
+			s.Value.Span(),
+			"multi-value declaration requires a task call",
+		)
 		return
 	}
 
 	resultTypes := g.callReturnTypes(call)
 
+	/*
+		A multi-value declaration must consume an actual multi-result task.
+
+			left, right := Split()
+
+		A zero-result or single-result task does not have the generated
+		result structure whose fields are named _0, _1, and so on.
+	*/
+	if len(resultTypes) <= 1 {
+		g.error(
+			s.Value.Span(),
+			fmt.Sprintf(
+				"multi-value declaration requires a task returning at least two values; task returns %d",
+				len(resultTypes),
+			),
+		)
+		return
+	}
+
 	if len(resultTypes) != len(s.Names) {
 		g.error(
 			s.Span(),
-			fmt.Sprintf("multi-value declaration mismatch: expected %d name(s), got %d result value(s)", len(s.Names), len(resultTypes)),
+			fmt.Sprintf(
+				"multi-value declaration mismatch: %d name(s), but task returns %d value(s)",
+				len(s.Names),
+				len(resultTypes),
+			),
 		)
+
+		/*
+			Do not continue emitting partial C. Partial extraction could
+			hide a checker/CGen disagreement and produce misleading C
+			compiler diagnostics.
+		*/
+		return
 	}
 
-	resultType := g.inferExprType(call, nil)
-	resultTemp := g.newTemp("multi_result")
+	resultType := g.inferExprType(
+		call,
+		nil,
+	)
 
-	g.linef("%s = %s;", resultType.Decl(resultTemp), g.emitExpr(call, &resultType))
-
-	count := len(s.Names)
-	if len(resultTypes) < count {
-		count = len(resultTypes)
+	if isInvalidCType(resultType) {
+		g.error(
+			call.Span(),
+			"cannot determine the C result type of multi-value task call",
+		)
+		return
 	}
 
-	for i := 0; i < count; i++ {
-		name := s.Names[i]
-		if name.Name == "_" {
-			continue
-		}
+	resultTemp := g.newTemp(
+		"multi_result",
+	)
 
-		itemType := resultTypes[i]
-		g.scope.declare(name.Name, itemType)
-		g.linef("%s = %s._%d;", itemType.Decl(name.Name), resultTemp, i)
+	/*
+		Evaluate the task call exactly once. This is important both for side
+		effects and for declarations containing discarded values:
+
+			value, _ := Next()
+	*/
+	g.linef(
+		"%s = %s;",
+		resultType.Decl(resultTemp),
+		g.emitExpr(call, &resultType),
+	)
+
+	for i, name := range s.Names {
+		g.emitMultiResultBinding(
+			name,
+			resultTypes[i],
+			resultTemp,
+			i,
+		)
 	}
 }
 

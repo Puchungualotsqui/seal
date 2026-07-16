@@ -1,0 +1,87 @@
+/*
+ReadStatus describes the result of one Reader operation.
+
+Data means that bytes were placed in the destination.
+
+For an empty destination, Data with a count of zero is valid.
+
+End means the stream ended normally and no bytes were read.
+
+Failed means the operation failed and no bytes were read.
+*/
+ReadStatus :: enum {
+    Data
+    End
+    Failed
+}
+
+/*
+WriteStatus describes the result of one Writer operation.
+
+Data means that bytes were accepted.
+
+For an empty source, Data with a count of zero is valid.
+
+Failed means the operation failed and no bytes were accepted.
+*/
+WriteStatus :: enum {
+    Data
+    Failed
+}
+
+/*
+Reader provides sequential byte input.
+
+Read may return fewer bytes than destination.Length.
+
+Implementations must obey these rules:
+
+    count must not exceed destination.Length;
+    Data requires count greater than zero unless destination is empty;
+    End requires count equal to zero;
+    Failed requires count equal to zero.
+*/
+Reader :: interface {
+    Read :: task(
+        self *self,
+        destination ByteSpan,
+    ) (uint, ReadStatus)
+}
+
+/*
+Writer provides sequential byte output.
+
+Write may accept fewer bytes than source.Length.
+
+Implementations must obey these rules:
+
+    count must not exceed source.Length;
+    Data requires count greater than zero unless source is empty;
+    Failed requires count equal to zero.
+*/
+Writer :: interface {
+    Write :: task(
+        self *self,
+        source ByteSpan,
+    ) (uint, WriteStatus)
+}
+
+/*
+Flusher commits buffered output to its underlying destination.
+*/
+Flusher :: interface {
+    Flush :: task(
+        self *self,
+    ) bool
+}
+
+/*
+Closer releases a stream or resource.
+
+Closing an already closed resource should normally succeed.
+*/
+Closer :: interface {
+    Close :: task(
+        self *self,
+    ) bool
+}

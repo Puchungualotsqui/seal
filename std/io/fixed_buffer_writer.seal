@@ -1,0 +1,176 @@
+/*
+FixedBufferWriter writes sequentially into caller-owned memory.
+
+It does not own the destination memory.
+
+MaximumChunk limits how many bytes one Write operation may accept.
+
+A MaximumChunk value of zero means there is no artificial limit.
+*/
+FixedBufferWriter :: struct {
+    Destination ByteSpan
+    Offset uint
+    MaximumChunk uint
+}
+
+NewFixedBufferWriter :: task(
+    destination ByteSpan,
+) FixedBufferWriter {
+    return FixedBufferWriter{
+        Destination = destination,
+        Offset = 0,
+        MaximumChunk = 0,
+    }
+}
+
+NewChunkedFixedBufferWriter :: task(
+    destination ByteSpan,
+    maximumChunk uint,
+) FixedBufferWriter {
+    return FixedBufferWriter{
+        Destination = destination,
+        Offset = 0,
+        MaximumChunk = maximumChunk,
+    }
+}
+
+/*
+ResetFixedBufferWriter returns the writer to the start of its existing
+destination.
+*/
+ResetFixedBufferWriter :: task(
+    self *FixedBufferWriter,
+) {
+    self.Offset = 0
+}
+
+/*
+FixedBufferWriterWritten returns the portion of the destination already
+written.
+*/
+FixedBufferWriterWritten :: task(
+    self *FixedBufferWriter,
+) ByteSpan {
+    if !ByteSpanIsValid(
+            self.Destination,
+        ) {
+        return EmptyByteSpan()
+    }
+
+    result, valid :=
+        ByteSpanPrefix(
+            self.Destination,
+            self.Offset,
+        )
+
+    if !valid {
+        return EmptyByteSpan()
+    }
+
+    return result
+}
+
+/*
+FixedBufferWriterRemaining returns the unused destination capacity.
+*/
+FixedBufferWriterRemaining :: task(
+    self *FixedBufferWriter,
+) uint {
+    if !ByteSpanIsValid(
+            self.Destination,
+        ) {
+        return 0
+    }
+
+    if self.Offset >=
+        self.Destination.Length {
+        return 0
+    }
+
+    return self.Destination.Length -
+        self.Offset
+}
+
+Writer :: impl FixedBufferWriter {
+    Write :: task(
+        self *FixedBufferWriter,
+        source ByteSpan,
+    ) (uint, WriteStatus) {
+        if !ByteSpanIsValid(source) ||
+            !ByteSpanIsValid(
+                self.Destination,
+            ) {
+            return 0, .Failed
+        }
+
+        if source.Length == 0 {
+            return 0, .Data
+        }
+
+        if self.Offset >=
+            self.Destination.Length {
+            return 0, .Failed
+        }
+
+        remaining :=
+            self.Destination.Length -
+            self.Offset
+
+        count := source.Length
+
+        if count > remaining {
+            count = remaining
+        }
+
+        if self.MaximumChunk > 0 &&
+            count > self.MaximumChunk {
+            count =
+                self.MaximumChunk
+        }
+
+        destination, valid :=
+            ByteSpanRange(
+                self.Destination,
+                self.Offset,
+                count,
+            )
+
+        if !valid {
+            return 0, .Failed
+        }
+
+        sourcePart, valid :=
+            ByteSpanPrefix(
+                source,
+                count,
+            )
+
+        if !valid {
+            return 0, .Failed
+        }
+
+        copied :=
+            CopyByteSpan(
+                destination,
+                sourcePart,
+            )
+
+        if copied != count {
+            return 0, .Failed
+        }
+
+        self.Offset =
+            self.Offset +
+            copied
+
+        return copied, .Data
+    }
+}
+
+Flusher :: impl FixedBufferWriter {
+    Flush :: task(
+        self *FixedBufferWriter,
+    ) bool {
+        return true
+    }
+}

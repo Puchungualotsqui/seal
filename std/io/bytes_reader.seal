@@ -1,0 +1,134 @@
+/*
+BytesReader reads sequentially from an existing ByteSpan.
+
+It does not own the source memory. The source must remain valid while the
+reader is in use.
+
+MaximumChunk limits how many bytes one Read operation may produce.
+
+A MaximumChunk value of zero means there is no artificial limit.
+*/
+BytesReader :: struct {
+    Source ByteSpan
+    Offset uint
+    MaximumChunk uint
+}
+
+NewBytesReader :: task(
+    source ByteSpan,
+) BytesReader {
+    return BytesReader{
+        Source = source,
+        Offset = 0,
+        MaximumChunk = 0,
+    }
+}
+
+NewChunkedBytesReader :: task(
+    source ByteSpan,
+    maximumChunk uint,
+) BytesReader {
+    return BytesReader{
+        Source = source,
+        Offset = 0,
+        MaximumChunk = maximumChunk,
+    }
+}
+
+/*
+ResetBytesReader replaces the source and returns the reader to its
+beginning.
+*/
+ResetBytesReader :: task(
+    self *BytesReader,
+    source ByteSpan,
+) {
+    self.Source = source
+    self.Offset = 0
+}
+
+/*
+BytesReaderRemaining returns the number of unread bytes.
+*/
+BytesReaderRemaining :: task(
+    self *BytesReader,
+) uint {
+    if !ByteSpanIsValid(
+            self.Source,
+        ) {
+        return 0
+    }
+
+    if self.Offset >=
+        self.Source.Length {
+        return 0
+    }
+
+    return self.Source.Length -
+        self.Offset
+}
+
+Reader :: impl BytesReader {
+    Read :: task(
+        self *BytesReader,
+        destination ByteSpan,
+    ) (uint, ReadStatus) {
+        if !ByteSpanIsValid(destination) ||
+            !ByteSpanIsValid(self.Source) {
+            return 0, .Failed
+        }
+
+        if destination.Length == 0 {
+            return 0, .Data
+        }
+
+        if self.Offset >=
+            self.Source.Length {
+            return 0, .End
+        }
+
+        remaining :=
+            self.Source.Length -
+            self.Offset
+
+        count :=
+            destination.Length
+
+        if count > remaining {
+            count = remaining
+        }
+
+        if self.MaximumChunk > 0 &&
+            count > self.MaximumChunk {
+            count =
+                self.MaximumChunk
+        }
+
+        source, valid :=
+            ByteSpanRange(
+                self.Source,
+                self.Offset,
+                count,
+            )
+
+        if !valid {
+            return 0, .Failed
+        }
+
+        copied :=
+            CopyByteSpan(
+                destination,
+                source,
+            )
+
+        if copied != count {
+            return 0, .Failed
+        }
+
+        self.Offset =
+            self.Offset +
+            copied
+
+        return copied, .Data
+    }
+}

@@ -2321,6 +2321,32 @@ func (p *Parser) synchronizeSwitchCase() {
 	}
 }
 
+func (p *Parser) looksLikeMultiAssignStmt() bool {
+	if !p.at(token.Ident) {
+		return false
+	}
+
+	i := p.pos + 1
+	seenComma := false
+
+	for i < len(p.tokens) &&
+		p.tokens[i].Kind == token.Comma {
+		seenComma = true
+		i++
+
+		if i >= len(p.tokens) ||
+			p.tokens[i].Kind != token.Ident {
+			return false
+		}
+
+		i++
+	}
+
+	return seenComma &&
+		i < len(p.tokens) &&
+		p.tokens[i].Kind == token.Assign
+}
+
 func (p *Parser) looksLikeMultiVarDeclStmt() bool {
 	if !p.at(token.Ident) {
 		return false
@@ -2388,6 +2414,59 @@ func (p *Parser) parseSimpleStmtUntil(
 		}
 
 		return &ast.MultiVarDeclStmt{
+			Names: names,
+			Value: value,
+			Loc: p.span(
+				start,
+				value.Span().End,
+			),
+		}
+	}
+
+	if p.looksLikeMultiAssignStmt() {
+		var names []ast.Ident
+
+		first := p.expectIdent(
+			"expected assignment target",
+		)
+		names = append(
+			names,
+			first,
+		)
+
+		for p.match(token.Comma) {
+			name := p.expectIdent(
+				"expected assignment target after ','",
+			)
+			if name.Name == "" {
+				return nil
+			}
+
+			names = append(
+				names,
+				name,
+			)
+		}
+
+		if !p.expect(
+			token.Assign,
+			"expected '=' after assignment targets",
+		) {
+			return nil
+		}
+
+		value := p.parseExprUntil(
+			0,
+			stops...,
+		)
+		if value == nil {
+			p.errorHere(
+				"expected value after '='",
+			)
+			return nil
+		}
+
+		return &ast.MultiAssignStmt{
 			Names: names,
 			Value: value,
 			Loc: p.span(
