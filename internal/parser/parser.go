@@ -53,7 +53,16 @@ func (p *Parser) parseDecl() ast.Decl {
 	operatorName := ""
 	operatorLoc := source.Span{}
 
-	if name, loc, ok := p.parseBracketOperatorDeclName(); ok {
+	if name,
+		loc,
+		ok :=
+		p.parseBracketOperatorDeclName(); ok {
+		operatorName = name
+		operatorLoc = loc
+	} else if name,
+		loc,
+		ok :=
+		p.parseShiftOperatorDeclName(); ok {
 		operatorName = name
 		operatorLoc = loc
 	} else {
@@ -2537,12 +2546,14 @@ func (p *Parser) parseExprUntil(
 			continue
 		}
 
-		// `{` is only postfix when the left side can become a
-		// type and the current expression context does not use
-		// `{` as a terminating token.
-		//
-		// Control-flow conditions pass token.LBrace as a stop,
-		// so their body cannot be consumed as a compound literal.
+		/*
+			`{` is only postfix when the left side can become a type and the
+			current expression context does not use `{` as a terminating
+			token.
+
+			Control-flow conditions pass token.LBrace as a stop, so their body
+			cannot be consumed as a compound literal.
+		*/
 		if p.at(token.LBrace) {
 			if p.typeFromExprForLiteral(left) == nil {
 				break
@@ -2557,18 +2568,23 @@ func (p *Parser) parseExprUntil(
 			continue
 		}
 
-		prec := p.binaryPrecedence(
-			p.peek().Kind,
-		)
+		operator,
+			precedence,
+			operatorWidth,
+			isBinary :=
+			p.currentBinaryOperator()
 
-		if prec < minPrec {
+		if !isBinary ||
+			precedence < minPrec {
 			break
 		}
 
-		op := p.advance()
+		for i := 0; i < operatorWidth; i++ {
+			p.advance()
+		}
 
 		right := p.parseExprUntil(
-			prec+1,
+			precedence+1,
 			stops...,
 		)
 
@@ -2582,7 +2598,7 @@ func (p *Parser) parseExprUntil(
 
 		left = &ast.BinaryExpr{
 			Left:  left,
-			Op:    op.Kind,
+			Op:    operator,
 			Right: right,
 			Loc: p.span(
 				left.Span().Start,
@@ -2739,6 +2755,23 @@ func (p *Parser) looksLikeDeclStartAt(pos int) bool {
 	}
 
 	kind := p.tokens[pos].Kind
+
+	/*
+		Composite shift operator declarations:
+
+		    << :: overload { ShiftLeft }
+		    >> :: overload { ShiftRight }
+
+		The lexer deliberately leaves these as two tokens.
+	*/
+	if (kind == token.Lt ||
+		kind == token.Gt) &&
+		pos+2 < len(p.tokens) &&
+		p.tokens[pos+1].Kind == kind &&
+		p.tokens[pos+2].Kind ==
+			token.ColonColon {
+		return true
+	}
 
 	// Composite bracket operator declarations:
 	//
@@ -3352,18 +3385,95 @@ func (p *Parser) parseInterfaceResultTypes() []ast.Type {
 	return results
 }
 
-func (p *Parser) binaryPrecedence(kind token.Kind) int {
+func (p *Parser) currentBinaryOperator() (
+	token.Kind,
+	int,
+	int,
+	bool,
+) {
+	/*
+		Shift operators deliberately remain two lexer tokens.
+
+		This preserves nested generic closing syntax:
+
+		    Outer<Inner<int>>
+
+		while allowing the expression parser to interpret:
+
+		    value >> amount
+		    value << amount
+
+		as shift expressions.
+
+		The returned width is the number of lexer tokens belonging to the
+		operator.
+	*/
+	if p.at(token.Lt) &&
+		p.peekNext().Kind == token.Lt {
+		return token.ShiftLeft,
+			p.binaryPrecedence(token.ShiftLeft),
+			2,
+			true
+	}
+
+	if p.at(token.Gt) &&
+		p.peekNext().Kind == token.Gt {
+		return token.ShiftRight,
+			p.binaryPrecedence(token.ShiftRight),
+			2,
+			true
+	}
+
+	kind := p.peek().Kind
+	precedence := p.binaryPrecedence(kind)
+
+	if precedence < 0 {
+		return token.Invalid,
+			-1,
+			0,
+			false
+	}
+
+	return kind,
+		precedence,
+		1,
+		true
+}
+
+func (p *Parser) binaryPrecedence(
+	kind token.Kind,
+) int {
 	switch kind {
 	case token.OrOr:
 		return 1
+
 	case token.AndAnd:
 		return 2
-	case token.EqEq, token.NotEq, token.Lt, token.LtEq, token.Gt, token.GtEq:
+
+	case token.EqEq,
+		token.NotEq,
+		token.Lt,
+		token.LtEq,
+		token.Gt,
+		token.GtEq:
 		return 3
-	case token.Plus, token.Minus, token.Pipe, token.Caret:
+
+	case token.ShiftLeft,
+		token.ShiftRight:
 		return 4
-	case token.Star, token.Slash, token.Percent, token.Amp:
+
+	case token.Plus,
+		token.Minus,
+		token.Pipe,
+		token.Caret:
 		return 5
+
+	case token.Star,
+		token.Slash,
+		token.Percent,
+		token.Amp:
+		return 6
+
 	default:
 		return -1
 	}
@@ -3429,7 +3539,9 @@ func isSimpleNamedType(t ast.Type) (ast.Ident, bool) {
 	return named.Parts[0], true
 }
 
-func (p *Parser) isDeclName(kind token.Kind) bool {
+func (p *Parser) isDeclName(
+	kind token.Kind,
+) bool {
 	if kind == token.Ident {
 		return true
 	}
@@ -3446,13 +3558,52 @@ func (p *Parser) isDeclName(kind token.Kind) bool {
 		token.LtEq,
 		token.Gt,
 		token.GtEq,
+		token.ShiftLeft,
+		token.ShiftRight,
 		token.Amp,
 		token.Pipe,
 		token.Caret:
 		return true
+
 	default:
 		return false
 	}
+}
+
+func (p *Parser) parseShiftOperatorDeclName() (
+	string,
+	source.Span,
+	bool,
+) {
+	if p.at(token.Lt) &&
+		p.peekNext().Kind == token.Lt {
+		first := p.advance()
+		second := p.advance()
+
+		return "<<",
+			p.span(
+				first.Span.Start,
+				second.Span.End,
+			),
+			true
+	}
+
+	if p.at(token.Gt) &&
+		p.peekNext().Kind == token.Gt {
+		first := p.advance()
+		second := p.advance()
+
+		return ">>",
+			p.span(
+				first.Span.Start,
+				second.Span.End,
+			),
+			true
+	}
+
+	return "",
+		source.Span{},
+		false
 }
 
 func (p *Parser) parseBracketOperatorDeclName() (string, source.Span, bool) {

@@ -1,0 +1,43 @@
+/*
+FormatBool creates an owned string containing either "true" or "false".
+*/
+FormatBool :: task(
+    allocator mem.Allocator,
+    value bool,
+) strings.OwnedString {
+    if value {
+        return strings.Clone(
+            allocator,
+            "true",
+        )
+    }
+
+    return strings.Clone(
+        allocator,
+        "false",
+    )
+}
+
+/*
+ParseBool parses a strict Boolean representation.
+
+Only the exact lowercase strings "true" and "false" are accepted.
+
+When false is returned, the accompanying bool value is unspecified and
+must not be used.
+*/
+ParseBool :: pure task(
+    value string,
+) bool, bool {
+    if value == "true" {
+        return true, true
+    }
+
+    if value == "false" {
+        return false, true
+    }
+
+    empty: bool
+
+    return empty, false
+}

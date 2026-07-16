@@ -1,0 +1,300 @@
+/*
+_RequireIntegerBase validates an integer formatting base.
+*/
+_RequireIntegerBase :: pure task(
+    base uint,
+) {
+    if base < 2 ||
+        base > 36 {
+        panic(
+            "strconv: integer base must be between 2 and 36",
+        )
+    }
+}
+
+/*
+_DigitByte returns the lowercase ASCII byte representing digit.
+
+digit must be smaller than 36.
+*/
+_DigitByte :: pure task(
+    digit uint,
+) u8 {
+    if digit < 10 {
+        return cast<u8>(
+            cast<uint>('0') +
+                digit,
+        )
+    }
+
+    return cast<u8>(
+        cast<uint>('a') +
+            digit -
+            10,
+    )
+}
+
+/*
+_UnsignedDigitCount returns the number of digits needed to represent
+value in base.
+*/
+_UnsignedDigitCount :: pure task(
+    value u64,
+    base uint,
+) uint {
+    if value == 0 {
+        return 1
+    }
+
+    divisor := cast<u64>(base)
+    remaining := value
+
+    count: uint = 0
+
+    for remaining > 0 {
+        remaining /= divisor
+        count += 1
+    }
+
+    return count
+}
+
+/*
+_FormatUnsignedMagnitude formats an unsigned magnitude with an optional
+leading minus sign.
+*/
+_FormatUnsignedMagnitude :: task(
+    allocator mem.Allocator,
+    magnitude u64,
+    negative bool,
+    base uint,
+) strings.OwnedString {
+    _RequireIntegerBase(base)
+
+    digitCount := _UnsignedDigitCount(
+        magnitude,
+        base,
+    )
+
+    byteLength := digitCount
+
+    if negative {
+        byteLength += 1
+    }
+
+    destination := mem.AllocWith(
+        allocator,
+        byteLength,
+    )
+
+    if destination == nil {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }
+    }
+
+    divisor := cast<u64>(base)
+    remaining := magnitude
+    writeIndex := byteLength
+
+    for {
+        digit := remaining % divisor
+
+        writeIndex -= 1
+
+        destination[
+            cast<int>(writeIndex)
+        ] = _DigitByte(
+            cast<uint>(digit),
+        )
+
+        remaining /= divisor
+
+        if remaining == 0 {
+            break
+        }
+    }
+
+    if negative {
+        destination[0] = cast<u8>('-')
+    }
+
+    return strings.OwnedString{
+        Data = destination,
+        ByteLength = byteLength,
+    }
+}
+
+/*
+_FormatSigned64 formats a signed 64-bit value without overflowing when
+value is the minimum representable i64.
+*/
+_FormatSigned64 :: task(
+    allocator mem.Allocator,
+    value i64,
+    base uint,
+) strings.OwnedString {
+    negative := value < 0
+
+    magnitude: u64
+
+    if negative {
+        /*
+        Avoid directly negating the minimum signed value.
+
+            -(minimum + 1) + 1
+
+        is representable throughout the calculation.
+        */
+        magnitude = cast<u64>(
+            -(value + 1),
+        )
+
+        magnitude += 1
+    } else {
+        magnitude = cast<u64>(value)
+    }
+
+    return _FormatUnsignedMagnitude(
+        allocator,
+        magnitude,
+        negative,
+        base,
+    )
+}
+
+/*
+FormatInt formats a machine-sized signed integer.
+
+base must be between 2 and 36.
+*/
+FormatInt :: task(
+    allocator mem.Allocator,
+    value int,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatSigned64(
+        allocator,
+        cast<i64>(value),
+        base,
+    )
+}
+
+/*
+FormatUint formats a machine-sized unsigned integer.
+
+base must be between 2 and 36.
+*/
+FormatUint :: task(
+    allocator mem.Allocator,
+    value uint,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatUnsignedMagnitude(
+        allocator,
+        cast<u64>(value),
+        false,
+        base,
+    )
+}
+
+FormatI8 :: task(
+    allocator mem.Allocator,
+    value i8,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatSigned64(
+        allocator,
+        cast<i64>(value),
+        base,
+    )
+}
+
+FormatI16 :: task(
+    allocator mem.Allocator,
+    value i16,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatSigned64(
+        allocator,
+        cast<i64>(value),
+        base,
+    )
+}
+
+FormatI32 :: task(
+    allocator mem.Allocator,
+    value i32,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatSigned64(
+        allocator,
+        cast<i64>(value),
+        base,
+    )
+}
+
+FormatI64 :: task(
+    allocator mem.Allocator,
+    value i64,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatSigned64(
+        allocator,
+        value,
+        base,
+    )
+}
+
+FormatU8 :: task(
+    allocator mem.Allocator,
+    value u8,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatUnsignedMagnitude(
+        allocator,
+        cast<u64>(value),
+        false,
+        base,
+    )
+}
+
+FormatU16 :: task(
+    allocator mem.Allocator,
+    value u16,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatUnsignedMagnitude(
+        allocator,
+        cast<u64>(value),
+        false,
+        base,
+    )
+}
+
+FormatU32 :: task(
+    allocator mem.Allocator,
+    value u32,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatUnsignedMagnitude(
+        allocator,
+        cast<u64>(value),
+        false,
+        base,
+    )
+}
+
+FormatU64 :: task(
+    allocator mem.Allocator,
+    value u64,
+    base uint = 10,
+) strings.OwnedString {
+    return _FormatUnsignedMagnitude(
+        allocator,
+        value,
+        false,
+        base,
+    )
+}

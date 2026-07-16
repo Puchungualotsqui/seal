@@ -8489,6 +8489,7 @@ func (c *Checker) integerBinaryResultType(
 				span,
 				"integer division by zero",
 			)
+
 			return InvalidType
 		}
 
@@ -8503,6 +8504,7 @@ func (c *Checker) integerBinaryResultType(
 				span,
 				"integer remainder by zero",
 			)
+
 			return InvalidType
 		}
 
@@ -8527,6 +8529,66 @@ func (c *Checker) integerBinaryResultType(
 		value.Xor(
 			left.IntConstant,
 			right.IntConstant,
+		)
+
+	case token.ShiftLeft:
+		if right.IntConstant.Sign() < 0 {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"shift count cannot be negative, got %s",
+					right.IntConstant.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		if !right.IntConstant.IsUint64() {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"shift count %s is too large",
+					right.IntConstant.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		value.Lsh(
+			left.IntConstant,
+			uint(right.IntConstant.Uint64()),
+		)
+
+	case token.ShiftRight:
+		if right.IntConstant.Sign() < 0 {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"shift count cannot be negative, got %s",
+					right.IntConstant.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		if !right.IntConstant.IsUint64() {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"shift count %s is too large",
+					right.IntConstant.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		value.Rsh(
+			left.IntConstant,
+			uint(right.IntConstant.Uint64()),
 		)
 
 	default:
@@ -8572,6 +8634,68 @@ func (c *Checker) checkBinaryExpr(scope *Scope, e *ast.BinaryExpr) *Type {
 
 		c.diags.Add(e.Span(), fmt.Sprintf("operator %q requires numeric operands", e.Op.String()))
 		return InvalidType
+
+	case token.ShiftLeft,
+		token.ShiftRight:
+		if left == nil ||
+			right == nil ||
+			left.Kind == TypeInvalid ||
+			right.Kind == TypeInvalid {
+			return InvalidType
+		}
+
+		if !c.isIntegerLike(left) {
+			c.diags.Add(
+				e.Left.Span(),
+				fmt.Sprintf(
+					"left operand of operator %q must be an integer, got %s",
+					e.Op.String(),
+					left.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		if !c.isIntegerLike(right) {
+			c.diags.Add(
+				e.Right.Span(),
+				fmt.Sprintf(
+					"shift count for operator %q must be an integer, got %s",
+					e.Op.String(),
+					right.String(),
+				),
+			)
+
+			return InvalidType
+		}
+
+		if !c.checkShiftCount(
+			scope,
+			e,
+			left,
+			right,
+		) {
+			return InvalidType
+		}
+
+		/*
+			Unlike ordinary arithmetic, the right operand does not participate in
+			result-type selection.
+
+			    u8Value << intAmount  -> u8
+			    u64Value >> u8Amount -> u64
+			    1 << 10              -> untyped int
+		*/
+		result := left
+
+		return c.integerBinaryResultType(
+			e.Op,
+			left,
+			right,
+			result,
+			e.Span(),
+		)
 
 	case token.Percent:
 		if c.isIntegerLike(left) && c.isIntegerLike(right) {
@@ -13490,6 +13614,51 @@ func unsignedIntegerBounds(
 	return minimum, maximum
 }
 
+func integerStorageBitWidth(
+	t *Type,
+) (uint, bool) {
+	if t == nil {
+		return 0, false
+	}
+
+	if t.Kind == TypeDistinct {
+		return integerStorageBitWidth(
+			t.Underlying,
+		)
+	}
+
+	switch t.Kind {
+	case TypeInt,
+		TypeUint,
+		TypeI64,
+		TypeU64:
+		return 64, true
+
+	case TypeI8,
+		TypeU8:
+		return 8, true
+
+	case TypeI16,
+		TypeU16:
+		return 16, true
+
+	case TypeI32,
+		TypeU32,
+		TypeChar:
+		return 32, true
+
+	default:
+		return 0, false
+	}
+}
+
+func isShiftOperator(
+	op token.Kind,
+) bool {
+	return op == token.ShiftLeft ||
+		op == token.ShiftRight
+}
+
 func integerTypeBounds(
 	t *Type,
 ) (*big.Int, *big.Int, bool) {
@@ -13629,6 +13798,106 @@ func integerConstantConversionAllowed(
 	)
 }
 
+func (c *Checker) compileTimeIntegerValue(
+	scope *Scope,
+	expr ast.Expr,
+	typ *Type,
+) (*big.Int, bool) {
+	if typ != nil &&
+		typ.IntConstant != nil {
+		return cloneBigInt(
+			typ.IntConstant,
+		), true
+	}
+
+	value, ok := c.evalGenericConstExpr(
+		scope,
+		expr,
+	)
+	if !ok ||
+		value.Kind != genericConstInt {
+		return nil, false
+	}
+
+	return big.NewInt(
+		value.IntValue,
+	), true
+}
+
+func (c *Checker) checkShiftCount(
+	scope *Scope,
+	e *ast.BinaryExpr,
+	leftType *Type,
+	rightType *Type,
+) bool {
+	if e == nil {
+		return false
+	}
+
+	count, known := c.compileTimeIntegerValue(
+		scope,
+		e.Right,
+		rightType,
+	)
+
+	/*
+			Runtime shift counts remain deliberately unchecked. The generated C
+		code performs the primitive shift directly, so a negative or oversized
+		runtime count is unsafe.
+	*/
+	if !known {
+		return true
+	}
+
+	if count.Sign() < 0 {
+		c.diags.Add(
+			e.Right.Span(),
+			fmt.Sprintf(
+				"shift count cannot be negative, got %s",
+				count.String(),
+			),
+		)
+
+		return false
+	}
+
+	/*
+		Untyped integers are arbitrary-precision compile-time values. They
+		have no fixed storage width, so a non-negative shift count is valid.
+	*/
+	if leftType != nil &&
+		leftType.Kind == TypeUntypedInt {
+		return true
+	}
+
+	width, hasWidth := integerStorageBitWidth(
+		leftType,
+	)
+	if !hasWidth {
+		return true
+	}
+
+	widthValue := new(big.Int).SetUint64(
+		uint64(width),
+	)
+
+	if count.Cmp(widthValue) >= 0 {
+		c.diags.Add(
+			e.Right.Span(),
+			fmt.Sprintf(
+				"shift count %s is outside the valid range 0 through %d for %s",
+				count.String(),
+				width-1,
+				leftType.String(),
+			),
+		)
+
+		return false
+	}
+
+	return true
+}
+
 func integerTypeAcceptsUntypedConstant(
 	t *Type,
 ) bool {
@@ -13680,17 +13949,49 @@ func genericConstEqual(left genericConstValue, right genericConstValue) (bool, b
 	return false, false
 }
 
-func (c *Checker) evalGenericConstBinaryWithOverloads(scope *Scope, op token.Kind, left genericConstValue, right genericConstValue, span source.Span) (genericConstValue, bool) {
-	if value, ok := evalGenericConstBuiltinBinary(op, left, right); ok {
+func (c *Checker) evalGenericConstBinaryWithOverloads(
+	scope *Scope,
+	op token.Kind,
+	left genericConstValue,
+	right genericConstValue,
+	span source.Span,
+) (genericConstValue, bool) {
+	if value, ok := evalGenericConstBuiltinBinary(
+		op,
+		left,
+		right,
+	); ok {
 		return value, true
 	}
 
+	/*
+		Shifts are primitive-only operations. A failed builtin shift must not
+		fall through to overload lookup.
+	*/
+	if isShiftOperator(op) {
+		return genericConstValue{}, false
+	}
+
 	if op == token.NotEq {
-		if value, ok := c.evalGenericConstOperatorOverload(scope, "!=", left, right, span); ok {
+		if value, ok :=
+			c.evalGenericConstOperatorOverload(
+				scope,
+				"!=",
+				left,
+				right,
+				span,
+			); ok {
 			return value, true
 		}
 
-		value, ok := c.evalGenericConstOperatorOverload(scope, "==", left, right, span)
+		value, ok :=
+			c.evalGenericConstOperatorOverload(
+				scope,
+				"==",
+				left,
+				right,
+				span,
+			)
 		if !ok {
 			return genericConstValue{}, false
 		}
@@ -13703,7 +14004,13 @@ func (c *Checker) evalGenericConstBinaryWithOverloads(scope *Scope, op token.Kin
 		return value, true
 	}
 
-	return c.evalGenericConstOperatorOverload(scope, op.String(), left, right, span)
+	return c.evalGenericConstOperatorOverload(
+		scope,
+		op.String(),
+		left,
+		right,
+		span,
+	)
 }
 
 func (c *Checker) evalGenericConstOperatorOverload(scope *Scope, name string, left genericConstValue, right genericConstValue, span source.Span) (genericConstValue, bool) {
@@ -14225,6 +14532,42 @@ func evalGenericConstBuiltinBinary(op token.Kind, left genericConstValue, right 
 				Type:      BoolType,
 				BoolValue: left.BoolValue && right.BoolValue,
 			}, true
+		}
+
+	case token.ShiftLeft,
+		token.ShiftRight:
+		if left.Kind != genericConstInt ||
+			right.Kind != genericConstInt {
+			return genericConstValue{}, false
+		}
+
+		if right.IntValue < 0 {
+			return genericConstValue{}, false
+		}
+
+		/*
+			genericConstValue currently stores integers as int64. Reject counts
+			that cannot be represented safely by this evaluator.
+
+			The main expression checker uses big.Int for untyped integer constant
+			folding and therefore handles larger untyped shifts separately.
+		*/
+		if right.IntValue >= 64 {
+			return genericConstValue{}, false
+		}
+
+		count := uint(right.IntValue)
+
+		switch op {
+		case token.ShiftLeft:
+			return genericConstIntValue(
+				left.IntValue << count,
+			), true
+
+		case token.ShiftRight:
+			return genericConstIntValue(
+				left.IntValue >> count,
+			), true
 		}
 
 	case token.OrOr:

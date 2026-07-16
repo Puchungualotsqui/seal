@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"seal/internal/parser"
 	"seal/internal/resolver"
 	"seal/internal/source"
+	"seal/internal/token"
 )
 
 type checkerTestRun struct {
@@ -11241,4 +11243,710 @@ Main :: task() {
 		suite.
 	*/
 	_ = sym
+}
+
+func checkerBinaryFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.BinaryExpr {
+	t.Helper()
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	binary, ok := decl.Value.(*ast.BinaryExpr)
+	if !ok {
+		t.Fatalf(
+			"variable value type = %T, want *ast.BinaryExpr",
+			decl.Value,
+		)
+	}
+
+	return binary
+}
+
+func TestCheckerShiftRightResultUsesLeftOperandType(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Main :: task() {
+	value: i16 = 128
+	amount: u8 = 3
+	shifted := value >> amount
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	binary := checkerBinaryFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			2,
+		),
+	)
+
+	got, ok := run.Checker.ExprTypeFor(binary)
+	if !ok {
+		t.Fatal(
+			"shift expression has no checker type",
+		)
+	}
+
+	if !run.Checker.sameType(
+		got,
+		I16Type,
+	) {
+		t.Fatalf(
+			"shift expression type = %s, want i16",
+			got.String(),
+		)
+	}
+}
+
+func TestCheckerShiftAcceptsDifferentIntegerCountType(
+	t *testing.T,
+) {
+	_, reporter := check(
+		t,
+		`
+Main :: task() {
+	value: u64 = 1024
+	signedCount: i8 = 2
+	unsignedCount: u16 = 3
+
+	left := value << signedCount
+	right := value >> unsignedCount
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckerShiftAllowsRuntimeCount(
+	t *testing.T,
+) {
+	_, reporter := check(
+		t,
+		`
+ShiftLeft :: task(
+	value u32,
+	amount int,
+) u32 {
+	return value << amount
+}
+
+ShiftRight :: task(
+	value i64,
+	amount uint,
+) i64 {
+	return value >> amount
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckerShiftRejectsNegativeCompileTimeCount(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: uint = 8
+	result := value >> -1
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected negative shift count diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"shift count cannot be negative, got -1",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant negative shift count diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftRejectsNegativeConstantExpression(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: uint = 8
+	result := value << (1 - 3)
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected negative shift count diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"shift count cannot be negative, got -2",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant shift count -2 diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftRejectsCountGreaterThanOperandWidth(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: i16 = 1
+	result := value >> 31
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected oversized shift count diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"shift count 31 is outside the valid range 0 through 15 for i16",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant i16 shift range diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftAcceptsMaximumValidConcreteCount(
+	t *testing.T,
+) {
+	_, reporter := check(
+		t,
+		`
+Main :: task() {
+	a: u8 = 1
+	b: i16 = 1
+	c: u32 = 1
+	d: i64 = 1
+
+	r1 := a << 7
+	r2 := b >> 15
+	r3 := c << 31
+	r4 := d >> 63
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckerShiftChecksNamedCompileTimeCount(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Count :: 8
+
+Main :: task() {
+	value: u8 = 1
+	result := value << Count
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected named constant shift count diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"shift count 8 is outside the valid range 0 through 7 for u8",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant named constant shift range diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftChecksNamedConstantExpression(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Base :: 4
+Count :: Base + 4
+
+Main :: task() {
+	value: u8 = 1
+	result := value << Count
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected named constant expression shift diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"shift count 8 is outside the valid range 0 through 7 for u8",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant evaluated constant shift diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftRejectsNonIntegerLeftOperand(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: f64 = 1.0
+	result := value << 1
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected non-integer left operand diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		`left operand of operator "<<" must be an integer, got f64`,
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant non-integer left operand diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftRejectsNonIntegerCount(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: uint = 1
+	amount: f32 = 2.0
+	result := value >> amount
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected non-integer shift count diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		`shift count for operator ">>" must be an integer, got f32`,
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant non-integer shift count diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftDoesNotUseOperatorOverloadFallback(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Value :: struct {
+	data int
+}
+
+Main :: task() {
+	value := Value{1}
+	result := value << 1
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected invalid shift operand diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		`left operand of operator "<<" must be an integer, got Value`,
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant primitive shift operand diagnostic",
+			got,
+		)
+	}
+
+	if strings.Contains(
+		got,
+		"operator overload",
+	) {
+		t.Fatalf(
+			"shift unexpectedly attempted overload resolution:\n%s",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftFoldsUntypedIntegerConstant(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Main :: task() {
+	value := 1 << 10
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	binary := checkerBinaryFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			0,
+		),
+	)
+
+	got, ok := run.Checker.ExprTypeFor(binary)
+	if !ok {
+		t.Fatal(
+			"shift expression has no checker type",
+		)
+	}
+
+	if got.Kind != TypeUntypedInt {
+		t.Fatalf(
+			"shift expression kind = %v, want TypeUntypedInt",
+			got.Kind,
+		)
+	}
+
+	if got.IntConstant == nil {
+		t.Fatal(
+			"shift expression has no folded integer constant",
+		)
+	}
+
+	if got.IntConstant.String() != "1024" {
+		t.Fatalf(
+			"folded shift value = %s, want 1024",
+			got.IntConstant.String(),
+		)
+	}
+}
+
+func TestCheckerShiftFoldsLargeUntypedIntegerConstant(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Large :: 1 << 100
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	decl, ok := run.File.Decls[0].(*ast.ConstDecl)
+	if !ok {
+		t.Fatalf(
+			"declaration type = %T, want *ast.ConstDecl",
+			run.File.Decls[0],
+		)
+	}
+
+	binary, ok := decl.Value.(*ast.BinaryExpr)
+	if !ok {
+		t.Fatalf(
+			"constant value type = %T, want *ast.BinaryExpr",
+			decl.Value,
+		)
+	}
+
+	got, ok := run.Checker.ExprTypeFor(binary)
+	if !ok {
+		t.Fatal(
+			"shift expression has no checker type",
+		)
+	}
+
+	if got.Kind != TypeUntypedInt {
+		t.Fatalf(
+			"shift expression kind = %v, want TypeUntypedInt",
+			got.Kind,
+		)
+	}
+
+	if got.IntConstant == nil {
+		t.Fatal(
+			"large shift expression has no folded constant",
+		)
+	}
+
+	const want = "1267650600228229401496703205376"
+
+	if got.IntConstant.String() != want {
+		t.Fatalf(
+			"folded shift value = %s, want %s",
+			got.IntConstant.String(),
+			want,
+		)
+	}
+}
+
+func TestCheckerIntegerBinaryResultTypeFoldsLargeLeftShift(
+	t *testing.T,
+) {
+	reporter := diag.NewReporter()
+	c := New(reporter)
+
+	left := untypedIntConstantType(
+		big.NewInt(1),
+	)
+
+	right := untypedIntConstantType(
+		big.NewInt(100),
+	)
+
+	got := c.integerBinaryResultType(
+		token.ShiftLeft,
+		left,
+		right,
+		UntypedIntType,
+		source.Span{},
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if got == nil ||
+		got.Kind != TypeUntypedInt ||
+		got.IntConstant == nil {
+		t.Fatalf(
+			"result = %#v, want folded untyped integer",
+			got,
+		)
+	}
+
+	const want = "1267650600228229401496703205376"
+
+	if got.IntConstant.String() != want {
+		t.Fatalf(
+			"folded shift value = %s, want %s",
+			got.IntConstant.String(),
+			want,
+		)
+	}
+}
+
+func TestCheckerShiftedConstantMustFitDestinationType(
+	t *testing.T,
+) {
+	reporter := checkSource(
+		t,
+		`
+Main :: task() {
+	value: u64 = 1 << 64
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected shifted constant range diagnostic",
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(
+		got,
+		"integer constant 18446744073709551616 is outside the range of u64",
+	) {
+		t.Fatalf(
+			"diagnostics:\n%s\nwant u64 constant range diagnostic",
+			got,
+		)
+	}
+}
+
+func TestCheckerShiftedConstantCanInitializeU64(
+	t *testing.T,
+) {
+	_, reporter := check(
+		t,
+		`
+Main :: task() {
+	value: u64 = 1 << 63
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestCheckerShiftRightFoldsUntypedIntegerConstant(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Main :: task() {
+	value := 1024 >> 3
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected checker diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	binary := checkerBinaryFromVarStmt(
+		t,
+		checkerTaskStmt(
+			t,
+			run.File,
+			"Main",
+			0,
+		),
+	)
+
+	got, ok := run.Checker.ExprTypeFor(binary)
+	if !ok {
+		t.Fatal(
+			"shift expression has no checker type",
+		)
+	}
+
+	if got.Kind != TypeUntypedInt ||
+		got.IntConstant == nil {
+		t.Fatalf(
+			"shift expression type = %#v, want folded untyped int",
+			got,
+		)
+	}
+
+	if got.IntConstant.String() != "128" {
+		t.Fatalf(
+			"folded shift value = %s, want 128",
+			got.IntConstant.String(),
+		)
+	}
 }

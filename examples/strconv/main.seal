@@ -1,0 +1,569 @@
+TestBool :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    trueText := strconv.FormatBool(
+        allocator,
+        true,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &trueText,
+    )
+
+    falseText := strconv.FormatBool(
+        allocator,
+        false,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &falseText,
+    )
+
+    assert(
+        strings.View(&trueText) ==
+            "true",
+    )
+
+    assert(
+        strings.View(&falseText) ==
+            "false",
+    )
+
+    parsedTrue, validTrue :=
+        strconv.ParseBool("true")
+
+    assert(validTrue)
+    assert(parsedTrue)
+
+    parsedFalse, validFalse :=
+        strconv.ParseBool("false")
+
+    assert(validFalse)
+    assert(!parsedFalse)
+
+    _, invalidUppercase :=
+        strconv.ParseBool("True")
+
+    assert(!invalidUppercase)
+
+    _, invalidNumber :=
+        strconv.ParseBool("1")
+
+    assert(!invalidNumber)
+
+    _, invalidEmpty :=
+        strconv.ParseBool("")
+
+    assert(!invalidEmpty)
+}
+
+TestIntegerFormatting :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    decimal := strconv.FormatInt(
+        allocator,
+        -12345,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &decimal,
+    )
+
+    assert(
+        strings.View(&decimal) ==
+            "-12345",
+    )
+
+    binary := strconv.FormatUint(
+        allocator,
+        42,
+        2,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &binary,
+    )
+
+    assert(
+        strings.View(&binary) ==
+            "101010",
+    )
+
+    hexadecimal := strconv.FormatUint(
+        allocator,
+        65535,
+        16,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &hexadecimal,
+    )
+
+    assert(
+        strings.View(&hexadecimal) ==
+            "ffff",
+    )
+
+    base36 := strconv.FormatUint(
+        allocator,
+        1295,
+        36,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &base36,
+    )
+
+    assert(
+        strings.View(&base36) ==
+            "zz",
+    )
+
+    zero := strconv.FormatInt(
+        allocator,
+        0,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &zero,
+    )
+
+    assert(
+        strings.View(&zero) ==
+            "0",
+    )
+
+    maximumU64 := ~cast<u64>(0)
+
+    maximumU64Text := strconv.FormatU64(
+        allocator,
+        maximumU64,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &maximumU64Text,
+    )
+
+    assert(
+        strings.View(
+            &maximumU64Text,
+        ) ==
+            "18446744073709551615",
+    )
+
+    maximumI64: i64 =
+        9223372036854775807
+
+    minimumI64 :=
+        -maximumI64 -
+        1
+
+    minimumI64Text := strconv.FormatI64(
+        allocator,
+        minimumI64,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &minimumI64Text,
+    )
+
+    assert(
+        strings.View(
+            &minimumI64Text,
+        ) ==
+            "-9223372036854775808",
+    )
+}
+
+TestIntegerParsing :: task() {
+    decimal, decimalValid :=
+        strconv.ParseInt("-12345")
+
+    assert(decimalValid)
+    assert(decimal == -12345)
+
+    plus, plusValid :=
+        strconv.ParseInt("+42")
+
+    assert(plusValid)
+    assert(plus == 42)
+
+    binary, binaryValid :=
+        strconv.ParseUint(
+            "101010",
+            2,
+        )
+
+    assert(binaryValid)
+    assert(binary == 42)
+
+    hexadecimal, hexadecimalValid :=
+        strconv.ParseUint(
+            "FF",
+            16,
+        )
+
+    assert(hexadecimalValid)
+    assert(hexadecimal == 255)
+
+    base36, base36Valid :=
+        strconv.ParseUint(
+            "zZ",
+            36,
+        )
+
+    assert(base36Valid)
+    assert(base36 == 1295)
+
+    minimumI8, minimumI8Valid :=
+        strconv.ParseI8("-128")
+
+    assert(minimumI8Valid)
+    assert(minimumI8 == cast<i8>(-128))
+
+    maximumI8, maximumI8Valid :=
+        strconv.ParseI8("127")
+
+    assert(maximumI8Valid)
+    assert(maximumI8 == cast<i8>(127))
+
+    _, i8PositiveOverflow :=
+        strconv.ParseI8("128")
+
+    assert(!i8PositiveOverflow)
+
+    _, i8NegativeOverflow :=
+        strconv.ParseI8("-129")
+
+    assert(!i8NegativeOverflow)
+
+    minimumI64, minimumI64Valid :=
+        strconv.ParseI64(
+            "-9223372036854775808",
+        )
+
+    assert(minimumI64Valid)
+
+    maximumI64: i64 =
+        9223372036854775807
+
+    assert(
+        minimumI64 ==
+            -maximumI64 -
+                1,
+    )
+
+    maximumU64, maximumU64Valid :=
+        strconv.ParseU64(
+            "18446744073709551615",
+        )
+
+    assert(maximumU64Valid)
+    assert(maximumU64 == ~cast<u64>(0))
+
+    _, u64Overflow :=
+        strconv.ParseU64(
+            "18446744073709551616",
+        )
+
+    assert(!u64Overflow)
+
+    _, emptyInvalid :=
+        strconv.ParseInt("")
+
+    assert(!emptyInvalid)
+
+    _, signInvalid :=
+        strconv.ParseInt("-")
+
+    assert(!signInvalid)
+
+    _, whitespaceInvalid :=
+        strconv.ParseInt(" 42")
+
+    assert(!whitespaceInvalid)
+
+    _, trailingInvalid :=
+        strconv.ParseInt("42x")
+
+    assert(!trailingInvalid)
+
+    _, digitOutsideBase :=
+        strconv.ParseUint(
+            "2",
+            2,
+        )
+
+    assert(!digitOutsideBase)
+
+    _, negativeUnsigned :=
+        strconv.ParseUint("-1")
+
+    assert(!negativeUnsigned)
+
+    _, invalidBase :=
+        strconv.ParseUint(
+            "10",
+            1,
+        )
+
+    assert(!invalidBase)
+}
+
+TestIntegerRoundTrips :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    signedValue: i64 =
+        -712345678901234567
+
+    signedText := strconv.FormatI64(
+        allocator,
+        signedValue,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &signedText,
+    )
+
+    parsedSigned, signedValid :=
+        strconv.ParseI64(
+            strings.View(&signedText),
+        )
+
+    assert(signedValid)
+    assert(parsedSigned == signedValue)
+
+    unsignedValue: u64 =
+        17375808098319191535
+
+    unsignedText := strconv.FormatU64(
+        allocator,
+        unsignedValue,
+        16,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &unsignedText,
+    )
+
+    parsedUnsigned, unsignedValid :=
+        strconv.ParseU64(
+            strings.View(&unsignedText),
+            16,
+        )
+
+    assert(unsignedValid)
+    assert(parsedUnsigned == unsignedValue)
+}
+
+TestFloatParsing :: task() {
+    integer, integerValid :=
+        strconv.ParseF64("12")
+
+    assert(integerValid)
+    assert(integer == 12.0)
+
+    decimal, decimalValid :=
+        strconv.ParseF64("-12.5")
+
+    assert(decimalValid)
+    assert(decimal == -12.5)
+
+    leadingDot, leadingDotValid :=
+        strconv.ParseF64(".5")
+
+    assert(leadingDotValid)
+    assert(leadingDot == 0.5)
+
+    trailingDot, trailingDotValid :=
+        strconv.ParseF64("5.")
+
+    assert(trailingDotValid)
+    assert(trailingDot == 5.0)
+
+    exponent, exponentValid :=
+        strconv.ParseF64("1.25e3")
+
+    assert(exponentValid)
+    assert(exponent == 1250.0)
+
+    smallExponent, smallExponentValid :=
+        strconv.ParseF64("-2.5E-2")
+
+    assert(smallExponentValid)
+    assert(smallExponent == -0.025)
+
+    _, emptyInvalid :=
+        strconv.ParseF64("")
+
+    assert(!emptyInvalid)
+
+    _, whitespaceInvalid :=
+        strconv.ParseF64(" 1.5")
+
+    assert(!whitespaceInvalid)
+
+    _, trailingInvalid :=
+        strconv.ParseF64("1.5x")
+
+    assert(!trailingInvalid)
+
+    _, missingExponent :=
+        strconv.ParseF64("1e")
+
+    assert(!missingExponent)
+
+    _, loneDot :=
+        strconv.ParseF64(".")
+
+    assert(!loneDot)
+
+    _, hexadecimalInvalid :=
+        strconv.ParseF64("0x1p2")
+
+    assert(!hexadecimalInvalid)
+
+    _, overflowInvalid :=
+        strconv.ParseF64("1e9999")
+
+    assert(!overflowInvalid)
+
+    _, underflowInvalid :=
+        strconv.ParseF64("1e-9999")
+
+    assert(!underflowInvalid)
+
+    _, nanValid :=
+        strconv.ParseF64("nan")
+
+    assert(nanValid)
+
+    _, infinityValid :=
+        strconv.ParseF64("inf")
+
+    assert(infinityValid)
+
+    _, negativeInfinityValid :=
+        strconv.ParseF64("-inf")
+
+    assert(negativeInfinityValid)
+}
+
+TestFloatRoundTrips :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    value32: f32 = 12345.125
+
+    text32 := strconv.FormatF32(
+        allocator,
+        value32,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &text32,
+    )
+
+    parsed32, valid32 :=
+        strconv.ParseF32(
+            strings.View(&text32),
+        )
+
+    assert(valid32)
+    assert(parsed32 == value32)
+
+    value64: f64 =
+        123456789.12345679
+
+    text64 := strconv.FormatF64(
+        allocator,
+        value64,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &text64,
+    )
+
+    parsed64, valid64 :=
+        strconv.ParseF64(
+            strings.View(&text64),
+        )
+
+    assert(valid64)
+    assert(parsed64 == value64)
+
+    negativeZero: f64 = -0.0
+
+    negativeZeroText :=
+        strconv.FormatF64(
+            allocator,
+            negativeZero,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZeroText,
+    )
+
+    assert(
+        strings.View(
+            &negativeZeroText,
+        ) == "-0",
+    )
+}
+
+Main :: task() {
+    cAllocator := mem.NewCAllocator()
+
+    allocator := cast<mem.Allocator>(
+        &cAllocator,
+    )
+
+    deallocator := cast<mem.Deallocator>(
+        &cAllocator,
+    )
+
+    TestBool(
+        allocator,
+        deallocator,
+    )
+
+    TestIntegerFormatting(
+        allocator,
+        deallocator,
+    )
+
+    TestIntegerParsing()
+
+    TestIntegerRoundTrips(
+        allocator,
+        deallocator,
+    )
+
+    TestFloatParsing()
+
+    TestFloatRoundTrips(
+        allocator,
+        deallocator,
+    )
+
+    fmt.Println(
+        "All strconv tests passed.",
+    )
+}

@@ -80,6 +80,8 @@ const (
 	Gt         // >
 	LtEq       // <=
 	GtEq       // >=
+	ShiftLeft  // <<
+	ShiftRight // >>
 	Plus       // +
 	Minus      // -
 	Star       // *
@@ -271,6 +273,10 @@ func (k Kind) String() string {
 		return "<="
 	case GtEq:
 		return ">="
+	case ShiftLeft:
+		return "<<"
+	case ShiftRight:
+		return ">>"
 	case Plus:
 		return "+"
 	case Minus:

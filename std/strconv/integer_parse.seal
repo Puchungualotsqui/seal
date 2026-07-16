@@ -1,0 +1,464 @@
+/*
+_IntegerBaseIsValid reports whether base can be used for integer
+conversion.
+*/
+_IntegerBaseIsValid :: pure task(
+    base uint,
+) bool {
+    return base >= 2 &&
+        base <= 36
+}
+
+/*
+_DigitValue converts one ASCII integer digit to its numeric value.
+
+Lowercase and uppercase letters are accepted.
+
+When false is returned, the accompanying digit value is unspecified.
+*/
+_DigitValue :: pure task(
+    value char,
+) uint, bool {
+    if value >= '0' &&
+        value <= '9' {
+        return cast<uint>(value) -
+            cast<uint>('0'), true
+    }
+
+    if value >= 'a' &&
+        value <= 'z' {
+        return cast<uint>(value) -
+            cast<uint>('a') +
+            10, true
+    }
+
+    if value >= 'A' &&
+        value <= 'Z' {
+        return cast<uint>(value) -
+            cast<uint>('A') +
+            10, true
+    }
+
+    empty: uint
+
+    return empty, false
+}
+
+/*
+_ParseUnsignedDigits parses unsigned digits beginning at start.
+
+limit is the largest permitted result.
+
+The caller is responsible for processing an optional sign.
+*/
+_ParseUnsignedDigits :: pure task(
+    value string,
+    start int,
+    base uint,
+    limit u64,
+) u64, bool {
+    length := cast<int>(
+        len(value),
+    )
+
+    if start < 0 ||
+        start >= length {
+        empty: u64
+
+        return empty, false
+    }
+
+    result: u64 = 0
+    divisor := cast<u64>(base)
+    index := start
+
+    for index < length {
+        digit, valid := _DigitValue(
+            value[index],
+        )
+
+        if !valid ||
+            digit >= base {
+            empty: u64
+
+            return empty, false
+        }
+
+        digitValue := cast<u64>(digit)
+
+        /*
+        Check:
+
+            result * divisor + digitValue <= limit
+
+        without overflowing the intermediate multiplication.
+        */
+        if digitValue > limit {
+            empty: u64
+
+            return empty, false
+        }
+
+        if result >
+            (limit - digitValue) /
+                divisor {
+            empty: u64
+
+            return empty, false
+        }
+
+        result =
+            result *
+                divisor +
+            digitValue
+
+        index += 1
+    }
+
+    return result, true
+}
+
+/*
+_ParseUnsignedLimited parses an unsigned value with a caller-provided
+maximum.
+
+A leading plus sign is accepted. A leading minus sign is rejected.
+*/
+_ParseUnsignedLimited :: pure task(
+    value string,
+    base uint,
+    limit u64,
+) u64, bool {
+    if !_IntegerBaseIsValid(base) {
+        empty: u64
+
+        return empty, false
+    }
+
+    length := cast<int>(
+        len(value),
+    )
+
+    if length == 0 {
+        empty: u64
+
+        return empty, false
+    }
+
+    start := 0
+    first := value[0]
+
+    if first == '+' {
+        start = 1
+    } else if first == '-' {
+        empty: u64
+
+        return empty, false
+    }
+
+    return _ParseUnsignedDigits(
+        value,
+        start,
+        base,
+        limit,
+    )
+}
+
+/*
+_ParseSignedLimited parses a signed value with explicit positive and
+negative magnitude limits.
+*/
+_ParseSignedLimited :: pure task(
+    value string,
+    base uint,
+    positiveLimit u64,
+    negativeLimit u64,
+) i64, bool {
+    if !_IntegerBaseIsValid(base) {
+        empty: i64
+
+        return empty, false
+    }
+
+    length := cast<int>(
+        len(value),
+    )
+
+    if length == 0 {
+        empty: i64
+
+        return empty, false
+    }
+
+    start := 0
+    negative := false
+    first := value[0]
+
+    if first == '+' {
+        start = 1
+    } else if first == '-' {
+        negative = true
+        start = 1
+    }
+
+    limit := positiveLimit
+
+    if negative {
+        limit = negativeLimit
+    }
+
+    magnitude, valid :=
+        _ParseUnsignedDigits(
+            value,
+            start,
+            base,
+            limit,
+        )
+
+    if !valid {
+        empty: i64
+
+        return empty, false
+    }
+
+    if !negative {
+        return cast<i64>(magnitude), true
+    }
+
+    /*
+    The negative limit is one larger than the positive limit for every
+    two's-complement signed integer type.
+
+    Handle the minimum value without casting its unsigned magnitude to
+    i64.
+    */
+    if magnitude == negativeLimit {
+        minimum :=
+            -cast<i64>(positiveLimit) -
+            1
+
+        return minimum, true
+    }
+
+    return -cast<i64>(magnitude), true
+}
+
+/*
+ParseInt parses a machine-sized signed integer.
+
+A leading plus or minus sign is accepted.
+
+No whitespace, prefixes, separators, or trailing characters are
+accepted.
+
+When false is returned, the accompanying int value is unspecified and
+must not be used.
+*/
+ParseInt :: pure task(
+    value string,
+    base uint = 10,
+) int, bool {
+    maximumUnsigned := ~cast<uint>(0)
+
+    positiveLimit := cast<u64>(
+        maximumUnsigned >> 1,
+    )
+
+    negativeLimit :=
+        positiveLimit + 1
+
+    result, valid := _ParseSignedLimited(
+        value,
+        base,
+        positiveLimit,
+        negativeLimit,
+    )
+
+    if !valid {
+        empty: int
+
+        return empty, false
+    }
+
+    return cast<int>(result), true
+}
+
+/*
+ParseUint parses a machine-sized unsigned integer.
+
+A leading plus sign is accepted. A leading minus sign is rejected.
+*/
+ParseUint :: pure task(
+    value string,
+    base uint = 10,
+) uint, bool {
+    limit := cast<u64>(
+        ~cast<uint>(0),
+    )
+
+    result, valid :=
+        _ParseUnsignedLimited(
+            value,
+            base,
+            limit,
+        )
+
+    if !valid {
+        empty: uint
+
+        return empty, false
+    }
+
+    return cast<uint>(result), true
+}
+
+ParseI8 :: pure task(
+    value string,
+    base uint = 10,
+) i8, bool {
+    result, valid := _ParseSignedLimited(
+        value,
+        base,
+        127,
+        128,
+    )
+
+    if !valid {
+        empty: i8
+
+        return empty, false
+    }
+
+    return cast<i8>(result), true
+}
+
+ParseI16 :: pure task(
+    value string,
+    base uint = 10,
+) i16, bool {
+    result, valid := _ParseSignedLimited(
+        value,
+        base,
+        32767,
+        32768,
+    )
+
+    if !valid {
+        empty: i16
+
+        return empty, false
+    }
+
+    return cast<i16>(result), true
+}
+
+ParseI32 :: pure task(
+    value string,
+    base uint = 10,
+) i32, bool {
+    result, valid := _ParseSignedLimited(
+        value,
+        base,
+        2147483647,
+        2147483648,
+    )
+
+    if !valid {
+        empty: i32
+
+        return empty, false
+    }
+
+    return cast<i32>(result), true
+}
+
+ParseI64 :: pure task(
+    value string,
+    base uint = 10,
+) i64, bool {
+    positiveLimit :=
+        cast<u64>(
+            9223372036854775807,
+        )
+
+    negativeLimit :=
+        positiveLimit + 1
+
+    return _ParseSignedLimited(
+        value,
+        base,
+        positiveLimit,
+        negativeLimit,
+    )
+}
+
+ParseU8 :: pure task(
+    value string,
+    base uint = 10,
+) u8, bool {
+    result, valid :=
+        _ParseUnsignedLimited(
+            value,
+            base,
+            255,
+        )
+
+    if !valid {
+        empty: u8
+
+        return empty, false
+    }
+
+    return cast<u8>(result), true
+}
+
+ParseU16 :: pure task(
+    value string,
+    base uint = 10,
+) u16, bool {
+    result, valid :=
+        _ParseUnsignedLimited(
+            value,
+            base,
+            65535,
+        )
+
+    if !valid {
+        empty: u16
+
+        return empty, false
+    }
+
+    return cast<u16>(result), true
+}
+
+ParseU32 :: pure task(
+    value string,
+    base uint = 10,
+) u32, bool {
+    result, valid :=
+        _ParseUnsignedLimited(
+            value,
+            base,
+            4294967295,
+        )
+
+    if !valid {
+        empty: u32
+
+        return empty, false
+    }
+
+    return cast<u32>(result), true
+}
+
+ParseU64 :: pure task(
+    value string,
+    base uint = 10,
+) u64, bool {
+    return _ParseUnsignedLimited(
+        value,
+        base,
+        ~cast<u64>(0),
+    )
+}
