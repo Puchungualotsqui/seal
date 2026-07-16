@@ -89,7 +89,7 @@ string whose backing storage remains valid while it is being written.
 WriteStringable :: task(
     value strings.Stringable,
 ) {
-    text := strings.String(value)
+    text := String(value)
 
     _WriteString(text)
 }

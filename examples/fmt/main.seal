@@ -428,7 +428,7 @@ TestStringable :: task() {
     fmt.Println()
 
     assert(
-        strings.String(stringable) ==
+        String(stringable) ==
             "David",
     )
 
