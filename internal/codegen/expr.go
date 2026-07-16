@@ -2085,10 +2085,13 @@ func (g *Generator) emitPackageTaskCall(
 				packageName,
 			),
 		)
+
 		return "0"
 	}
 
-	rawInfo, hasTask := pkg.Tasks[taskName]
+	rawInfo, hasTask :=
+		pkg.Tasks[taskName]
+
 	if !hasTask {
 		g.error(
 			argsSpan(args),
@@ -2098,6 +2101,7 @@ func (g *Generator) emitPackageTaskCall(
 				taskName,
 			),
 		)
+
 		return "0"
 	}
 
@@ -2115,7 +2119,8 @@ func (g *Generator) emitPackageTaskCall(
 
 	if info.IsVariadic &&
 		!info.IsExtern {
-		return g.emitSealVariadicTaskCall(
+		return g.emitSealVariadicTaskCallWithDefaultContext(
+			packageName,
 			name,
 			info,
 			args,
@@ -2125,24 +2130,27 @@ func (g *Generator) emitPackageTaskCall(
 
 	var outArgs []string
 
-	for i, arg := range args {
+	for index, arg := range args {
 		if preparedArgs != nil &&
-			i < len(preparedArgs) {
+			index < len(preparedArgs) {
 			outArgs = append(
 				outArgs,
-				preparedArgs[i],
+				preparedArgs[index],
 			)
+
 			continue
 		}
 
-		expected := (*CType)(nil)
+		var expected *CType
 
-		if i < len(info.ParamTypes) {
-			if i < len(info.ParamIsVariadic) &&
-				info.ParamIsVariadic[i] {
+		if index < len(info.ParamTypes) {
+			if index <
+				len(info.ParamIsVariadic) &&
+				info.ParamIsVariadic[index] {
 				expected = nil
 			} else {
-				expected = &info.ParamTypes[i]
+				expected =
+					&info.ParamTypes[index]
 			}
 		}
 
@@ -2156,34 +2164,40 @@ func (g *Generator) emitPackageTaskCall(
 	}
 
 	if !info.IsVariadic {
-		for i := len(args); i < len(info.ParamTypes); i++ {
-			if i >= len(info.ParamHasDefault) ||
-				!info.ParamHasDefault[i] {
+		for index := len(args); index < len(info.ParamTypes); index++ {
+			if index >=
+				len(info.ParamHasDefault) ||
+				!info.ParamHasDefault[index] {
 				continue
 			}
 
-			if i >= len(info.ParamDefaults) ||
-				info.ParamDefaults[i] == nil {
+			if index >=
+				len(info.ParamDefaults) ||
+				info.ParamDefaults[index] ==
+					nil {
 				g.error(
 					argsSpan(args),
 					fmt.Sprintf(
 						"imported task %s.%s is missing default argument %d",
 						packageName,
 						taskName,
-						i+1,
+						index+1,
 					),
 				)
+
 				continue
 			}
 
-			expected := info.ParamTypes[i]
+			expected :=
+				info.ParamTypes[index]
+
 			value := ""
 
 			g.withTypeContext(
 				packageName,
 				func() {
 					value = g.emitExpr(
-						info.ParamDefaults[i],
+						info.ParamDefaults[index],
 						&expected,
 					)
 				},
@@ -2199,7 +2213,10 @@ func (g *Generator) emitPackageTaskCall(
 	return fmt.Sprintf(
 		"%s(%s)",
 		name,
-		strings.Join(outArgs, ", "),
+		strings.Join(
+			outArgs,
+			", ",
+		),
 	)
 }
 
@@ -2668,42 +2685,240 @@ func (g *Generator) emitGenericIntrinsicCall(
 	}
 }
 
-func (g *Generator) emitSealVariadicTaskCall(name string, info TaskInfo, args []ast.Expr, preparedArgs []string) string {
-	total := len(info.ParamTypes)
-	fixedCount := total - 1
+func (g *Generator) emitSealVariadicTaskCall(
+	name string,
+	info TaskInfo,
+	args []ast.Expr,
+	preparedArgs []string,
+) string {
+	return g.emitSealVariadicTaskCallWithDefaultContext(
+		"",
+		name,
+		info,
+		args,
+		preparedArgs,
+	)
+}
 
-	var outArgs []string
+func (g *Generator) emitSealVariadicTaskCallWithDefaultContext(
+	defaultPackageName string,
+	name string,
+	info TaskInfo,
+	args []ast.Expr,
+	preparedArgs []string,
+) string {
+	totalParamCount := len(info.ParamTypes)
 
-	for i := 0; i < fixedCount && i < len(args); i++ {
-		if preparedArgs != nil && i < len(preparedArgs) {
-			outArgs = append(outArgs, preparedArgs[i])
+	if totalParamCount == 0 {
+		g.error(
+			argsSpan(args),
+			fmt.Sprintf(
+				"variadic task %s has no variadic parameter",
+				name,
+			),
+		)
+
+		return "0"
+	}
+
+	/*
+		The final parameter stores the variadic element type.
+
+		For:
+
+		    Println(
+		        format string = "",
+		        args ...any,
+		    )
+
+		ParamTypes contains:
+
+		    [string, any]
+
+		and fixedParamCount is therefore one.
+	*/
+	fixedParamCount := totalParamCount - 1
+
+	outArgs := make(
+		[]string,
+		0,
+		totalParamCount,
+	)
+
+	/*
+		Emit the fixed arguments explicitly supplied by the caller.
+
+		Arguments beyond fixedParamCount belong to the variadic portion.
+	*/
+	providedFixedCount := len(args)
+
+	if providedFixedCount >
+		fixedParamCount {
+		providedFixedCount =
+			fixedParamCount
+	}
+
+	for index := 0; index < providedFixedCount; index++ {
+		if preparedArgs != nil &&
+			index < len(preparedArgs) {
+			outArgs = append(
+				outArgs,
+				preparedArgs[index],
+			)
+
 			continue
 		}
 
-		expected := info.ParamTypes[i]
-		outArgs = append(outArgs, g.emitExpr(args[i], &expected))
+		expected := info.ParamTypes[index]
+
+		outArgs = append(
+			outArgs,
+			g.emitExpr(
+				args[index],
+				&expected,
+			),
+		)
 	}
 
-	elemType := CInvalid
-	if total > 0 {
-		elemType = info.ParamTypes[total-1]
+	/*
+		Fill omitted trailing fixed parameters from their defaults.
+
+		The previous implementation skipped this step and immediately emitted
+		the variadic container. Consequently:
+
+		    Println()
+
+		was lowered as:
+
+		    fmt_Println(emptyVariadic)
+
+		instead of:
+
+		    fmt_Println(emptyString, emptyVariadic)
+	*/
+	for index := providedFixedCount; index < fixedParamCount; index++ {
+		if index >= len(info.ParamHasDefault) ||
+			!info.ParamHasDefault[index] {
+			g.error(
+				argsSpan(args),
+				fmt.Sprintf(
+					"variadic task %s is missing required fixed argument %d",
+					name,
+					index+1,
+				),
+			)
+
+			return "0"
+		}
+
+		if index >= len(info.ParamDefaults) ||
+			info.ParamDefaults[index] == nil {
+			g.error(
+				argsSpan(args),
+				fmt.Sprintf(
+					"variadic task %s is missing default expression for argument %d",
+					name,
+					index+1,
+				),
+			)
+
+			return "0"
+		}
+
+		expected := info.ParamTypes[index]
+		defaultValue := ""
+
+		emitDefault := func() {
+			defaultValue = g.emitExpr(
+				info.ParamDefaults[index],
+				&expected,
+			)
+		}
+
+		/*
+			Imported task defaults belong to the imported package's lexical
+			and type context.
+
+			Caller expressions must still be emitted in the caller context,
+			so only the default expression is emitted under this temporary
+			package context.
+		*/
+		if defaultPackageName != "" &&
+			defaultPackageName !=
+				g.packageName {
+			g.withTypeContext(
+				defaultPackageName,
+				emitDefault,
+			)
+		} else {
+			emitDefault()
+		}
+
+		outArgs = append(
+			outArgs,
+			defaultValue,
+		)
 	}
 
-	var rest []ast.Expr
-	if len(args) > fixedCount {
-		rest = args[fixedCount:]
+	var variadicArgs []ast.Expr
+
+	if len(args) > fixedParamCount {
+		variadicArgs =
+			args[fixedParamCount:]
 	}
 
-	if len(rest) == 1 {
-		if spread, ok := rest[0].(*ast.SpreadExpr); ok {
-			outArgs = append(outArgs, g.emitSpreadAsVariadic(elemType, spread))
-			return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+	variadicElemType :=
+		info.ParamTypes[totalParamCount-1]
+
+	/*
+		A single spread argument is already represented as a Seal variadic
+		container and can be forwarded directly.
+	*/
+	if len(variadicArgs) == 1 {
+		if spread, ok :=
+			variadicArgs[0].(*ast.SpreadExpr); ok {
+			outArgs = append(
+				outArgs,
+				g.emitSpreadAsVariadic(
+					variadicElemType,
+					spread,
+				),
+			)
+
+			return fmt.Sprintf(
+				"%s(%s)",
+				name,
+				strings.Join(
+					outArgs,
+					", ",
+				),
+			)
 		}
 	}
 
-	outArgs = append(outArgs, g.emitVariadicLiteral(elemType, rest, preparedArgs, fixedCount))
+	/*
+		Otherwise construct the variadic container from the remaining
+		arguments. preparedOffset remains fixedParamCount because preparedArgs
+		is indexed according to the original source argument list.
+	*/
+	outArgs = append(
+		outArgs,
+		g.emitVariadicLiteral(
+			variadicElemType,
+			variadicArgs,
+			preparedArgs,
+			fixedParamCount,
+		),
+	)
 
-	return fmt.Sprintf("%s(%s)", name, strings.Join(outArgs, ", "))
+	return fmt.Sprintf(
+		"%s(%s)",
+		name,
+		strings.Join(
+			outArgs,
+			", ",
+		),
+	)
 }
 
 func (g *Generator) emitSpreadAsVariadic(
