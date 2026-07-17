@@ -124,12 +124,177 @@ func (g *Generator) emitDistincts(file *ast.File) {
 func (g *Generator) emitImportedDistincts() {
 	type importedDistinctEmission struct {
 		PackageName string
+		TypeName    string
 		CName       string
 		Decl        *ast.DistinctDecl
 	}
 
 	entries :=
 		map[string]importedDistinctEmission{}
+
+	/*
+		Return the imported distinct represented by a named underlying type.
+
+		The packageName argument is the package in whose source context the
+		type was written. Therefore:
+
+		    Identifier
+
+		inside package auth means auth.Identifier, while:
+
+		    ids.Identifier
+
+		explicitly means ids.Identifier.
+	*/
+	distinctFromNamedType := func(
+		contextPackageName string,
+		named *ast.NamedType,
+	) (
+		string,
+		string,
+		*ast.DistinctDecl,
+		bool,
+	) {
+		if named == nil ||
+			len(named.Parts) == 0 {
+			return "", "", nil, false
+		}
+
+		packageName := contextPackageName
+		typeName :=
+			named.Parts[len(named.Parts)-1].Name
+
+		if len(named.Parts) >= 2 {
+			packageName =
+				named.Parts[0].Name
+		}
+
+		if packageName == "" ||
+			typeName == "" {
+			return "", "", nil, false
+		}
+
+		pkg :=
+			g.typePackageInfo(
+				packageName,
+			)
+
+		if pkg == nil {
+			return "", "", nil, false
+		}
+
+		decl := pkg.Distincts[typeName]
+
+		if decl == nil {
+			return "", "", nil, false
+		}
+
+		return packageName,
+			typeName,
+			decl,
+			true
+	}
+
+	isSwitchIntegerBuiltinName := func(
+		name string,
+	) bool {
+		switch name {
+		case "int",
+			"uint",
+			"i8",
+			"i16",
+			"i32",
+			"i64",
+			"u8",
+			"u16",
+			"u32",
+			"u64",
+			"char":
+			return true
+
+		default:
+			return false
+		}
+	}
+
+	/*
+		Determine whether an imported distinct is recursively backed by a
+		switch-compatible integer type without lowering arbitrary AST types.
+
+		This is intentionally AST-based. Calling cTypeFromAst here for every
+		imported distinct can register generic structures during the emission
+		phase, after generic-instance collection has already completed.
+	*/
+	var isIntegerBackedDistinct func(
+		string,
+		string,
+		*ast.DistinctDecl,
+		map[string]bool,
+	) bool
+
+	isIntegerBackedDistinct = func(
+		packageName string,
+		typeName string,
+		decl *ast.DistinctDecl,
+		visiting map[string]bool,
+	) bool {
+		if packageName == "" ||
+			typeName == "" ||
+			decl == nil ||
+			decl.Underlying == nil {
+			return false
+		}
+
+		key :=
+			packageName + "." + typeName
+
+		if visiting[key] {
+			return false
+		}
+
+		visiting[key] = true
+
+		defer delete(
+			visiting,
+			key,
+		)
+
+		named, ok :=
+			decl.Underlying.(*ast.NamedType)
+
+		if !ok ||
+			len(named.Parts) == 0 {
+			return false
+		}
+
+		// Builtin types must be unqualified.
+		if len(named.Parts) == 1 &&
+			isSwitchIntegerBuiltinName(
+				named.Parts[0].Name,
+			) {
+			return true
+		}
+
+		dependencyPackage,
+			dependencyName,
+			dependencyDecl,
+			ok :=
+			distinctFromNamedType(
+				packageName,
+				named,
+			)
+
+		if !ok {
+			return false
+		}
+
+		return isIntegerBackedDistinct(
+			dependencyPackage,
+			dependencyName,
+			dependencyDecl,
+			visiting,
+		)
+	}
 
 	for mapKey, pkg := range g.packages {
 		if pkg == nil {
@@ -147,26 +312,35 @@ func (g *Generator) emitImportedDistincts() {
 			continue
 		}
 
-		for distinctName, decl := range pkg.Distincts {
+		for typeName, decl := range pkg.Distincts {
 			if decl == nil {
+				continue
+			}
+
+			if !isIntegerBackedDistinct(
+				packageName,
+				typeName,
+				decl,
+				map[string]bool{},
+			) {
 				continue
 			}
 
 			cName :=
 				cImportedTypeName(
 					packageName,
-					distinctName,
+					typeName,
 				)
 
-			// The same PackageInfo may be reachable under more than one map
-			// key. The generated C name is the stable identity.
-			if _, exists := entries[cName]; exists {
+			if _, alreadyCollected :=
+				entries[cName]; alreadyCollected {
 				continue
 			}
 
 			entries[cName] =
 				importedDistinctEmission{
 					PackageName: packageName,
+					TypeName:    typeName,
 					CName:       cName,
 					Decl:        decl,
 				}
@@ -192,19 +366,6 @@ func (g *Generator) emitImportedDistincts() {
 
 	sort.Strings(names)
 
-	/*
-		Emit distinct dependencies before the aliases that use them.
-
-		For example:
-
-		    distinct Identifier uint
-		    distinct UserId Identifier
-
-		must become:
-
-		    typedef uintptr_t pkg_Identifier;
-		    typedef pkg_Identifier pkg_UserId;
-	*/
 	const (
 		distinctNotVisited uint8 = iota
 		distinctVisiting
@@ -248,6 +409,51 @@ func (g *Generator) emitImportedDistincts() {
 
 		states[name] = distinctVisiting
 
+		/*
+			If this distinct is backed by another imported distinct, emit that
+			typedef first.
+
+			This dependency lookup is AST-only so it does not register generic
+			instances during C emission.
+		*/
+		if named, ok :=
+			entry.Decl.Underlying.(*ast.NamedType); ok {
+			dependencyPackage,
+				dependencyName,
+				_,
+				hasDependency :=
+				distinctFromNamedType(
+					entry.PackageName,
+					named,
+				)
+
+			if hasDependency {
+				dependencyCName :=
+					cImportedTypeName(
+						dependencyPackage,
+						dependencyName,
+					)
+
+				if _, collected :=
+					entries[dependencyCName]; collected {
+					if !emit(
+						dependencyCName,
+					) {
+						states[name] =
+							distinctFailed
+
+						return false
+					}
+				}
+			}
+		}
+
+		/*
+			The preflight check above guarantees that this conversion can only
+			traverse builtin integer types and imported distinct aliases. It
+			cannot discover or register structs, interfaces, or generic struct
+			instances.
+		*/
 		underlying :=
 			g.cTypeFromAstInTypeContext(
 				entry.PackageName,
@@ -265,16 +471,6 @@ func (g *Generator) emitImportedDistincts() {
 
 			states[name] = distinctFailed
 			return false
-		}
-
-		// An imported distinct may itself be backed by another imported
-		// distinct. CType.SealName contains the generated imported C name.
-		if _, isDistinctDependency :=
-			entries[underlying.SealName]; isDistinctDependency {
-			if !emit(underlying.SealName) {
-				states[name] = distinctFailed
-				return false
-			}
 		}
 
 		g.linef(
