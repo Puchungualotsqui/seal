@@ -1235,43 +1235,82 @@ func (g *Generator) collectGenericStructInstancesFromStmt(
 	}
 }
 
-func (g *Generator) collectGenericStructInstancesFromType(typ ast.Type) {
+func (g *Generator) collectGenericStructInstancesFromType(
+	typ ast.Type,
+) {
 	switch t := typ.(type) {
 	case *ast.InterfaceSelfType:
 		return
 
 	case *ast.PointerType:
-		g.collectGenericStructInstancesFromType(t.Elem)
+		g.collectGenericStructInstancesFromType(
+			t.Elem,
+		)
 
 	case *ast.InlineArrayType:
-		g.collectGenericStructInstancesFromType(t.Elem)
-		g.collectGenericStructInstancesFromExpr(t.Length)
+		g.collectGenericStructInstancesFromType(
+			t.Elem,
+		)
+
+		g.collectGenericStructInstancesFromExpr(
+			t.Length,
+		)
 
 	case *ast.GenericType:
-		if pkgName, typeName, ok := packageTypeNameFromAst(t.Base); ok {
-			if pkg := g.packages[pkgName]; pkg != nil {
-				if decl := pkg.Structs[typeName]; decl != nil && len(decl.GenericParams) > 0 {
-					_ = g.cTypeFromGenericType(t)
+		if pkgName,
+			typeName,
+			ok :=
+			packageTypeNameFromAst(
+				t.Base,
+			); ok {
+			if pkg :=
+				g.typePackageInfo(
+					pkgName,
+				); pkg != nil {
+				if decl :=
+					pkg.Structs[typeName]; decl != nil &&
+					len(decl.GenericParams) > 0 {
+					_ = g.cTypeFromGenericType(
+						t,
+					)
 				}
 			}
 		} else {
-			baseName := typeNameFromAst(t.Base)
+			baseName :=
+				typeNameFromAst(
+					t.Base,
+				)
 
-			if decl := g.structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
-				_ = g.cTypeFromGenericType(t)
+			if decl :=
+				g.structs[baseName]; decl != nil &&
+				len(decl.GenericParams) > 0 {
+				_ = g.cTypeFromGenericType(
+					t,
+				)
 			} else if g.typeContextPackage != "" {
-				if pkg := g.packages[g.typeContextPackage]; pkg != nil {
-					if decl := pkg.Structs[baseName]; decl != nil && len(decl.GenericParams) > 0 {
-						_ = g.cTypeFromGenericType(t)
+				if pkg :=
+					g.typePackageInfo(
+						g.typeContextPackage,
+					); pkg != nil {
+					if decl :=
+						pkg.Structs[baseName]; decl != nil &&
+						len(decl.GenericParams) > 0 {
+						_ = g.cTypeFromGenericType(
+							t,
+						)
 					}
 				}
 			}
 		}
 
-		g.collectGenericStructInstancesFromType(t.Base)
+		g.collectGenericStructInstancesFromType(
+			t.Base,
+		)
 
 		for _, arg := range t.Args {
-			g.collectGenericStructInstancesFromGenericArg(arg)
+			g.collectGenericStructInstancesFromGenericArg(
+				arg,
+			)
 		}
 	}
 }
@@ -2243,18 +2282,6 @@ func (g *Generator) specializedStructCName(decl *ast.StructDecl, args []ast.Gene
 	return strings.Join(parts, "_")
 }
 
-func (g *Generator) emitGenericStructs() {
-	names := make([]string, 0, len(g.genericStructs))
-	for name := range g.genericStructs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		g.emitGenericStructInstance(name, map[string]bool{})
-	}
-}
-
 func (g *Generator) emitGenericStructInstance(name string, visiting map[string]bool) {
 	if g.emittedGenericStructs[name] {
 		return
@@ -2443,8 +2470,26 @@ func (g *Generator) registerImportedGenericStructInstance(
 		return CInvalid.Name
 	}
 
-	if _, exists :=
-		g.importedGenericStructs[name]; exists {
+	if existing :=
+		g.importedGenericStructs[name]; existing != nil {
+		/*
+			Always retain owner-qualified arguments.
+
+			A qualified argument such as os.DirectoryEntry lowers to:
+
+			    DirectoryEntry
+
+			inside os.c, and:
+
+			    os_DirectoryEntry
+
+			inside every other translation unit.
+		*/
+		existing.Args = append(
+			[]ast.GenericArg(nil),
+			requestArgs...,
+		)
+
 		g.addImportedGenericStructRequest(
 			packageName,
 			typeName,
@@ -2465,7 +2510,7 @@ func (g *Generator) registerImportedGenericStructInstance(
 			Decl:        decl,
 			Args: append(
 				[]ast.GenericArg(nil),
-				args...,
+				requestArgs...,
 			),
 		}
 
@@ -2502,18 +2547,6 @@ func (g *Generator) specializedImportedStructCName(packageName string, typeName 
 	}
 
 	return strings.Join(parts, "_")
-}
-
-func (g *Generator) emitImportedGenericStructs() {
-	names := make([]string, 0, len(g.importedGenericStructs))
-	for name := range g.importedGenericStructs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		g.emitImportedGenericStructInstance(name, map[string]bool{})
-	}
 }
 
 func (g *Generator) emitImportedGenericStructInstance(name string, visiting map[string]bool) {
@@ -2837,7 +2870,13 @@ func (g *Generator) registerImportedGenericTaskInstance(
 		requestArgs,
 	)
 
-	if _, exists := g.importedGenericTasks[name]; exists {
+	if existing :=
+		g.importedGenericTasks[name]; existing != nil {
+		existing.Args = append(
+			[]ast.GenericArg(nil),
+			requestArgs...,
+		)
+
 		g.addImportedGenericTaskRequest(
 			packageName,
 			taskName,
@@ -2852,7 +2891,7 @@ func (g *Generator) registerImportedGenericTaskInstance(
 
 	copiedArgs := append(
 		[]ast.GenericArg(nil),
-		args...,
+		requestArgs...,
 	)
 
 	g.importedGenericTasks[name] =
@@ -3622,48 +3661,124 @@ func (g *Generator) genericTaskArgCName(arg ast.GenericArg) string {
 	return "invalid_task"
 }
 
-func (g *Generator) genericTypeArgCName(arg ast.GenericArg) string {
+func (g *Generator) namedGenericTypeIdentityCName(
+	typ ast.Type,
+) (
+	string,
+	bool,
+) {
+	named, ok :=
+		typ.(*ast.NamedType)
+
+	if !ok ||
+		len(named.Parts) == 0 {
+		return "", false
+	}
+
+	typeName :=
+		named.Parts[len(named.Parts)-1].Name
+
+	if typeName == "" {
+		return "", false
+	}
+
+	/*
+		Explicitly qualified types always retain their semantic owner in the
+		specialization identity.
+
+		    os.DirectoryEntry -> os_DirectoryEntry
+
+		This remains true while generating package os itself. C type lowering
+		may use DirectoryEntry locally, but specialization identity must remain
+		stable across translation units.
+	*/
+	if len(named.Parts) >= 2 {
+		packageName :=
+			named.Parts[0].Name
+
+		if packageName == "" {
+			return "", false
+		}
+
+		return sanitizeCName(
+			cImportedTypeName(
+				packageName,
+				typeName,
+			),
+		), true
+	}
+
+	if spec, exists :=
+		builtin.LookupType(typeName); exists {
+		return sanitizeCName(
+			spec.Name,
+		), true
+	}
+
+	/*
+		Unqualified user-defined types also receive their semantic owner.
+
+		This ensures that these two registrations produce the same identity:
+
+		    DynamicArray<DirectoryEntry>
+		    DynamicArray<os.DirectoryEntry>
+	*/
+	owner :=
+		g.crossPackageTypeOwner(
+			typeName,
+		)
+
+	if owner != "" {
+		return sanitizeCName(
+			cImportedTypeName(
+				owner,
+				typeName,
+			),
+		), true
+	}
+
+	return "", false
+}
+
+func (g *Generator) genericTypeArgCName(
+	arg ast.GenericArg,
+) string {
 	if g.genericSubst != nil {
-		arg = g.substituteGenericArgForCGen(arg, g.genericSubst)
+		arg =
+			g.substituteGenericArgForCGen(
+				arg,
+				g.genericSubst,
+			)
 	}
 
-	switch arg.Kind {
-	case ast.GenericArgType:
-		return sanitizeCName(g.cTypeFromAstInContext(arg.Type).SealName)
-
-	case ast.GenericArgExpr:
-		if arg.Expr == nil {
-			return "invalid_type"
+	if typ :=
+		typeAstFromGenericArgForCGen(
+			arg,
+		); typ != nil {
+		if name, ok :=
+			g.namedGenericTypeIdentityCName(
+				typ,
+			); ok {
+			return name
 		}
 
-		if typ := typeAstFromExprForCGen(arg.Expr); typ != nil {
-			return sanitizeCName(g.cTypeFromAstInContext(typ).SealName)
-		}
+		lowered :=
+			g.cTypeFromAstInContext(
+				typ,
+			)
 
-		switch e := arg.Expr.(type) {
-		case *ast.IdentExpr:
-			name := e.Name.Name
-
-			if g.typeContextPackage != "" {
-				if pkg := g.typePackageInfo(
-					g.typeContextPackage,
-				); pkg != nil &&
-					g.packageHasType(pkg, name) {
-					return sanitizeCName(cImportedTypeName(g.typeContextPackage, name))
-				}
-			}
-
-			if g.genericSubst != nil {
-				if replacement, exists := g.genericSubst[name]; exists {
-					return sanitizeCName(g.cTypeFromGenericArgWithGenericArgs(replacement, g.genericSubst).SealName)
-				}
-			}
-
-			return sanitizeCName(name)
+		if !isInvalidCType(lowered) {
+			return sanitizeCName(
+				lowered.SealName,
+			)
 		}
 	}
 
-	return sanitizeCName(genericValueArgCName(arg))
+	return sanitizeCName(
+		genericValueArgCName(
+			arg,
+		),
+	)
 }
 
 func genericValueArgCName(arg ast.GenericArg) string {
@@ -4384,9 +4499,13 @@ func (g *Generator) addRequiredExternalType(
 		return
 	}
 
-	// Ordinary dependencies are already emitted by emitImportedStructs,
-	// emitImportedEnums, and the other normal imported-type emitters.
-	if g.packages[packageName] != nil {
+	// Ordinary visible dependencies are emitted through the normal imported
+	// type registry. PackageInfo can be stored under a metadata key different
+	// from its semantic package name, so use semantic lookup here.
+	if packageInfoBySemanticName(
+		g.packages,
+		packageName,
+	) != nil {
 		return
 	}
 
@@ -4970,69 +5089,6 @@ func (g *Generator) emitRequiredExternalTypeDefinition(
 
 	visiting[key] = false
 	g.emittedRequiredExternalTypes[key] = true
-}
-
-func (g *Generator) emitRequiredExternalTypes() {
-	if len(g.requiredExternalTypes) == 0 {
-		return
-	}
-
-	keys := make(
-		[]string,
-		0,
-		len(g.requiredExternalTypes),
-	)
-
-	for key := range g.requiredExternalTypes {
-		keys = append(keys, key)
-	}
-
-	sort.Strings(keys)
-
-	// Forward-declare every required non-generic structure first so pointer
-	// fields can refer to mutually dependent structures.
-	emittedForward := false
-
-	for _, key := range keys {
-		ref := g.requiredExternalTypes[key]
-		pkg := g.typePackageInfo(ref.PackageName)
-
-		if pkg == nil {
-			continue
-		}
-
-		decl := pkg.Structs[ref.TypeName]
-		if decl == nil ||
-			len(decl.GenericParams) != 0 {
-			continue
-		}
-
-		cName := cImportedTypeName(
-			ref.PackageName,
-			ref.TypeName,
-		)
-
-		g.linef(
-			"typedef struct %s %s;",
-			cName,
-			cName,
-		)
-
-		emittedForward = true
-	}
-
-	if emittedForward {
-		g.line("")
-	}
-
-	visiting := map[string]bool{}
-
-	for _, key := range keys {
-		g.emitRequiredExternalTypeDefinition(
-			key,
-			visiting,
-		)
-	}
 }
 
 func normalizeGenericArgsForCGenParams(params []ast.GenericParam, args []ast.GenericArg) []ast.GenericArg {

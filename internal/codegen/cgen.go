@@ -566,16 +566,64 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitEnums(file)
 	g.emitImportedEnums()
 
-	// Interface representations must exist before an externally materialized
-	// structure can store one by value.
+	/*
+		Discover every concrete structure before emitting any structure.
+
+		This phase may register:
+
+		- imported generic struct instances,
+		- local generic struct instances,
+		- transitive workspace-owned structures,
+		- interface value representations referenced by struct fields.
+
+		It must finish before typedef declarations and struct definitions begin.
+	*/
+	g.prepareConcreteStructTypes()
+
+	// Struct discovery above may have registered interface instances.
 	g.emitInterfaceValueTypes()
 
-	g.emitRequiredExternalTypes()
+	// Interface type discovery can itself reveal additional concrete field
+	// types. Stabilize the concrete struct registry one final time.
+	g.prepareConcreteStructTypes()
 
-	g.emitImportedStructs()
-	g.emitStructs(file)
-	g.emitGenericStructs()
-	g.emitImportedGenericStructs()
+	concreteStructs :=
+		g.collectConcreteStructEmissions()
+
+	/*
+		Every concrete structure receives a typedef before any body is emitted.
+
+		This includes:
+
+		- local structs,
+		- imported structs,
+		- workspace-only external structs,
+		- local generic struct instances,
+		- imported generic struct instances.
+	*/
+	g.emitConcreteStructForwardDeclarations(
+		concreteStructs,
+	)
+
+	/*
+		External distinct and enum aliases may refer to forward-declared
+		structures, so emit them after the global forward-declaration phase.
+	*/
+	g.emitRequiredExternalScalarTypes()
+
+	/*
+		Complete struct bodies in by-value dependency order.
+	*/
+	g.emitConcreteStructDefinitions(
+		concreteStructs,
+	)
+
+	/*
+		External unions can contain structures by value, so emit them only after
+		all concrete structure bodies are complete.
+	*/
+	g.emitRequiredExternalUnions()
+
 	g.emitUnions(file)
 
 	// Interface result structures and dynamic vtables can depend on concrete

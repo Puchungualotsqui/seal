@@ -691,109 +691,737 @@ func (g *Generator) emitImportedEnums() {
 	}
 }
 
-func (g *Generator) emitImportedStructs() {
-	if len(g.packages) == 0 {
+type concreteStructEmissionKind uint8
+
+const (
+	concreteStructLocal concreteStructEmissionKind = iota
+	concreteStructImported
+	concreteStructExternal
+	concreteStructGeneric
+	concreteStructImportedGeneric
+)
+
+type concreteStructEmission struct {
+	Name        string
+	PackageName string
+	ExternalKey string
+
+	Decl  *ast.StructDecl
+	Subst map[string]ast.GenericArg
+
+	Kind concreteStructEmissionKind
+}
+
+/*
+discoverConcreteStructFieldType performs type discovery only.
+
+The returned CType is intentionally ignored. Lowering the type causes CGen
+to register generic struct instances and interface instances referenced by
+the field.
+
+The concrete type AST is also inspected for workspace-only external types.
+*/
+func (g *Generator) discoverConcreteStructFieldType(
+	packageName string,
+	typ ast.Type,
+	subst map[string]ast.GenericArg,
+) {
+	if typ == nil {
 		return
 	}
 
-	type importedStructEmission struct {
-		PackageName string
-		CName       string
-		Decl        *ast.StructDecl
+	concreteType := typ
+
+	if subst != nil {
+		concreteType =
+			g.substituteTypeAstForCGen(
+				typ,
+				subst,
+			)
 	}
 
-	var entries []importedStructEmission
+	g.collectRequiredExternalTypeFromType(
+		packageName,
+		concreteType,
+	)
 
-	seen := map[string]bool{}
+	switch {
+	case subst != nil &&
+		packageName != "" &&
+		packageName != g.packageName:
+		_ = g.cTypeFromAstWithGenericArgsInTypeContext(
+			packageName,
+			typ,
+			subst,
+		)
 
+	case subst != nil:
+		_ = g.cTypeFromAstWithGenericArgs(
+			typ,
+			subst,
+		)
+
+	case packageName != "" &&
+		packageName != g.packageName:
+		_ = g.cTypeFromAstInTypeContext(
+			packageName,
+			typ,
+		)
+
+	default:
+		_ = g.cTypeFromAst(
+			typ,
+		)
+	}
+}
+
+/*
+prepareConcreteStructTypes runs until the concrete type registry reaches a
+fixed point.
+
+This replaces emission-time discovery. After this function returns,
+struct-body emission should not be responsible for discovering new generic
+struct instances.
+*/
+func (g *Generator) prepareConcreteStructTypes() {
+	for {
+		before :=
+			len(g.genericStructs) +
+				len(g.importedGenericStructs) +
+				len(g.requiredExternalTypes) +
+				len(g.interfaceInstances)
+
+		/*
+			Local ordinary structures.
+		*/
+		for _, decl := range g.structs {
+			if decl == nil ||
+				decl.IsIntrinsic ||
+				len(decl.GenericParams) != 0 {
+				continue
+			}
+
+			for _, field := range decl.Fields {
+				g.discoverConcreteStructFieldType(
+					g.packageName,
+					field.Type,
+					nil,
+				)
+			}
+		}
+
+		/*
+			Visible imported ordinary structures.
+
+			Their fields can reference transitive packages that are available
+			only through workspacePackages.
+		*/
+		for mapKey, pkg := range g.packages {
+			if pkg == nil {
+				continue
+			}
+
+			packageName := pkg.Name
+
+			if packageName == "" {
+				packageName = mapKey
+			}
+
+			if packageName == "" ||
+				packageName == g.packageName {
+				continue
+			}
+
+			for _, decl := range pkg.Structs {
+				if decl == nil ||
+					decl.IsIntrinsic ||
+					len(decl.GenericParams) != 0 {
+					continue
+				}
+
+				for _, field := range decl.Fields {
+					g.discoverConcreteStructFieldType(
+						packageName,
+						field.Type,
+						nil,
+					)
+				}
+			}
+		}
+
+		/*
+			Workspace-only ordinary structures discovered through transitive
+			dependencies.
+		*/
+		externalKeys := make(
+			[]string,
+			0,
+			len(g.requiredExternalTypes),
+		)
+
+		for key := range g.requiredExternalTypes {
+			externalKeys = append(
+				externalKeys,
+				key,
+			)
+		}
+
+		sort.Strings(externalKeys)
+
+		for _, key := range externalKeys {
+			ref := g.requiredExternalTypes[key]
+
+			pkg := g.typePackageInfo(
+				ref.PackageName,
+			)
+
+			if pkg == nil {
+				continue
+			}
+
+			decl := pkg.Structs[ref.TypeName]
+
+			if decl == nil ||
+				decl.IsIntrinsic ||
+				len(decl.GenericParams) != 0 {
+				continue
+			}
+
+			for _, field := range decl.Fields {
+				g.discoverConcreteStructFieldType(
+					ref.PackageName,
+					field.Type,
+					nil,
+				)
+			}
+		}
+
+		/*
+			Local generic structure instances.
+		*/
+		genericNames := make(
+			[]string,
+			0,
+			len(g.genericStructs),
+		)
+
+		for name := range g.genericStructs {
+			genericNames = append(
+				genericNames,
+				name,
+			)
+		}
+
+		sort.Strings(genericNames)
+
+		for _, name := range genericNames {
+			info := g.genericStructs[name]
+
+			if info == nil ||
+				info.Decl == nil {
+				continue
+			}
+
+			subst :=
+				genericArgSubstForCGen(
+					info.Decl.GenericParams,
+					info.Args,
+				)
+
+			for _, field := range info.Decl.Fields {
+				g.discoverConcreteStructFieldType(
+					g.packageName,
+					field.Type,
+					subst,
+				)
+			}
+		}
+
+		/*
+			Imported generic structure instances.
+		*/
+		importedGenericNames := make(
+			[]string,
+			0,
+			len(g.importedGenericStructs),
+		)
+
+		for name := range g.importedGenericStructs {
+			importedGenericNames = append(
+				importedGenericNames,
+				name,
+			)
+		}
+
+		sort.Strings(importedGenericNames)
+
+		for _, name := range importedGenericNames {
+			info := g.importedGenericStructs[name]
+
+			if info == nil ||
+				info.Decl == nil {
+				continue
+			}
+
+			subst :=
+				genericArgSubstForCGen(
+					info.Decl.GenericParams,
+					info.Args,
+				)
+
+			for _, field := range info.Decl.Fields {
+				g.discoverConcreteStructFieldType(
+					info.PackageName,
+					field.Type,
+					subst,
+				)
+			}
+		}
+
+		/*
+			Close dependencies reached through required external declarations.
+		*/
+		g.collectRequiredExternalTypes()
+
+		after :=
+			len(g.genericStructs) +
+				len(g.importedGenericStructs) +
+				len(g.requiredExternalTypes) +
+				len(g.interfaceInstances)
+
+		if before == after {
+			return
+		}
+	}
+}
+
+func (g *Generator) collectConcreteStructEmissions() map[string]*concreteStructEmission {
+	entries :=
+		map[string]*concreteStructEmission{}
+
+	add := func(
+		entry *concreteStructEmission,
+	) {
+		if entry == nil ||
+			entry.Decl == nil ||
+			entry.Decl.IsIntrinsic ||
+			entry.Name == "" ||
+			isInvalidCStructName(entry.Name) {
+			return
+		}
+
+		if _, exists :=
+			entries[entry.Name]; exists {
+			return
+		}
+
+		entries[entry.Name] = entry
+	}
+
+	/*
+		Local ordinary structures use their unqualified C names.
+	*/
+	for typeName, decl := range g.structs {
+		if decl == nil ||
+			len(decl.GenericParams) != 0 {
+			continue
+		}
+
+		add(
+			&concreteStructEmission{
+				Name: typeName,
+				Decl: decl,
+				Kind: concreteStructLocal,
+			},
+		)
+	}
+
+	/*
+		Visible imported ordinary structures.
+	*/
 	for mapKey, pkg := range g.packages {
 		if pkg == nil {
 			continue
 		}
 
 		packageName := pkg.Name
+
 		if packageName == "" {
 			packageName = mapKey
 		}
 
-		if packageName == "" {
+		if packageName == "" ||
+			packageName == g.packageName {
 			continue
 		}
 
-		for structName, decl := range pkg.Structs {
+		for typeName, decl := range pkg.Structs {
 			if decl == nil ||
-				decl.IsIntrinsic ||
-				len(decl.GenericParams) > 0 {
+				len(decl.GenericParams) != 0 {
 				continue
 			}
 
-			cName := cImportedTypeName(
-				packageName,
-				structName,
-			)
-
-			if seen[cName] {
-				continue
-			}
-
-			seen[cName] = true
-
-			entries = append(
-				entries,
-				importedStructEmission{
+			add(
+				&concreteStructEmission{
+					Name: cImportedTypeName(
+						packageName,
+						typeName,
+					),
 					PackageName: packageName,
-					CName:       cName,
 					Decl:        decl,
+					Kind:        concreteStructImported,
 				},
 			)
 		}
 	}
 
-	sort.Slice(
-		entries,
-		func(i int, j int) bool {
-			return entries[i].CName <
-				entries[j].CName
-		},
-	)
+	/*
+		Workspace-only external ordinary structures.
+	*/
+	for key, ref := range g.requiredExternalTypes {
+		pkg := g.typePackageInfo(
+			ref.PackageName,
+		)
 
-	if len(entries) == 0 {
-		return
+		if pkg == nil {
+			continue
+		}
+
+		decl := pkg.Structs[ref.TypeName]
+
+		if decl == nil ||
+			len(decl.GenericParams) != 0 {
+			continue
+		}
+
+		add(
+			&concreteStructEmission{
+				Name: cImportedTypeName(
+					ref.PackageName,
+					ref.TypeName,
+				),
+				PackageName: ref.PackageName,
+				ExternalKey: key,
+				Decl:        decl,
+				Kind:        concreteStructExternal,
+			},
+		)
 	}
 
 	/*
-		Declare all imported struct typedef names before completing any
-		struct body.
-
-		This permits:
-
-			struct Node {
-				Node *Next;
-			};
-
-		and mutually recursive pointer fields.
+		Local generic structure instances.
 	*/
-	for _, entry := range entries {
+	for name, info := range g.genericStructs {
+		if info == nil ||
+			info.Decl == nil {
+			continue
+		}
+
+		add(
+			&concreteStructEmission{
+				Name: name,
+				Decl: info.Decl,
+				Subst: genericArgSubstForCGen(
+					info.Decl.GenericParams,
+					info.Args,
+				),
+				Kind: concreteStructGeneric,
+			},
+		)
+	}
+
+	/*
+		Imported generic structure instances.
+	*/
+	for name, info := range g.importedGenericStructs {
+		if info == nil ||
+			info.Decl == nil {
+			continue
+		}
+
+		add(
+			&concreteStructEmission{
+				Name:        name,
+				PackageName: info.PackageName,
+				Decl:        info.Decl,
+				Subst: genericArgSubstForCGen(
+					info.Decl.GenericParams,
+					info.Args,
+				),
+				Kind: concreteStructImportedGeneric,
+			},
+		)
+	}
+
+	return entries
+}
+
+func concreteStructEmissionNames(
+	entries map[string]*concreteStructEmission,
+) []string {
+	names := make(
+		[]string,
+		0,
+		len(entries),
+	)
+
+	for name := range entries {
+		names = append(
+			names,
+			name,
+		)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func (g *Generator) emitConcreteStructForwardDeclarations(
+	entries map[string]*concreteStructEmission,
+) {
+	names :=
+		concreteStructEmissionNames(
+			entries,
+		)
+
+	if len(names) == 0 {
+		return
+	}
+
+	for _, name := range names {
 		g.linef(
 			"typedef struct %s %s;",
-			entry.CName,
-			entry.CName,
+			name,
+			name,
 		)
 	}
 
 	g.line("")
+}
 
-	for _, entry := range entries {
+func (g *Generator) concreteStructFieldType(
+	entry *concreteStructEmission,
+	typ ast.Type,
+) CType {
+	if entry == nil ||
+		typ == nil {
+		return CInvalid
+	}
+
+	switch entry.Kind {
+	case concreteStructLocal:
+		return g.cTypeFromAst(
+			typ,
+		)
+
+	case concreteStructImported,
+		concreteStructExternal:
+		return g.cTypeFromAstInTypeContext(
+			entry.PackageName,
+			typ,
+		)
+
+	case concreteStructGeneric:
+		return g.cTypeFromAstWithGenericArgs(
+			typ,
+			entry.Subst,
+		)
+
+	case concreteStructImportedGeneric:
+		return g.cTypeFromAstWithGenericArgsInTypeContext(
+			entry.PackageName,
+			typ,
+			entry.Subst,
+		)
+	}
+
+	return CInvalid
+}
+
+/*
+concreteStructDependencyName returns a dependency only when the field needs
+the complete struct body.
+
+Pointer fields require only the typedef forward declaration.
+
+Inline arrays require the complete element type.
+*/
+func concreteStructDependencyName(
+	typ CType,
+	entries map[string]*concreteStructEmission,
+) string {
+	if typ.IsInlineArray {
+		if typ.Elem == nil {
+			return ""
+		}
+
+		return concreteStructDependencyName(
+			*typ.Elem,
+			entries,
+		)
+	}
+
+	if strings.HasPrefix(
+		typ.SealName,
+		"*",
+	) {
+		return ""
+	}
+
+	name := strings.TrimSpace(
+		typ.Name,
+	)
+
+	if _, exists := entries[name]; exists {
+		return name
+	}
+
+	sealName := strings.TrimSpace(
+		typ.SealName,
+	)
+
+	if _, exists := entries[sealName]; exists {
+		return sealName
+	}
+
+	return ""
+}
+
+func (g *Generator) markConcreteStructEmitted(
+	entry *concreteStructEmission,
+) {
+	if entry == nil {
+		return
+	}
+
+	switch entry.Kind {
+	case concreteStructGeneric:
+		g.emittedGenericStructs[entry.Name] =
+			true
+
+	case concreteStructImportedGeneric:
+		g.emittedImportedGenericStructs[entry.Name] =
+			true
+
+	case concreteStructExternal:
+		if entry.ExternalKey != "" {
+			g.emittedRequiredExternalTypes[entry.ExternalKey] =
+				true
+		}
+	}
+}
+
+func (g *Generator) emitConcreteStructDefinitions(
+	entries map[string]*concreteStructEmission,
+) {
+	const (
+		concreteStructUnvisited uint8 = iota
+		concreteStructVisiting
+		concreteStructEmitted
+		concreteStructFailed
+	)
+
+	states :=
+		map[string]uint8{}
+
+	var emit func(string) bool
+
+	emit = func(name string) bool {
+		switch states[name] {
+		case concreteStructEmitted:
+			return true
+
+		case concreteStructFailed:
+			return false
+
+		case concreteStructVisiting:
+			entry := entries[name]
+
+			if entry != nil &&
+				entry.Decl != nil {
+				g.error(
+					entry.Decl.Name.Span(),
+					fmt.Sprintf(
+						"recursive by-value struct dependency involving %s",
+						name,
+					),
+				)
+			}
+
+			states[name] =
+				concreteStructFailed
+
+			return false
+		}
+
+		entry := entries[name]
+
+		if entry == nil ||
+			entry.Decl == nil {
+			states[name] =
+				concreteStructFailed
+
+			return false
+		}
+
+		states[name] =
+			concreteStructVisiting
+
+		/*
+			Emit every by-value dependency first.
+		*/
+		for _, field := range entry.Decl.Fields {
+			fieldType :=
+				g.concreteStructFieldType(
+					entry,
+					field.Type,
+				)
+
+			if isInvalidCType(fieldType) {
+				g.error(
+					field.Type.Span(),
+					fmt.Sprintf(
+						"cannot lower field %s.%s",
+						name,
+						field.Name.Name,
+					),
+				)
+
+				states[name] =
+					concreteStructFailed
+
+				return false
+			}
+
+			dependency :=
+				concreteStructDependencyName(
+					fieldType,
+					entries,
+				)
+
+			if dependency == "" {
+				continue
+			}
+
+			if !emit(dependency) {
+				states[name] =
+					concreteStructFailed
+
+				return false
+			}
+		}
+
 		g.linef(
 			"struct %s {",
-			entry.CName,
+			entry.Name,
 		)
 		g.indent++
 
 		for _, field := range entry.Decl.Fields {
 			fieldType :=
-				g.cTypeFromAstInTypeContext(
-					entry.PackageName,
+				g.concreteStructFieldType(
+					entry,
 					field.Type,
 				)
 
@@ -808,97 +1436,281 @@ func (g *Generator) emitImportedStructs() {
 		g.indent--
 		g.line("};")
 		g.line("")
+
+		states[name] =
+			concreteStructEmitted
+
+		g.markConcreteStructEmitted(
+			entry,
+		)
+
+		return true
+	}
+
+	for _, name := range concreteStructEmissionNames(
+		entries,
+	) {
+		emit(name)
 	}
 }
 
-func (g *Generator) emitStructs(
-	file *ast.File,
+func (g *Generator) emitRequiredExternalScalarDependencies(
+	ownerPackage string,
+	typ ast.Type,
+	visiting map[string]bool,
 ) {
-	var declarations []*ast.StructDecl
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		key, ok :=
+			g.requiredExternalKeyForNamedType(
+				ownerPackage,
+				t,
+			)
 
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.StructDecl)
 		if !ok {
-			continue
+			return
 		}
 
-		if d.IsIntrinsic {
-			continue
-		}
+		ref := g.requiredExternalTypes[key]
 
-		if len(d.GenericParams) > 0 {
-			continue
-		}
-
-		if isInvalidCStructName(
-			d.Name.Name,
-		) {
-			continue
-		}
-
-		declarations = append(
-			declarations,
-			d,
+		pkg := g.typePackageInfo(
+			ref.PackageName,
 		)
-	}
 
-	if len(declarations) == 0 {
-		return
-	}
+		if pkg == nil {
+			return
+		}
 
-	/*
-		Introduce every typedef before completing any struct.
-
-		The old output:
-
-			typedef struct Node {
-				Node *Next;
-			} Node;
-
-		is invalid because Node is not a typedef until after the body.
-
-		The new output is:
-
-			typedef struct Node Node;
-
-			struct Node {
-				Node *Next;
-			};
-	*/
-	for _, declaration := range declarations {
-		g.linef(
-			"typedef struct %s %s;",
-			declaration.Name.Name,
-			declaration.Name.Name,
-		)
-	}
-
-	g.line("")
-
-	for _, declaration := range declarations {
-		g.linef(
-			"struct %s {",
-			declaration.Name.Name,
-		)
-		g.indent++
-
-		for _, field := range declaration.Fields {
-			fieldType :=
-				g.cTypeFromAst(
-					field.Type,
-				)
-
-			g.linef(
-				"%s;",
-				fieldType.Decl(
-					field.Name.Name,
-				),
+		if pkg.Distincts[ref.TypeName] != nil ||
+			pkg.Enums[ref.TypeName] != nil {
+			g.emitRequiredExternalScalarTypeDefinition(
+				key,
+				visiting,
 			)
 		}
 
-		g.indent--
-		g.line("};")
+	case *ast.PointerType:
+		g.emitRequiredExternalScalarDependencies(
+			ownerPackage,
+			t.Elem,
+			visiting,
+		)
+
+	case *ast.InlineArrayType:
+		g.emitRequiredExternalScalarDependencies(
+			ownerPackage,
+			t.Elem,
+			visiting,
+		)
+
+	case *ast.GenericType:
+		for _, arg := range t.Args {
+			if arg.Kind != ast.GenericArgType {
+				continue
+			}
+
+			g.emitRequiredExternalScalarDependencies(
+				ownerPackage,
+				arg.Type,
+				visiting,
+			)
+		}
+	}
+}
+
+func (g *Generator) emitRequiredExternalScalarTypeDefinition(
+	key string,
+	visiting map[string]bool,
+) {
+	if g.emittedRequiredExternalTypes[key] {
+		return
+	}
+
+	ref, exists :=
+		g.requiredExternalTypes[key]
+
+	if !exists {
+		return
+	}
+
+	pkg := g.typePackageInfo(
+		ref.PackageName,
+	)
+
+	if pkg == nil {
+		return
+	}
+
+	distinct := pkg.Distincts[ref.TypeName]
+	enum := pkg.Enums[ref.TypeName]
+
+	if distinct == nil &&
+		enum == nil {
+		return
+	}
+
+	if visiting[key] {
+		g.error(
+			source.Span{},
+			fmt.Sprintf(
+				"recursive external scalar type dependency %s.%s",
+				ref.PackageName,
+				ref.TypeName,
+			),
+		)
+
+		return
+	}
+
+	visiting[key] = true
+
+	defer delete(
+		visiting,
+		key,
+	)
+
+	cName :=
+		cImportedTypeName(
+			ref.PackageName,
+			ref.TypeName,
+		)
+
+	if distinct != nil {
+		g.emitRequiredExternalScalarDependencies(
+			ref.PackageName,
+			distinct.Underlying,
+			visiting,
+		)
+
+		underlying :=
+			g.cTypeFromAstInTypeContext(
+				ref.PackageName,
+				distinct.Underlying,
+			)
+
+		if isInvalidCType(underlying) {
+			g.error(
+				distinct.Underlying.Span(),
+				fmt.Sprintf(
+					"cannot lower external distinct %s",
+					cName,
+				),
+			)
+
+			return
+		}
+
+		g.linef(
+			"typedef %s;",
+			underlying.Decl(
+				cName,
+			),
+		)
 		g.line("")
+
+		g.emittedRequiredExternalTypes[key] =
+			true
+
+		return
+	}
+
+	if enum.Underlying != nil {
+		g.emitRequiredExternalScalarDependencies(
+			ref.PackageName,
+			enum.Underlying,
+			visiting,
+		)
+	}
+
+	var underlying *CType
+
+	if enum.Underlying != nil {
+		converted :=
+			g.cTypeFromAstInTypeContext(
+				ref.PackageName,
+				enum.Underlying,
+			)
+
+		underlying = &converted
+	}
+
+	g.emitEnumDefinition(
+		cName,
+		enum,
+		underlying,
+	)
+
+	g.emittedRequiredExternalTypes[key] =
+		true
+}
+
+func (g *Generator) emitRequiredExternalScalarTypes() {
+	keys := make(
+		[]string,
+		0,
+		len(g.requiredExternalTypes),
+	)
+
+	for key := range g.requiredExternalTypes {
+		keys = append(
+			keys,
+			key,
+		)
+	}
+
+	sort.Strings(keys)
+
+	visiting :=
+		map[string]bool{}
+
+	for _, key := range keys {
+		g.emitRequiredExternalScalarTypeDefinition(
+			key,
+			visiting,
+		)
+	}
+}
+
+/*
+Required external unions are delayed until after concrete struct bodies.
+
+The existing external-union emitter is reused here. At this point every
+required external structure has already been marked as emitted by the
+unified concrete-struct emitter.
+*/
+func (g *Generator) emitRequiredExternalUnions() {
+	keys := make(
+		[]string,
+		0,
+		len(g.requiredExternalTypes),
+	)
+
+	for key, ref := range g.requiredExternalTypes {
+		pkg := g.typePackageInfo(
+			ref.PackageName,
+		)
+
+		if pkg == nil ||
+			pkg.Unions[ref.TypeName] == nil {
+			continue
+		}
+
+		keys = append(
+			keys,
+			key,
+		)
+	}
+
+	sort.Strings(keys)
+
+	visiting :=
+		map[string]bool{}
+
+	for _, key := range keys {
+		g.emitRequiredExternalTypeDefinition(
+			key,
+			visiting,
+		)
 	}
 }
 
@@ -3153,7 +3965,13 @@ func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 			g.line("default:")
 
 		case ast.SwitchCaseExpr:
-			g.linef("case %s:", g.emitExpr(swCase.Expr, &targetType))
+			g.linef(
+				"case %s:",
+				g.emitValueSwitchCaseExpr(
+					swCase.Expr,
+					targetType,
+				),
+			)
 
 		default:
 			g.error(swCase.Loc, "unsupported switch case in C codegen")

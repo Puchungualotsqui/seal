@@ -2096,13 +2096,17 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct Box_int {",
+		"typedef struct Box_int Box_int;",
+		"struct Box_int {",
 		"intptr_t value;",
-		"} Box_int;",
+		"};",
 		"intptr_t MakeAndRead_int(intptr_t value);",
 		"intptr_t MakeAndRead_int(intptr_t value) {",
 		"Box_int box = (Box_int){.value = value};",
@@ -2112,39 +2116,11 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
-		}
-	}
-}
-
-func TestGenerateGenericTaskDefaultParameterUsesGenericType(t *testing.T) {
-	out, reporter := generate(t, `
-Id :: distinct int
-
-WithDefault :: task <T type>(value T = cast<T>(7)) T {
-	return value
-}
-
-Main :: task() {
-	id: Id = WithDefault<Id>()
-	assert(id == cast<Id>(7))
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"Id WithDefault_Id(Id value);",
-		"Id WithDefault_Id(Id value) {",
-		"Id id = WithDefault_Id(((Id)(7)));",
-		"assert((id == ((Id)(7))));",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+			t.Fatalf(
+				"expected generated output to contain %q\n\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -2187,14 +2163,14 @@ Main :: task() {
 	}
 
 	checks := []string{
-		"typedef struct Pair_int_string {",
+		"typedef struct Pair_int_string Pair_int_string;",
+		"struct Pair_int_string {",
 		"intptr_t first;",
 		"sealString second;",
-		"} Pair_int_string;",
 
-		"typedef struct Box_Pair_int_string {",
+		"typedef struct Box_Pair_int_string Box_Pair_int_string;",
+		"struct Box_Pair_int_string {",
 		"Pair_int_string value;",
-		"} Box_Pair_int_string;",
 
 		"Box_Pair_int_string MakeNested_string(sealString value);",
 		"Box_Pair_int_string MakeNested_string(sealString value) {",
@@ -2217,6 +2193,211 @@ Main :: task() {
 	}
 
 	compileGeneratedC(t, out)
+}
+
+func TestGenerateGenericMultiReturnTaskWithGenericStruct(t *testing.T) {
+	out, reporter := generate(t, `
+Box :: struct <T type> {
+	value T
+}
+
+PairBoxes :: task <T type>(a T, b T) Box<T>, Box<T> {
+	return Box<T>{value = a}, Box<T>{value = b}
+}
+
+Main :: task() {
+	left, right := PairBoxes<int>(1, 2)
+
+	x := left.value
+	y := right.value
+
+	assert(x == 1)
+	assert(y == 2)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct Box_int Box_int;",
+		"struct Box_int {",
+		"intptr_t value;",
+
+		"typedef struct PairBoxes_int_Result {",
+		"Box_int _0;",
+		"Box_int _1;",
+		"} PairBoxes_int_Result;",
+
+		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b);",
+		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b) {",
+
+		"Box_int left = __seal_multi_result_",
+		"._0;",
+		"Box_int right = __seal_multi_result_",
+		"._1;",
+
+		"intptr_t x = (left).value;",
+		"intptr_t y = (right).value;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated output to contain %q\n\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestImportedGenericStructSpecializationCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    b: types.Box<int> = types.Box<int>{value = 10}
+    x := b.value
+    assert(x == 10)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
+		"intptr_t value;",
+		"types_Box_int b = (types_Box_int){.value = 10};",
+		"intptr_t x = (b).value;",
+		"assert((x == 10));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestImportedNestedGenericStructSpecializationCodegen(t *testing.T) {
+	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
+Pair :: struct <A type, B type> {
+    first A
+    second B
+}
+
+Box :: struct <T type> {
+    value T
+}
+`)
+
+	out, reporter := generateWithPackages(t, `
+Main :: task() {
+    b: types.Box<types.Pair<int, string>>
+    pair := b.value
+    x := pair.first
+    s := pair.second
+
+    assert(x == 0)
+    assert(size(s) >= 0)
+}
+`, map[string]*PackageInfo{
+		"types": typesPkg,
+	}, map[string]*resolver.PackageInfo{
+		"types": resolverPkg,
+	}, map[string]*checker.PackageInfo{
+		"types": checkerPkg,
+	})
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef struct types_Pair_int_string types_Pair_int_string;",
+		"struct types_Pair_int_string {",
+		"intptr_t first;",
+		"sealString second;",
+
+		"typedef struct types_Box_types_Pair_int_string types_Box_types_Pair_int_string;",
+		"struct types_Box_types_Pair_int_string {",
+		"types_Pair_int_string value;",
+
+		"types_Box_types_Pair_int_string b;",
+		"types_Pair_int_string pair = (b).value;",
+		"intptr_t x = (pair).first;",
+		"sealString s = (pair).second;",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateGenericTaskDefaultParameterUsesGenericType(t *testing.T) {
+	out, reporter := generate(t, `
+Id :: distinct int
+
+WithDefault :: task <T type>(value T = cast<T>(7)) T {
+	return value
+}
+
+Main :: task() {
+	id: Id = WithDefault<Id>()
+	assert(id == cast<Id>(7))
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+	}
+
+	checks := []string{
+		"Id WithDefault_Id(Id value);",
+		"Id WithDefault_Id(Id value) {",
+		"Id id = WithDefault_Id(((Id)(7)));",
+		"assert((id == ((Id)(7))));",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
+		}
+	}
 }
 
 func TestGenerateGenericTaskParameterValueCall(t *testing.T) {
@@ -2325,56 +2506,6 @@ Main :: task() {
 		"._0;",
 		"intptr_t y = __seal_multi_result_",
 		"._1;",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated output to contain %q\n\n%s", want, out)
-		}
-	}
-}
-
-func TestGenerateGenericMultiReturnTaskWithGenericStruct(t *testing.T) {
-	out, reporter := generate(t, `
-Box :: struct <T type> {
-	value T
-}
-
-PairBoxes :: task <T type>(a T, b T) Box<T>, Box<T> {
-	return Box<T>{value = a}, Box<T>{value = b}
-}
-
-Main :: task() {
-	left, right := PairBoxes<int>(1, 2)
-
-	x := left.value
-	y := right.value
-
-	assert(x == 1)
-	assert(y == 2)
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct Box_int {",
-		"intptr_t value;",
-		"} Box_int;",
-		"typedef struct PairBoxes_int_Result {",
-		"Box_int _0;",
-		"Box_int _1;",
-		"} PairBoxes_int_Result;",
-		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b);",
-		"PairBoxes_int_Result PairBoxes_int(intptr_t a, intptr_t b) {",
-		"Box_int left = __seal_multi_result_",
-		"._0;",
-		"Box_int right = __seal_multi_result_",
-		"._1;",
-		"intptr_t x = (left).value;",
-		"intptr_t y = (right).value;",
 	}
 
 	for _, want := range checks {
@@ -2899,102 +3030,6 @@ Main :: task() {
 		"intptr_t Apply_math_Identity_int(intptr_t value) {",
 		"math_Identity_int(value)",
 		"intptr_t x = Apply_math_Identity_int(10);",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
-func TestImportedGenericStructSpecializationCodegen(t *testing.T) {
-	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
-Box :: struct <T type> {
-    value T
-}
-`)
-
-	out, reporter := generateWithPackages(t, `
-Main :: task() {
-    b: types.Box<int> = types.Box<int>{value = 10}
-    x := b.value
-    assert(x == 10)
-}
-`, map[string]*PackageInfo{
-		"types": typesPkg,
-	}, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*checker.PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct types_Box_int {",
-		"intptr_t value;",
-		"} types_Box_int;",
-		"types_Box_int b = (types_Box_int){.value = 10};",
-		"intptr_t x = (b).value;",
-		"assert((x == 10));",
-	}
-
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
-func TestImportedNestedGenericStructSpecializationCodegen(t *testing.T) {
-	typesPkg, resolverPkg, checkerPkg := exportCGenPackage(t, "types", `
-Pair :: struct <A type, B type> {
-    first A
-    second B
-}
-
-Box :: struct <T type> {
-    value T
-}
-`)
-
-	out, reporter := generateWithPackages(t, `
-Main :: task() {
-    b: types.Box<types.Pair<int, string>>
-    pair := b.value
-    x := pair.first
-    s := pair.second
-
-    assert(x == 0)
-    assert(size(s) >= 0)
-}
-`, map[string]*PackageInfo{
-		"types": typesPkg,
-	}, map[string]*resolver.PackageInfo{
-		"types": resolverPkg,
-	}, map[string]*checker.PackageInfo{
-		"types": checkerPkg,
-	})
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	checks := []string{
-		"typedef struct types_Pair_int_string {",
-		"intptr_t first;",
-		"sealString second;",
-		"} types_Pair_int_string;",
-		"typedef struct types_Box_types_Pair_int_string {",
-		"types_Pair_int_string value;",
-		"} types_Box_types_Pair_int_string;",
-		"types_Box_types_Pair_int_string b;",
-		"types_Pair_int_string pair = (b).value;",
-		"intptr_t x = (pair).first;",
-		"sealString s = (pair).second;",
 	}
 
 	for _, want := range checks {
@@ -8300,7 +8335,29 @@ Node :: struct {
 		},
 	)
 
-	g.emitImportedStructs()
+	/*
+		Use the unified concrete-structure pipeline rather than the removed
+		imported-struct-specific emitter.
+	*/
+	g.prepareConcreteStructTypes()
+
+	concreteStructs :=
+		g.collectConcreteStructEmissions()
+
+	g.emitConcreteStructForwardDeclarations(
+		concreteStructs,
+	)
+
+	g.emitConcreteStructDefinitions(
+		concreteStructs,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"CGen diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
 
 	out := g.out.String()
 
