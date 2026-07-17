@@ -1,0 +1,55 @@
+/*
+_FreeNativeBuffer releases temporary memory allocated by the native OS
+bridge.
+*/
+_FreeNativeBuffer ::
+    extern("seal_os_free_buffer")
+    task(
+        data rawptr,
+    )
+
+/*
+_OwnedStringFromNative copies a temporary native UTF-8 buffer into a
+strings.OwnedString allocated through allocator.
+
+The temporary native buffer is always released before this task returns.
+*/
+_OwnedStringFromNative :: task(
+    allocator mem.Allocator,
+    data rawptr,
+    byteLength uint,
+) (strings.OwnedString, Error) {
+    if data == nil {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, _InternalError(
+            .OutOfMemory,
+        )
+    }
+
+    value := ""
+
+    if byteLength > 0 {
+        value = cast<string>(
+            data,
+            byteLength,
+        )
+    }
+
+    result :=
+        strings.Clone(
+            allocator,
+            value,
+        )
+
+    _FreeNativeBuffer(data)
+
+    if result.Data == nil {
+        return result, _InternalError(
+            .OutOfMemory,
+        )
+    }
+
+    return result, NoError()
+}

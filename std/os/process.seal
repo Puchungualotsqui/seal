@@ -1,0 +1,82 @@
+/*
+_ProcessID returns the current process identifier.
+*/
+_ProcessID ::
+    @trusted_pure
+    extern("seal_os_process_id")
+    task() uint
+
+/*
+_ExecutablePath obtains the executable path as a temporary native UTF-8
+allocation.
+*/
+_ExecutablePath ::
+    extern("seal_os_executable_path")
+    task(
+        data *rawptr,
+        byteLength *uint,
+        nativeError *int,
+    ) bool
+
+/*
+_Exit terminates the current process immediately.
+*/
+_Exit ::
+    extern("seal_os_exit")
+    task(
+        code int,
+    )
+
+/*
+ProcessID returns the host operating-system process identifier.
+*/
+ProcessID :: pure task() uint {
+    return _ProcessID()
+}
+
+/*
+ExecutablePath returns an owned UTF-8 path identifying the current
+executable.
+*/
+ExecutablePath :: task(
+    allocator mem.Allocator,
+) (strings.OwnedString, Error) {
+    data: rawptr = nil
+    byteLength: uint = 0
+    nativeError: int = 0
+
+    success :=
+        _ExecutablePath(
+            &data,
+            &byteLength,
+            &nativeError,
+        )
+
+    if !success {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return _OwnedStringFromNative(
+        allocator,
+        data,
+        byteLength,
+    )
+}
+
+/*
+Exit terminates the current process with code.
+
+Deferred actions and normal task returns do not run after this call.
+*/
+Exit :: task(
+    code int,
+) {
+    _Exit(code)
+
+    unreachable()
+}

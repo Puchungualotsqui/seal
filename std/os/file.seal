@@ -1,0 +1,617 @@
+/*
+SeekOrigin selects the reference point used by FileSeek.
+*/
+SeekOrigin :: enum {
+    Start
+    Current
+    End
+}
+
+/*
+OpenOptions controls how OpenFile opens a filesystem path.
+
+At least one of Read or Write must be true.
+
+Append, Create, Truncate, and Exclusive require Write.
+
+Exclusive requires Create and causes opening to fail when the path
+already exists.
+*/
+OpenOptions :: struct {
+    Read bool
+    Write bool
+    Append bool
+    Create bool
+    Truncate bool
+    Exclusive bool
+}
+
+/*
+File wraps a native file stream.
+
+File owns its handle when _ownsHandle is true. Copying an owning File
+performs a shallow ownership copy and must be avoided.
+*/
+File :: struct {
+    _handle rawptr
+    _readable bool
+    _writable bool
+    _ownsHandle bool
+    _closed bool
+}
+
+/*
+_OpenFile opens a native file stream.
+*/
+_OpenFile ::
+    extern("seal_os_open_file")
+    task(
+        path string,
+        readable bool,
+        writable bool,
+        append bool,
+        create bool,
+        truncate bool,
+        exclusive bool,
+        handle *rawptr,
+        nativeError *int,
+    ) bool
+
+/*
+_ReadFileStream reads bytes from a native file stream.
+
+ended is true only when the stream has reached its normal end without
+producing bytes.
+*/
+_ReadFileStream ::
+    extern("seal_os_read_file_stream")
+    task(
+        handle rawptr,
+        destination rawptr,
+        byteLength uint,
+        count *uint,
+        ended *bool,
+        nativeError *int,
+    ) bool
+
+/*
+_WriteFileStream writes bytes to a native file stream.
+*/
+_WriteFileStream ::
+    extern("seal_os_write_file_stream")
+    task(
+        handle rawptr,
+        source rawptr,
+        byteLength uint,
+        count *uint,
+        nativeError *int,
+    ) bool
+
+/*
+_FlushFileStream flushes a native file stream.
+*/
+_FlushFileStream ::
+    extern("seal_os_flush_file_stream")
+    task(
+        handle rawptr,
+        nativeError *int,
+    ) bool
+
+/*
+_CloseFileStream closes a native file stream.
+*/
+_CloseFileStream ::
+    extern("seal_os_close_file_stream")
+    task(
+        handle rawptr,
+        nativeError *int,
+    ) bool
+
+/*
+_SeekFileStream changes a native file stream position and returns the new
+absolute byte position.
+*/
+_SeekFileStream ::
+    extern("seal_os_seek_file_stream")
+    task(
+        handle rawptr,
+        offset i64,
+        origin int,
+        position *u64,
+        nativeError *int,
+    ) bool
+
+/*
+_StandardInputHandle returns the process standard-input stream.
+*/
+_StandardInputHandle ::
+    extern("seal_os_standard_input")
+    task() rawptr
+
+/*
+_StandardOutputHandle returns the process standard-output stream.
+*/
+_StandardOutputHandle ::
+    extern("seal_os_standard_output")
+    task() rawptr
+
+/*
+_StandardErrorHandle returns the process standard-error stream.
+*/
+_StandardErrorHandle ::
+    extern("seal_os_standard_error")
+    task() rawptr
+
+/*
+OpenOptionsIsValid reports whether a set of file-opening options is
+internally consistent.
+*/
+OpenOptionsIsValid :: pure task(
+    options OpenOptions,
+) bool {
+    if !options.Read &&
+        !options.Write {
+        return false
+    }
+
+    if options.Append &&
+        !options.Write {
+        return false
+    }
+
+    if options.Create &&
+        !options.Write {
+        return false
+    }
+
+    if options.Truncate &&
+        !options.Write {
+        return false
+    }
+
+    if options.Exclusive &&
+        (!options.Create ||
+         !options.Write) {
+        return false
+    }
+
+    return true
+}
+
+/*
+OpenFile opens a native file using options.
+*/
+OpenFile :: task(
+    path string,
+    options OpenOptions,
+) (File, Error) {
+    if !OpenOptionsIsValid(options) {
+        return File{
+            _handle = nil,
+            _readable = false,
+            _writable = false,
+            _ownsHandle = false,
+            _closed = true,
+        }, _InternalError(
+            .InvalidArgument,
+        )
+    }
+
+    handle: rawptr = nil
+    nativeError: int = 0
+
+    success :=
+        _OpenFile(
+            path,
+            options.Read,
+            options.Write,
+            options.Append,
+            options.Create,
+            options.Truncate,
+            options.Exclusive,
+            &handle,
+            &nativeError,
+        )
+
+    if !success {
+        return File{
+            _handle = nil,
+            _readable = false,
+            _writable = false,
+            _ownsHandle = false,
+            _closed = true,
+        }, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return File{
+        _handle = handle,
+        _readable = options.Read,
+        _writable = options.Write,
+        _ownsHandle = true,
+        _closed = false,
+    }, NoError()
+}
+
+/*
+OpenRead opens an existing file for reading.
+*/
+OpenRead :: task(
+    path string,
+) (File, Error) {
+    return OpenFile(
+        path,
+        OpenOptions{
+            Read = true,
+            Write = false,
+            Append = false,
+            Create = false,
+            Truncate = false,
+            Exclusive = false,
+        },
+    )
+}
+
+/*
+CreateFile opens a file for writing, creating it when necessary and
+truncating its previous contents.
+*/
+CreateFile :: task(
+    path string,
+) (File, Error) {
+    return OpenFile(
+        path,
+        OpenOptions{
+            Read = false,
+            Write = true,
+            Append = false,
+            Create = true,
+            Truncate = true,
+            Exclusive = false,
+        },
+    )
+}
+
+/*
+CreateFileExclusive creates a new file and fails when the path already
+exists.
+*/
+CreateFileExclusive :: task(
+    path string,
+) (File, Error) {
+    return OpenFile(
+        path,
+        OpenOptions{
+            Read = false,
+            Write = true,
+            Append = false,
+            Create = true,
+            Truncate = false,
+            Exclusive = true,
+        },
+    )
+}
+
+/*
+OpenAppend opens a file for append-only writing, creating it when
+necessary.
+*/
+OpenAppend :: task(
+    path string,
+) (File, Error) {
+    return OpenFile(
+        path,
+        OpenOptions{
+            Read = false,
+            Write = true,
+            Append = true,
+            Create = true,
+            Truncate = false,
+            Exclusive = false,
+        },
+    )
+}
+
+/*
+FileIsOpen reports whether file currently refers to an open stream.
+*/
+FileIsOpen :: pure task(
+    file *File,
+) bool {
+    return !file._closed &&
+        file._handle != nil
+}
+
+/*
+FileIsReadable reports whether file was opened for reading.
+*/
+FileIsReadable :: pure task(
+    file *File,
+) bool {
+    return FileIsOpen(file) &&
+        file._readable
+}
+
+/*
+FileIsWritable reports whether file was opened for writing.
+*/
+FileIsWritable :: pure task(
+    file *File,
+) bool {
+    return FileIsOpen(file) &&
+        file._writable
+}
+
+/*
+FlushFile flushes buffered data associated with file.
+*/
+FlushFile :: task(
+    file *File,
+) Error {
+    if !FileIsOpen(file) ||
+        !file._writable {
+        return _InternalError(
+            .InvalidArgument,
+        )
+    }
+
+    nativeError: int = 0
+
+    success :=
+        _FlushFileStream(
+            file._handle,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+CloseFile closes file.
+
+Calling CloseFile more than once succeeds.
+
+Borrowed standard-stream wrappers are marked closed without closing the
+process-global stream.
+*/
+CloseFile :: task(
+    file *File,
+) Error {
+    if file._closed {
+        return NoError()
+    }
+
+    if !file._ownsHandle {
+        file._handle = nil
+        file._closed = true
+
+        return NoError()
+    }
+
+    nativeError: int = 0
+
+    success :=
+        _CloseFileStream(
+            file._handle,
+            &nativeError,
+        )
+
+    file._handle = nil
+    file._closed = true
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+FileSeek changes the current file position.
+
+A negative resulting position is rejected by the native bridge.
+*/
+FileSeek :: task(
+    file *File,
+    offset i64,
+    origin SeekOrigin,
+) (u64, Error) {
+    if !FileIsOpen(file) {
+        return 0, _InternalError(
+            .InvalidArgument,
+        )
+    }
+
+    position: u64 = 0
+    nativeError: int = 0
+
+    success :=
+        _SeekFileStream(
+            file._handle,
+            offset,
+            cast<int>(origin),
+            &position,
+            &nativeError,
+        )
+
+    if !success {
+        return 0, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return position, NoError()
+}
+
+/*
+FilePosition returns the current absolute byte position.
+*/
+FilePosition :: task(
+    file *File,
+) (u64, Error) {
+    return FileSeek(
+        file,
+        0,
+        .Current,
+    )
+}
+
+/*
+StandardInput returns a borrowed wrapper around process standard input.
+
+Closing the returned wrapper does not close the process-global stream.
+*/
+StandardInput :: task() File {
+    return File{
+        _handle = _StandardInputHandle(),
+        _readable = true,
+        _writable = false,
+        _ownsHandle = false,
+        _closed = false,
+    }
+}
+
+/*
+StandardOutput returns a borrowed wrapper around process standard output.
+
+Closing the returned wrapper does not close the process-global stream.
+*/
+StandardOutput :: task() File {
+    return File{
+        _handle = _StandardOutputHandle(),
+        _readable = false,
+        _writable = true,
+        _ownsHandle = false,
+        _closed = false,
+    }
+}
+
+/*
+StandardError returns a borrowed wrapper around process standard error.
+
+Closing the returned wrapper does not close the process-global stream.
+*/
+StandardError :: task() File {
+    return File{
+        _handle = _StandardErrorHandle(),
+        _readable = false,
+        _writable = true,
+        _ownsHandle = false,
+        _closed = false,
+    }
+}
+
+io.Reader :: impl File {
+    Read :: task(
+        self *File,
+        destination io.ByteSpan,
+    ) (uint, io.ReadStatus) {
+        if !FileIsReadable(self) ||
+            !io.ByteSpanIsValid(
+                destination,
+            ) {
+            return 0, .Failed
+        }
+
+        if destination.Length == 0 {
+            return 0, .Data
+        }
+
+        count: uint = 0
+        ended := false
+        nativeError: int = 0
+
+        success :=
+            _ReadFileStream(
+                self._handle,
+                destination.Data,
+                destination.Length,
+                &count,
+                &ended,
+                &nativeError,
+            )
+
+        if !success {
+            return 0, .Failed
+        }
+
+        if ended {
+            return 0, .End
+        }
+
+        if count == 0 ||
+            count > destination.Length {
+            return 0, .Failed
+        }
+
+        return count, .Data
+    }
+}
+
+io.Writer :: impl File {
+    Write :: task(
+        self *File,
+        source io.ByteSpan,
+    ) (uint, io.WriteStatus) {
+        if !FileIsWritable(self) ||
+            !io.ByteSpanIsValid(source) {
+            return 0, .Failed
+        }
+
+        if source.Length == 0 {
+            return 0, .Data
+        }
+
+        count: uint = 0
+        nativeError: int = 0
+
+        success :=
+            _WriteFileStream(
+                self._handle,
+                source.Data,
+                source.Length,
+                &count,
+                &nativeError,
+            )
+
+        if !success {
+            return 0, .Failed
+        }
+
+        if count == 0 ||
+            count > source.Length {
+            return 0, .Failed
+        }
+
+        return count, .Data
+    }
+}
+
+io.Flusher :: impl File {
+    Flush :: task(
+        self *File,
+    ) bool {
+        error := FlushFile(self)
+
+        return ErrorIsNone(error)
+    }
+}
+
+io.Closer :: impl File {
+    Close :: task(
+        self *File,
+    ) bool {
+        error := CloseFile(self)
+
+        return ErrorIsNone(error)
+    }
+}

@@ -1,0 +1,140 @@
+/*
+FileType identifies the portable category of a filesystem entry.
+*/
+FileType :: enum {
+    Regular
+    Directory
+    Symlink
+    Other
+}
+
+/*
+FileInfo contains portable filesystem metadata.
+
+Size is measured in bytes.
+
+ModifiedUnixSeconds is the last modification time expressed as seconds
+since the Unix epoch.
+
+ReadOnly reports the platform's portable read-only indication.
+*/
+FileInfo :: struct {
+    Type FileType
+    Size u64
+    ModifiedUnixSeconds i64
+    ReadOnly bool
+}
+
+/*
+_Stat obtains native filesystem metadata.
+
+followSymlinks selects whether metadata describes a symbolic link or its
+target.
+*/
+_Stat ::
+    extern("seal_os_stat")
+    task(
+        path string,
+        followSymlinks bool,
+        fileType *int,
+        size *u64,
+        modifiedUnixSeconds *i64,
+        readOnly *bool,
+        nativeError *int,
+    ) bool
+
+/*
+_StatPath implements Stat and Lstat.
+*/
+_StatPath :: task(
+    path string,
+    followSymlinks bool,
+) (FileInfo, Error) {
+    fileType: int = 0
+    size: u64 = 0
+    modifiedUnixSeconds: i64 = 0
+    readOnly := false
+    nativeError: int = 0
+
+    success :=
+        _Stat(
+            path,
+            followSymlinks,
+            &fileType,
+            &size,
+            &modifiedUnixSeconds,
+            &readOnly,
+            &nativeError,
+        )
+
+    if !success {
+        return FileInfo{
+            Type = .Other,
+            Size = 0,
+            ModifiedUnixSeconds = 0,
+            ReadOnly = false,
+        }, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return FileInfo{
+        Type = cast<FileType>(
+            fileType,
+        ),
+        Size = size,
+        ModifiedUnixSeconds =
+            modifiedUnixSeconds,
+        ReadOnly = readOnly,
+    }, NoError()
+}
+
+/*
+Stat returns metadata for path and follows symbolic links.
+*/
+Stat :: task(
+    path string,
+) (FileInfo, Error) {
+    return _StatPath(
+        path,
+        true,
+    )
+}
+
+/*
+Lstat returns metadata for path without following its final symbolic
+link.
+*/
+Lstat :: task(
+    path string,
+) (FileInfo, Error) {
+    return _StatPath(
+        path,
+        false,
+    )
+}
+
+/*
+Exists reports whether path can be successfully inspected.
+
+Permission failures and other metadata errors also produce false.
+*/
+Exists :: task(
+    path string,
+) bool {
+    _, error := Stat(path)
+
+    return ErrorIsNone(error)
+}
+
+/*
+PathIsDirectory reports whether path exists and is a directory.
+*/
+PathIsDirectory :: task(
+    path string,
+) bool {
+    info, error := Stat(path)
+
+    return ErrorIsNone(error) &&
+        info.Type == .Directory
+}

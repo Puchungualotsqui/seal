@@ -1,0 +1,141 @@
+/*
+_GetEnvironment obtains an environment variable as a temporary native
+UTF-8 allocation.
+
+found distinguishes a missing variable from a variable containing an
+empty value.
+*/
+_GetEnvironment ::
+    extern("seal_os_get_environment")
+    task(
+        name string,
+        data *rawptr,
+        byteLength *uint,
+        found *bool,
+        nativeError *int,
+    ) bool
+
+/*
+_SetEnvironment creates or replaces an environment variable.
+*/
+_SetEnvironment ::
+    extern("seal_os_set_environment")
+    task(
+        name string,
+        value string,
+        nativeError *int,
+    ) bool
+
+/*
+_UnsetEnvironment removes an environment variable.
+*/
+_UnsetEnvironment ::
+    extern("seal_os_unset_environment")
+    task(
+        name string,
+        nativeError *int,
+    ) bool
+
+/*
+GetEnv returns an owned copy of an environment variable.
+
+found is false when the variable does not exist. An existing variable
+with an empty value returns found equal to true.
+*/
+GetEnv :: task(
+    allocator mem.Allocator,
+    name string,
+) (strings.OwnedString, bool, Error) {
+    data: rawptr = nil
+    byteLength: uint = 0
+    found := false
+    nativeError: int = 0
+
+    success :=
+        _GetEnvironment(
+            name,
+            &data,
+            &byteLength,
+            &found,
+            &nativeError,
+        )
+
+    if !success {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, false, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    if !found {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, false, NoError()
+    }
+
+    result, copyError :=
+        _OwnedStringFromNative(
+            allocator,
+            data,
+            byteLength,
+        )
+
+    if !ErrorIsNone(copyError) {
+        return result, false, copyError
+    }
+
+    return result, true, NoError()
+}
+
+/*
+SetEnv creates or replaces an environment variable.
+*/
+SetEnv :: task(
+    name string,
+    value string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _SetEnvironment(
+            name,
+            value,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+UnsetEnv removes an environment variable.
+
+Removing a variable that does not exist succeeds.
+*/
+UnsetEnv :: task(
+    name string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _UnsetEnvironment(
+            name,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}

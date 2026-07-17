@@ -1,0 +1,102 @@
+/*
+_ArgumentCount obtains the number of process command-line arguments.
+*/
+_ArgumentCount ::
+    extern("seal_os_argument_count")
+    task(
+        count *uint,
+        nativeError *int,
+    ) bool
+
+/*
+_Argument obtains one command-line argument as a temporary native UTF-8
+allocation.
+
+found is false when index is outside the argument list.
+*/
+_Argument ::
+    extern("seal_os_argument")
+    task(
+        index uint,
+        data *rawptr,
+        byteLength *uint,
+        found *bool,
+        nativeError *int,
+    ) bool
+
+/*
+ArgumentCount returns the number of process command-line arguments.
+
+The executable path normally occupies index zero.
+*/
+ArgumentCount :: task() (uint, Error) {
+    count: uint = 0
+    nativeError: int = 0
+
+    success :=
+        _ArgumentCount(
+            &count,
+            &nativeError,
+        )
+
+    if !success {
+        return 0, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return count, NoError()
+}
+
+/*
+Argument returns an owned copy of one process command-line argument.
+
+found is false when index is outside the argument list.
+*/
+Argument :: task(
+    allocator mem.Allocator,
+    index uint,
+) (strings.OwnedString, bool, Error) {
+    data: rawptr = nil
+    byteLength: uint = 0
+    found := false
+    nativeError: int = 0
+
+    success :=
+        _Argument(
+            index,
+            &data,
+            &byteLength,
+            &found,
+            &nativeError,
+        )
+
+    if !success {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, false, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    if !found {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, false, NoError()
+    }
+
+    result, copyError :=
+        _OwnedStringFromNative(
+            allocator,
+            data,
+            byteLength,
+        )
+
+    if !ErrorIsNone(copyError) {
+        return result, false, copyError
+    }
+
+    return result, true, NoError()
+}

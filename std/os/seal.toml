@@ -1,0 +1,5 @@
+[package]
+name = "os"
+version = "0.1.0"
+kind = "library"
+dependencies = ["mem", "lists", "strings", "io"]

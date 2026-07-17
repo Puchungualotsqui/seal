@@ -1,0 +1,1156 @@
+/*
+This example performs integration tests for the os standard package.
+
+It creates a uniquely named directory in the current working directory,
+tests file and directory operations inside it, and removes the generated
+resources before returning.
+*/
+
+/*
+RequireNoError panics with context when an operating-system operation
+returns an error.
+*/
+RequireNoError :: task(
+    context string,
+    error os.Error,
+) {
+    if os.ErrorIsNone(error) {
+        return
+    }
+
+    fmt.Println(
+        "%v: %v",
+        context,
+        os.ErrorString(error),
+    )
+
+    fmt.Println(
+        "native error code: %v",
+        error.NativeCode,
+    )
+
+    panic("os integration test failed")
+}
+
+/*
+Require reports a failed test condition.
+*/
+Require :: task(
+    condition bool,
+    message string,
+) {
+    if condition {
+        return
+    }
+
+    fmt.Println(
+        "test failed: %v",
+        message,
+    )
+
+    panic("os integration test failed")
+}
+
+/*
+ByteSpanFromString creates a borrowed byte span over a string.
+
+The returned span must not outlive value's backing storage.
+*/
+ByteSpanFromString :: pure task(
+    value string,
+) io.ByteSpan {
+    if size(value) == 0 {
+        return io.EmptyByteSpan()
+    }
+
+    return io.ByteSpan{
+        Data = cast<rawptr>(value),
+        Length = size(value),
+    }
+}
+
+/*
+JoinTestPath creates an owned child path beneath directory.
+
+Forward slashes are accepted by the supported native bridges on both
+POSIX and Windows.
+*/
+JoinTestPath :: task(
+    allocator mem.Allocator,
+    directory string,
+    name string,
+) strings.OwnedString {
+    return strings.Concat3(
+        allocator,
+        directory,
+        "/",
+        name,
+    )
+}
+
+/*
+TestArguments verifies process argument access.
+*/
+TestArguments :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    count, countError :=
+        os.ArgumentCount()
+
+    RequireNoError(
+        "ArgumentCount",
+        countError,
+    )
+
+    Require(
+        count > 0,
+        "the process must contain argument zero",
+    )
+
+    executableArgument,
+        found,
+        argumentError :=
+        os.Argument(
+            allocator,
+            0,
+        )
+
+    RequireNoError(
+        "Argument(0)",
+        argumentError,
+    )
+
+    Require(
+        found,
+        "argument zero must exist",
+    )
+
+    fmt.Println(
+        "argument count: %v",
+        count,
+    )
+
+    fmt.Println(
+        "argument zero: %v",
+        strings.View(
+            &executableArgument,
+        ),
+    )
+
+    strings.Destroy(
+        deallocator,
+        &executableArgument,
+    )
+}
+
+/*
+TestEnvironment verifies environment-variable lookup, replacement, and
+restoration.
+*/
+TestEnvironment :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    variableName :=
+        "SEAL_OS_INTEGRATION_TEST"
+
+    previousValue,
+        previouslyFound,
+        readPreviousError :=
+        os.GetEnv(
+            allocator,
+            variableName,
+        )
+
+    RequireNoError(
+        "GetEnv before test",
+        readPreviousError,
+    )
+
+    setError :=
+        os.SetEnv(
+            variableName,
+            "seal-os-value",
+        )
+
+    RequireNoError(
+        "SetEnv",
+        setError,
+    )
+
+    currentValue,
+        found,
+        readError :=
+        os.GetEnv(
+            allocator,
+            variableName,
+        )
+
+    RequireNoError(
+        "GetEnv after SetEnv",
+        readError,
+    )
+
+    Require(
+        found,
+        "the test environment variable must exist",
+    )
+
+    Require(
+        strings.View(
+            &currentValue,
+        ) == "seal-os-value",
+        "the environment variable contains an unexpected value",
+    )
+
+    strings.Destroy(
+        deallocator,
+        &currentValue,
+    )
+
+    unsetError :=
+        os.UnsetEnv(
+            variableName,
+        )
+
+    RequireNoError(
+        "UnsetEnv",
+        unsetError,
+    )
+
+    missingValue,
+        stillFound,
+        missingError :=
+        os.GetEnv(
+            allocator,
+            variableName,
+        )
+
+    RequireNoError(
+        "GetEnv after UnsetEnv",
+        missingError,
+    )
+
+    Require(
+        !stillFound,
+        "the environment variable must be absent after UnsetEnv",
+    )
+
+    /*
+    A missing result has no allocation, but Destroy is intentionally
+    safe for an empty owner.
+    */
+    strings.Destroy(
+        deallocator,
+        &missingValue,
+    )
+
+    /*
+    Restore the process environment to its original state.
+    */
+    if previouslyFound {
+        restoreError :=
+            os.SetEnv(
+                variableName,
+                strings.View(
+                    &previousValue,
+                ),
+            )
+
+        RequireNoError(
+            "restore environment variable",
+            restoreError,
+        )
+    } else {
+        restoreError :=
+            os.UnsetEnv(
+                variableName,
+            )
+
+        RequireNoError(
+            "restore missing environment variable",
+            restoreError,
+        )
+    }
+
+    strings.Destroy(
+        deallocator,
+        &previousValue,
+    )
+}
+
+/*
+TestWorkingDirectory verifies retrieval of the current working directory
+and setting it to its current value.
+*/
+TestWorkingDirectory :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    directory, readError :=
+        os.GetWorkingDirectory(
+            allocator,
+        )
+
+    RequireNoError(
+        "GetWorkingDirectory",
+        readError,
+    )
+
+    directoryView :=
+        strings.View(
+            &directory,
+        )
+
+    Require(
+        size(directoryView) > 0,
+        "the working directory must not be empty",
+    )
+
+    fmt.Println(
+        "working directory: %v",
+        directoryView,
+    )
+
+    setError :=
+        os.SetWorkingDirectory(
+            directoryView,
+        )
+
+    RequireNoError(
+        "SetWorkingDirectory",
+        setError,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &directory,
+    )
+}
+
+/*
+TestProcessInformation verifies the process identifier and executable
+path APIs.
+*/
+TestProcessInformation :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    processID :=
+        os.ProcessID()
+
+    Require(
+        processID > 0,
+        "ProcessID must return a positive identifier",
+    )
+
+    executablePath, pathError :=
+        os.ExecutablePath(
+            allocator,
+        )
+
+    RequireNoError(
+        "ExecutablePath",
+        pathError,
+    )
+
+    Require(
+        size(
+            strings.View(
+                &executablePath,
+            ),
+        ) > 0,
+        "ExecutablePath must not return an empty path",
+    )
+
+    fmt.Println(
+        "process ID: %v",
+        processID,
+    )
+
+    fmt.Println(
+        "executable path: %v",
+        strings.View(
+            &executablePath,
+        ),
+    )
+
+    strings.Destroy(
+        deallocator,
+        &executablePath,
+    )
+}
+
+/*
+TestWholeFileOperations verifies writing, appending, reading, metadata,
+renaming, and removal.
+*/
+TestWholeFileOperations :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    root string,
+) {
+    originalPath :=
+        JoinTestPath(
+            allocator,
+            root,
+            "original.txt",
+        )
+
+    renamedPath :=
+        JoinTestPath(
+            allocator,
+            root,
+            "renamed.txt",
+        )
+
+    originalPathView :=
+        strings.View(
+            &originalPath,
+        )
+
+    renamedPathView :=
+        strings.View(
+            &renamedPath,
+        )
+
+    writeError :=
+        os.WriteFile(
+            originalPathView,
+            ByteSpanFromString(
+                "hello",
+            ),
+        )
+
+    RequireNoError(
+        "WriteFile",
+        writeError,
+    )
+
+    appendError :=
+        os.AppendFile(
+            originalPathView,
+            ByteSpanFromString(
+                " world",
+            ),
+        )
+
+    RequireNoError(
+        "AppendFile",
+        appendError,
+    )
+
+    contents, readError :=
+        os.ReadFile(
+            allocator,
+            deallocator,
+            originalPathView,
+        )
+
+    RequireNoError(
+        "ReadFile",
+        readError,
+    )
+
+    Require(
+        contents.Length == 11,
+        "ReadFile returned an unexpected byte count",
+    )
+
+    contentsView :=
+        cast<string>(
+            contents.Data,
+            contents.Length,
+        )
+
+    Require(
+        contentsView == "hello world",
+        "ReadFile returned unexpected contents",
+    )
+
+    os.DestroyOwnedBytes(
+        &contents,
+    )
+
+    info, statError :=
+        os.Stat(
+            originalPathView,
+        )
+
+    RequireNoError(
+        "Stat",
+        statError,
+    )
+
+    Require(
+        info.Type == .Regular,
+        "the created path must be a regular file",
+    )
+
+    Require(
+        info.Size == 11,
+        "Stat returned an unexpected file size",
+    )
+
+    Require(
+        os.Exists(
+            originalPathView,
+        ),
+        "Exists must find the created file",
+    )
+
+    renameError :=
+        os.Rename(
+            originalPathView,
+            renamedPathView,
+        )
+
+    RequireNoError(
+        "Rename",
+        renameError,
+    )
+
+    Require(
+        !os.Exists(
+            originalPathView,
+        ),
+        "the original path must disappear after Rename",
+    )
+
+    Require(
+        os.Exists(
+            renamedPathView,
+        ),
+        "the renamed path must exist",
+    )
+
+    removeError :=
+        os.RemoveFile(
+            renamedPathView,
+        )
+
+    RequireNoError(
+        "RemoveFile",
+        removeError,
+    )
+
+    Require(
+        !os.Exists(
+            renamedPathView,
+        ),
+        "the removed file must not exist",
+    )
+
+    strings.Destroy(
+        deallocator,
+        &originalPath,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &renamedPath,
+    )
+}
+
+/*
+TestOpenFileAndSeek verifies direct File operations and io interface
+implementations.
+*/
+TestOpenFileAndSeek :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    root string,
+) {
+    path :=
+        JoinTestPath(
+            allocator,
+            root,
+            "seek.bin",
+        )
+
+    pathView :=
+        strings.View(
+            &path,
+        )
+
+    file, createError :=
+        os.CreateFile(
+            pathView,
+        )
+
+    RequireNoError(
+        "CreateFile",
+        createError,
+    )
+
+    written, writeStatus :=
+        io.WriteAll(
+            cast<io.Writer>(
+                &file,
+            ),
+            ByteSpanFromString(
+                "abcdef",
+            ),
+        )
+
+    Require(
+        writeStatus == .Complete,
+        "WriteAll did not complete",
+    )
+
+    Require(
+        written == 6,
+        "WriteAll returned an unexpected byte count",
+    )
+
+    flushError :=
+        os.FlushFile(
+            &file,
+        )
+
+    RequireNoError(
+        "FlushFile",
+        flushError,
+    )
+
+    endPosition, seekEndError :=
+        os.FileSeek(
+            &file,
+            0,
+            .End,
+        )
+
+    RequireNoError(
+        "FileSeek to end",
+        seekEndError,
+    )
+
+    Require(
+        endPosition == 6,
+        "FileSeek returned an unexpected end position",
+    )
+
+    startPosition, seekStartError :=
+        os.FileSeek(
+            &file,
+            0,
+            .Start,
+        )
+
+    RequireNoError(
+        "FileSeek to start",
+        seekStartError,
+    )
+
+    Require(
+        startPosition == 0,
+        "FileSeek did not return to the beginning",
+    )
+
+    closeError :=
+        os.CloseFile(
+            &file,
+        )
+
+    RequireNoError(
+        "CloseFile after writing",
+        closeError,
+    )
+
+    /*
+    Closing an already closed file must succeed.
+    */
+    repeatedCloseError :=
+        os.CloseFile(
+            &file,
+        )
+
+    RequireNoError(
+        "repeated CloseFile",
+        repeatedCloseError,
+    )
+
+    readerFile, openError :=
+        os.OpenRead(
+            pathView,
+        )
+
+    RequireNoError(
+        "OpenRead",
+        openError,
+    )
+
+    bufferData :=
+        mem.AllocWith(
+            allocator,
+            6,
+        )
+
+    Require(
+        bufferData != nil,
+        "failed to allocate the read buffer",
+    )
+
+    buffer := io.ByteSpan{
+        Data = bufferData,
+        Length = 6,
+    }
+
+    readCount, readStatus :=
+        io.ReadExact(
+            cast<io.Reader>(
+                &readerFile,
+            ),
+            buffer,
+        )
+
+    Require(
+        readStatus == .Complete,
+        "ReadExact did not complete",
+    )
+
+    Require(
+        readCount == 6,
+        "ReadExact returned an unexpected byte count",
+    )
+
+    readText :=
+        cast<string>(
+            buffer.Data,
+            buffer.Length,
+        )
+
+    Require(
+        readText == "abcdef",
+        "direct file reading returned unexpected contents",
+    )
+
+    mem.FreeWith(
+        deallocator,
+        bufferData,
+    )
+
+    closeReadError :=
+        os.CloseFile(
+            &readerFile,
+        )
+
+    RequireNoError(
+        "CloseFile after reading",
+        closeReadError,
+    )
+
+    removeError :=
+        os.RemoveFile(
+            pathView,
+        )
+
+    RequireNoError(
+        "remove seek test file",
+        removeError,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &path,
+    )
+}
+
+/*
+TestDirectories verifies recursive creation, directory metadata, and
+directory enumeration.
+*/
+TestDirectories :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    root string,
+) {
+    nestedParent :=
+        JoinTestPath(
+            allocator,
+            root,
+            "nested",
+        )
+
+    nestedChild :=
+        JoinTestPath(
+            allocator,
+            strings.View(
+                &nestedParent,
+            ),
+            "child",
+        )
+
+    createError :=
+        os.CreateDirectories(
+            strings.View(
+                &nestedChild,
+            ),
+        )
+
+    RequireNoError(
+        "CreateDirectories",
+        createError,
+    )
+
+    Require(
+        os.PathIsDirectory(
+            strings.View(
+                &nestedParent,
+            ),
+        ),
+        "the nested parent must be a directory",
+    )
+
+    Require(
+        os.PathIsDirectory(
+            strings.View(
+                &nestedChild,
+            ),
+        ),
+        "the nested child must be a directory",
+    )
+
+    markerPath :=
+        JoinTestPath(
+            allocator,
+            root,
+            "directory-entry.txt",
+        )
+
+    markerError :=
+        os.WriteFile(
+            strings.View(
+                &markerPath,
+            ),
+            ByteSpanFromString(
+                "entry",
+            ),
+        )
+
+    RequireNoError(
+        "create directory marker",
+        markerError,
+    )
+
+    entries, entriesError :=
+        os.ReadDirectory(
+            allocator,
+            deallocator,
+            root,
+        )
+
+    RequireNoError(
+        "ReadDirectory",
+        entriesError,
+    )
+
+    foundMarker := false
+    foundNested := false
+
+    entryCount :=
+        os.DirectoryEntriesLength(
+            &entries,
+        )
+
+    index: int = 0
+
+    for index <
+        cast<int>(entryCount) {
+        entry, found :=
+            os.DirectoryEntriesGet(
+                &entries,
+                index,
+            )
+
+        Require(
+            found,
+            "DirectoryEntriesGet failed for a valid index",
+        )
+
+        name :=
+            strings.View(
+                &entry.Name,
+            )
+
+        if name ==
+            "directory-entry.txt" {
+            foundMarker = true
+
+            Require(
+                entry.Type == .Regular ||
+                    entry.Type == .Other,
+                "the marker has an unexpected directory-entry type",
+            )
+        }
+
+        if name == "nested" {
+            foundNested = true
+
+            Require(
+                entry.Type == .Directory ||
+                    entry.Type == .Other,
+                "the nested directory has an unexpected entry type",
+            )
+        }
+
+        index += 1
+    }
+
+    Require(
+        foundMarker,
+        "ReadDirectory did not return the marker file",
+    )
+
+    Require(
+        foundNested,
+        "ReadDirectory did not return the nested directory",
+    )
+
+    os.DestroyDirectoryEntries(
+        &entries,
+    )
+
+    removeMarkerError :=
+        os.RemoveFile(
+            strings.View(
+                &markerPath,
+            ),
+        )
+
+    RequireNoError(
+        "remove directory marker",
+        removeMarkerError,
+    )
+
+    removeChildError :=
+        os.RemoveDirectory(
+            strings.View(
+                &nestedChild,
+            ),
+        )
+
+    RequireNoError(
+        "remove nested child",
+        removeChildError,
+    )
+
+    removeParentError :=
+        os.RemoveDirectory(
+            strings.View(
+                &nestedParent,
+            ),
+        )
+
+    RequireNoError(
+        "remove nested parent",
+        removeParentError,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &markerPath,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &nestedChild,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &nestedParent,
+    )
+}
+
+/*
+TestStandardStreams verifies that a borrowed standard-output wrapper can
+be used through io.Writer.
+*/
+TestStandardStreams :: task() {
+    output :=
+        os.StandardOutput()
+
+    message :=
+        "standard output writer: ok\n"
+
+    count, status :=
+        io.WriteAll(
+            cast<io.Writer>(
+                &output,
+            ),
+            ByteSpanFromString(
+                message,
+            ),
+        )
+
+    Require(
+        status == .Complete,
+        "writing to StandardOutput failed",
+    )
+
+    Require(
+        count == size(message),
+        "StandardOutput accepted an unexpected byte count",
+    )
+
+    flushError :=
+        os.FlushFile(
+            &output,
+        )
+
+    RequireNoError(
+        "flush StandardOutput",
+        flushError,
+    )
+
+    /*
+    Closing the borrowed wrapper must not close the process-global
+    standard output stream.
+    */
+    closeError :=
+        os.CloseFile(
+            &output,
+        )
+
+    RequireNoError(
+        "close StandardOutput wrapper",
+        closeError,
+    )
+
+    fmt.Println(
+        "fmt output after wrapper close: ok",
+    )
+}
+
+/*
+Main runs the complete os integration test.
+*/
+Main :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    allocator :=
+        cast<mem.Allocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
+    fmt.Println(
+        "starting os integration tests",
+    )
+
+    TestArguments(
+        allocator,
+        deallocator,
+    )
+
+    TestEnvironment(
+        allocator,
+        deallocator,
+    )
+
+    TestWorkingDirectory(
+        allocator,
+        deallocator,
+    )
+
+    TestProcessInformation(
+        allocator,
+        deallocator,
+    )
+
+    processIDText :=
+        strconv.FormatUint(
+            allocator,
+            os.ProcessID(),
+        )
+
+    rootOwner :=
+        strings.Concat(
+            allocator,
+            ".seal-os-test-",
+            strings.View(
+                &processIDText,
+            ),
+        )
+
+    root :=
+        strings.View(
+            &rootOwner,
+        )
+
+    /*
+    A previous abnormal run with the same process identifier is extremely
+    unlikely, but fail clearly instead of modifying an existing path.
+    */
+    Require(
+        !os.Exists(root),
+        "the generated test directory already exists",
+    )
+
+    createRootError :=
+        os.CreateDirectory(root)
+
+    RequireNoError(
+        "create test root",
+        createRootError,
+    )
+
+    Require(
+        os.PathIsDirectory(root),
+        "the test root must be a directory",
+    )
+
+    TestWholeFileOperations(
+        allocator,
+        deallocator,
+        root,
+    )
+
+    TestOpenFileAndSeek(
+        allocator,
+        deallocator,
+        root,
+    )
+
+    TestDirectories(
+        allocator,
+        deallocator,
+        root,
+    )
+
+    removeRootError :=
+        os.RemoveDirectory(root)
+
+    RequireNoError(
+        "remove test root",
+        removeRootError,
+    )
+
+    Require(
+        !os.Exists(root),
+        "the test root must be removed",
+    )
+
+    strings.Destroy(
+        deallocator,
+        &rootOwner,
+    )
+
+    strings.Destroy(
+        deallocator,
+        &processIDText,
+    )
+
+    TestStandardStreams()
+
+    fmt.Println(
+        "all os integration tests passed",
+    )
+}

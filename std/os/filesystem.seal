@@ -1,0 +1,174 @@
+/*
+_CreateDirectory creates one directory.
+*/
+_CreateDirectory ::
+    extern("seal_os_create_directory")
+    task(
+        path string,
+        nativeError *int,
+    ) bool
+
+/*
+_CreateDirectories creates a directory and all missing parents.
+*/
+_CreateDirectories ::
+    extern("seal_os_create_directories")
+    task(
+        path string,
+        nativeError *int,
+    ) bool
+
+/*
+_RemoveFile removes a non-directory filesystem entry.
+*/
+_RemoveFile ::
+    extern("seal_os_remove_file")
+    task(
+        path string,
+        nativeError *int,
+    ) bool
+
+/*
+_RemoveDirectory removes an empty directory.
+*/
+_RemoveDirectory ::
+    extern("seal_os_remove_directory")
+    task(
+        path string,
+        nativeError *int,
+    ) bool
+
+/*
+_Rename moves or renames one filesystem entry.
+*/
+_Rename ::
+    extern("seal_os_rename")
+    task(
+        oldPath string,
+        newPath string,
+        nativeError *int,
+    ) bool
+
+/*
+CreateDirectory creates one directory.
+
+The operation fails when a parent directory is missing.
+*/
+CreateDirectory :: task(
+    path string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _CreateDirectory(
+            path,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+CreateDirectories creates a directory and every missing parent
+directory.
+
+Existing directories are accepted.
+*/
+CreateDirectories :: task(
+    path string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _CreateDirectories(
+            path,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+RemoveFile removes a file or other non-directory entry.
+*/
+RemoveFile :: task(
+    path string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _RemoveFile(
+            path,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+RemoveDirectory removes an empty directory.
+*/
+RemoveDirectory :: task(
+    path string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _RemoveDirectory(
+            path,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}
+
+/*
+Rename moves or renames a filesystem entry.
+
+Replacement behavior follows the host operating system.
+*/
+Rename :: task(
+    oldPath string,
+    newPath string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _Rename(
+            oldPath,
+            newPath,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}

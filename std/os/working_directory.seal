@@ -1,0 +1,78 @@
+/*
+_GetWorkingDirectory obtains the current working directory as a
+temporary native UTF-8 allocation.
+*/
+_GetWorkingDirectory ::
+    extern("seal_os_get_working_directory")
+    task(
+        data *rawptr,
+        byteLength *uint,
+        nativeError *int,
+    ) bool
+
+/*
+_SetWorkingDirectory changes the process working directory.
+*/
+_SetWorkingDirectory ::
+    extern("seal_os_set_working_directory")
+    task(
+        path string,
+        nativeError *int,
+    ) bool
+
+/*
+GetWorkingDirectory returns an owned UTF-8 representation of the current
+working directory.
+*/
+GetWorkingDirectory :: task(
+    allocator mem.Allocator,
+) (strings.OwnedString, Error) {
+    data: rawptr = nil
+    byteLength: uint = 0
+    nativeError: int = 0
+
+    success :=
+        _GetWorkingDirectory(
+            &data,
+            &byteLength,
+            &nativeError,
+        )
+
+    if !success {
+        return strings.OwnedString{
+            Data = nil,
+            ByteLength = 0,
+        }, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return _OwnedStringFromNative(
+        allocator,
+        data,
+        byteLength,
+    )
+}
+
+/*
+SetWorkingDirectory changes the process working directory.
+*/
+SetWorkingDirectory :: task(
+    path string,
+) Error {
+    nativeError: int = 0
+
+    success :=
+        _SetWorkingDirectory(
+            path,
+            &nativeError,
+        )
+
+    if !success {
+        return _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    return NoError()
+}

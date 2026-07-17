@@ -1,0 +1,265 @@
+/*
+DirectoryEntry contains one directory member.
+
+Name owns its UTF-8 allocation. Entries returned by
+DirectoryEntriesGet are shallow borrowed copies and must not be destroyed
+individually.
+*/
+DirectoryEntry :: struct {
+    Name strings.OwnedString
+    Type FileType
+}
+
+/*
+DirectoryEntries owns an array of directory entries and every entry
+name.
+
+Copying DirectoryEntries performs a shallow ownership copy and must be
+avoided.
+*/
+DirectoryEntries :: struct {
+    _values lists.DynamicArray<
+        DirectoryEntry
+    >
+
+    _deallocator mem.Deallocator
+}
+
+/*
+_OpenDirectory opens a native directory iterator.
+*/
+_OpenDirectory ::
+    extern("seal_os_open_directory")
+    task(
+        path string,
+        handle *rawptr,
+        nativeError *int,
+    ) bool
+
+/*
+_NextDirectoryEntry obtains the next directory member.
+
+The native bridge allocates the returned UTF-8 name temporarily.
+
+ended is true when no entries remain.
+*/
+_NextDirectoryEntry ::
+    extern("seal_os_next_directory_entry")
+    task(
+        handle rawptr,
+        nameData *rawptr,
+        nameLength *uint,
+        fileType *int,
+        ended *bool,
+        nativeError *int,
+    ) bool
+
+/*
+_CloseDirectory releases a native directory iterator.
+*/
+_CloseDirectory ::
+    extern("seal_os_close_directory")
+    task(
+        handle rawptr,
+        nativeError *int,
+    ) bool
+
+/*
+DirectoryEntriesLength returns the number of directory members.
+*/
+DirectoryEntriesLength :: pure task(
+    entries *DirectoryEntries,
+) uint {
+    return len(entries._values)
+}
+
+/*
+DirectoryEntriesGet returns a shallow borrowed copy of one entry.
+
+The returned entry and its name must not outlive entries. Do not call
+strings.Destroy on the returned Name.
+*/
+DirectoryEntriesGet :: pure task(
+    entries *DirectoryEntries,
+    index int,
+) (DirectoryEntry, bool) {
+    return lists.DynamicArrayGet<
+        DirectoryEntry
+    >(
+        &entries._values,
+        index,
+    )
+}
+
+/*
+DestroyDirectoryEntries releases all entry names and array storage.
+
+Calling it repeatedly on the same value is valid.
+*/
+DestroyDirectoryEntries :: task(
+    entries *DirectoryEntries,
+) {
+    length :=
+        lists.DynamicArrayLength<
+            DirectoryEntry
+        >(
+            &entries._values,
+        )
+
+    index: uint = 0
+
+    for index < length {
+        entry :=
+            lists.DynamicArrayGetUnsafe<
+                DirectoryEntry
+            >(
+                &entries._values,
+                index,
+            )
+
+        strings.Destroy(
+            entries._deallocator,
+            &entry.Name,
+        )
+
+        index += 1
+    }
+
+    lists.DestroyDynamicArray<
+        DirectoryEntry
+    >(
+        &entries._values,
+    )
+}
+
+/*
+ReadDirectory reads the immediate members of path.
+
+The special entries "." and ".." are omitted.
+
+The result must be released with DestroyDirectoryEntries.
+*/
+ReadDirectory :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    path string,
+) (DirectoryEntries, Error) {
+    result := DirectoryEntries{
+        _values =
+            lists.NewDynamicArrayEmpty<
+                DirectoryEntry
+            >(
+                allocator,
+                deallocator,
+            ),
+
+        _deallocator = deallocator,
+    }
+
+    handle: rawptr = nil
+    nativeError: int = 0
+
+    opened :=
+        _OpenDirectory(
+            path,
+            &handle,
+            &nativeError,
+        )
+
+    if !opened {
+        return result, _ErrorFromNative(
+            nativeError,
+        )
+    }
+
+    for {
+        nameData: rawptr = nil
+        nameLength: uint = 0
+        fileType: int = 0
+        ended := false
+        nativeError = 0
+
+        success :=
+            _NextDirectoryEntry(
+                handle,
+                &nameData,
+                &nameLength,
+                &fileType,
+                &ended,
+                &nativeError,
+            )
+
+        if !success {
+            closeError: int = 0
+
+            _CloseDirectory(
+                handle,
+                &closeError,
+            )
+
+            DestroyDirectoryEntries(
+                &result,
+            )
+
+            return result, _ErrorFromNative(
+                nativeError,
+            )
+        }
+
+        if ended {
+            break
+        }
+
+        name, nameError :=
+            _OwnedStringFromNative(
+                allocator,
+                nameData,
+                nameLength,
+            )
+
+        if !ErrorIsNone(nameError) {
+            closeError: int = 0
+
+            _CloseDirectory(
+                handle,
+                &closeError,
+            )
+
+            DestroyDirectoryEntries(
+                &result,
+            )
+
+            return result, nameError
+        }
+
+        lists.Append<DirectoryEntry>(
+            &result._values,
+            DirectoryEntry{
+                Name = name,
+                Type = cast<FileType>(
+                    fileType,
+                ),
+            },
+        )
+    }
+
+    closeError: int = 0
+
+    closed :=
+        _CloseDirectory(
+            handle,
+            &closeError,
+        )
+
+    if !closed {
+        DestroyDirectoryEntries(
+            &result,
+        )
+
+        return result, _ErrorFromNative(
+            closeError,
+        )
+    }
+
+    return result, NoError()
+}

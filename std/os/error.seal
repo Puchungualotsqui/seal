@@ -1,0 +1,173 @@
+/*
+ErrorKind classifies common portable operating-system failures.
+
+Native operating-system error codes are preserved separately in Error.
+*/
+ErrorKind :: enum {
+    None
+    NotFound
+    AlreadyExists
+    PermissionDenied
+    InvalidArgument
+    InvalidPath
+    NotDirectory
+    IsDirectory
+    DirectoryNotEmpty
+    Interrupted
+    OutOfMemory
+    InputOutput
+    Overflow
+    Unsupported
+    Unknown
+}
+
+/*
+Error describes a failed operating-system operation.
+
+Kind is a portable classification.
+
+NativeCode contains the platform error code when one is available.
+A NativeCode of zero is used for errors created by Seal code itself.
+*/
+Error :: struct {
+    Kind ErrorKind
+    NativeCode int
+}
+
+/*
+_ErrorKindFromNative translates the errno-style error codes returned by
+the native bridge into a portable ErrorKind.
+*/
+_ErrorKindFromNative ::
+    @trusted_pure
+    extern("seal_os_classify_error")
+    task(
+        nativeCode int,
+    ) int
+
+/*
+NoError returns the successful error value.
+*/
+NoError :: pure task() Error {
+    return Error{
+        Kind = .None,
+        NativeCode = 0,
+    }
+}
+
+/*
+NewError creates an Error with an explicit portable kind and native
+code.
+*/
+NewError :: pure task(
+    kind ErrorKind,
+    nativeCode int,
+) Error {
+    return Error{
+        Kind = kind,
+        NativeCode = nativeCode,
+    }
+}
+
+/*
+_ErrorFromNative creates an Error from an errno-style native code.
+*/
+_ErrorFromNative :: pure task(
+    nativeCode int,
+) Error {
+    if nativeCode == 0 {
+        return NoError()
+    }
+
+    kindValue :=
+        _ErrorKindFromNative(
+            nativeCode,
+        )
+
+    return Error{
+        Kind = cast<ErrorKind>(
+            kindValue,
+        ),
+        NativeCode = nativeCode,
+    }
+}
+
+/*
+_InternalError creates an error produced by Seal-side validation or
+higher-level I/O logic.
+*/
+_InternalError :: pure task(
+    kind ErrorKind,
+) Error {
+    return Error{
+        Kind = kind,
+        NativeCode = 0,
+    }
+}
+
+/*
+ErrorIsNone reports whether an operation succeeded.
+*/
+ErrorIsNone :: pure task(
+    value Error,
+) bool {
+    return value.Kind == .None
+}
+
+/*
+ErrorString returns a short portable description of an error.
+
+It does not include the platform-specific NativeCode.
+*/
+ErrorString :: pure task(
+    value Error,
+) string {
+    switch value.Kind {
+    case .None:
+        return "no error"
+
+    case .NotFound:
+        return "not found"
+
+    case .AlreadyExists:
+        return "already exists"
+
+    case .PermissionDenied:
+        return "permission denied"
+
+    case .InvalidArgument:
+        return "invalid argument"
+
+    case .InvalidPath:
+        return "invalid path"
+
+    case .NotDirectory:
+        return "not a directory"
+
+    case .IsDirectory:
+        return "is a directory"
+
+    case .DirectoryNotEmpty:
+        return "directory not empty"
+
+    case .Interrupted:
+        return "operation interrupted"
+
+    case .OutOfMemory:
+        return "out of memory"
+
+    case .InputOutput:
+        return "input/output failure"
+
+    case .Overflow:
+        return "numeric overflow"
+
+    case .Unsupported:
+        return "operation unsupported"
+
+    case .Unknown:
+        return "unknown operating-system failure"
+    }
+
+    return "unknown operating-system failure"
+}
