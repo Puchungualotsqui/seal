@@ -834,6 +834,10 @@ type SwitchStmt struct {
 	// For any type switch:
 	//
 	//     switch value type { ... }
+	//
+	// For enum or integer switch:
+	//
+	//     switch value { ... }
 	BindName      Ident
 	Target        Expr
 	IsUnionSwitch bool
