@@ -1,6 +1,7 @@
 package build
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -240,6 +241,88 @@ func BuildWorkspace(
 		OutDir:   outDir,
 		Output:   output,
 	}, nil
+}
+
+func RunWorkspace(
+	startPath string,
+	options BuildOptions,
+	programArgs []string,
+) (*BuildResult, error) {
+	if options.EmitOnly {
+		return nil, fmt.Errorf(
+			"run cannot be used with emit-only mode",
+		)
+	}
+
+	// Running always requires a compiled executable.
+	options.EmitOnly = false
+
+	result, err := BuildWorkspace(
+		startPath,
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if result == nil {
+		return nil, fmt.Errorf(
+			"build completed without a result",
+		)
+	}
+
+	if result.Graph == nil ||
+		result.Graph.Root == nil {
+		return nil, fmt.Errorf(
+			"build completed without a root package",
+		)
+	}
+
+	if result.Graph.Root.Config.Kind != KindExecutable {
+		return nil, fmt.Errorf(
+			"cannot run package %q because it is a %s package",
+			result.Graph.Root.Config.Name,
+			result.Graph.Root.Config.Kind,
+		)
+	}
+
+	executablePath, err := filepath.Abs(
+		result.Output,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolving executable path %q: %w",
+			result.Output,
+			err,
+		)
+	}
+
+	cmd := exec.Command(
+		executablePath,
+		programArgs...,
+	)
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+
+		if errors.As(err, &exitErr) {
+			// Return the original ExitError so the CLI can preserve the
+			// program's exit status.
+			return result, exitErr
+		}
+
+		return result, fmt.Errorf(
+			"failed to run %q: %w",
+			executablePath,
+			err,
+		)
+	}
+
+	return result, nil
 }
 
 func emptyCodegenPackageInfo(name string) *cgen.PackageInfo {

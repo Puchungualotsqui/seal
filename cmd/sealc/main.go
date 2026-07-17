@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"seal/internal/build"
@@ -50,6 +52,9 @@ func main() {
 	case "build":
 		runBuild(os.Args[2:])
 
+	case "run":
+		runRun(os.Args[2:])
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -71,20 +76,35 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  sealc check <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc emit-c <file.seal>")
 	fmt.Fprintln(os.Stderr, "  sealc packages <path>")
-	fmt.Fprintln(os.Stderr, "  sealc build <path> [--emit-c] [-o output]")
+	fmt.Fprintln(os.Stderr, "  sealc build <path> [--emit-c] [-compiler compiler] [-o output]")
+	fmt.Fprintln(os.Stderr, "  sealc run <path> [-compiler compiler] [-o output] [-- arguments...]")
 }
 
 func readAndLex(path string) ([]token.Token, *diag.Reporter) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read %s: %v\n", path, err)
+		fmt.Fprintf(
+			os.Stderr,
+			"failed to read %s: %v\n",
+			path,
+			err,
+		)
+
 		os.Exit(1)
 	}
 
-	file := source.NewFile(path, string(bytes))
+	file := source.NewFile(
+		path,
+		string(bytes),
+	)
+
 	reporter := diag.NewReporter()
 
-	lex := lexer.New(file, reporter)
+	lex := lexer.New(
+		file,
+		reporter,
+	)
+
 	tokens := lex.LexAll()
 
 	return tokens, reporter
@@ -98,7 +118,11 @@ func runLex(path string) {
 	}
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 }
@@ -107,34 +131,60 @@ func runParse(path string) {
 	tokens, reporter := readAndLex(path)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	p := parser.New(tokens, reporter)
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
 	file := p.ParseFile()
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	fmt.Println(parser.DebugSummary(file))
+	fmt.Println(
+		parser.DebugSummary(file),
+	)
 }
 
 func runResolve(path string) {
 	tokens, reporter := readAndLex(path)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	p := parser.New(tokens, reporter)
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
 	file := p.ParseFile()
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -142,26 +192,44 @@ func runResolve(path string) {
 	scope := r.ResolveFile(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	fmt.Println(resolver.DebugSummary(scope))
+	fmt.Println(
+		resolver.DebugSummary(scope),
+	)
 }
 
 func runCheck(path string) {
 	tokens, reporter := readAndLex(path)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	p := parser.New(tokens, reporter)
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
 	file := p.ParseFile()
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -169,7 +237,11 @@ func runCheck(path string) {
 	r.ResolveFile(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -177,26 +249,44 @@ func runCheck(path string) {
 	scope := c.CheckFile(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	fmt.Println(checker.DebugSummary(scope))
+	fmt.Println(
+		checker.DebugSummary(scope),
+	)
 }
 
 func runEmitC(path string) {
 	tokens, reporter := readAndLex(path)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
-	p := parser.New(tokens, reporter)
+	p := parser.New(
+		tokens,
+		reporter,
+	)
+
 	file := p.ParseFile()
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -204,7 +294,11 @@ func runEmitC(path string) {
 	r.ResolveFile(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -212,7 +306,11 @@ func runEmitC(path string) {
 	c.CheckFile(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -220,7 +318,11 @@ func runEmitC(path string) {
 	out := g.Generate(file)
 
 	if reporter.HasErrors() {
-		fmt.Fprint(os.Stderr, reporter.String())
+		fmt.Fprint(
+			os.Stderr,
+			reporter.String(),
+		)
+
 		os.Exit(1)
 	}
 
@@ -228,13 +330,21 @@ func runEmitC(path string) {
 }
 
 func runPackages(path string) {
-	graph, err := build.DiscoverAndBuildGraph(path)
+	graph, err :=
+		build.DiscoverAndBuildGraph(path)
+
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(
+			os.Stderr,
+			err,
+		)
+
 		os.Exit(1)
 	}
 
-	fmt.Print(build.DebugGraph(graph))
+	fmt.Print(
+		build.DebugGraph(graph),
+	)
 }
 
 func extractCompilerOverride(
@@ -270,6 +380,7 @@ func extractCompilerOverride(
 
 		compiler = value
 		foundCompiler = true
+
 		return nil
 	}
 
@@ -333,20 +444,32 @@ func extractCompilerOverride(
 		}
 	}
 
-	return remaining, compiler, nil
+	return remaining,
+		compiler,
+		nil
 }
 
-func runBuild(args []string) {
+func parseBuildLikeArguments(
+	command string,
+	args []string,
+	allowEmitOnly bool,
+) (
+	string,
+	build.BuildOptions,
+	error,
+) {
 	remainingArgs,
 		compilerOverride,
 		err := extractCompilerOverride(args)
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return "",
+			build.BuildOptions{},
+			err
 	}
 
 	path := "."
+
 	options := build.BuildOptions{
 		Compiler: compilerOverride,
 	}
@@ -356,16 +479,25 @@ func runBuild(args []string) {
 
 		switch arg {
 		case "--emit-c":
+			if !allowEmitOnly {
+				return "",
+					build.BuildOptions{},
+					fmt.Errorf(
+						"--emit-c cannot be used with %s",
+						command,
+					)
+			}
+
 			options.EmitOnly = true
 
 		case "-o", "--output":
 			if i+1 >= len(remainingArgs) {
-				fmt.Fprintf(
-					os.Stderr,
-					"missing output path after %s\n",
-					arg,
-				)
-				os.Exit(1)
+				return "",
+					build.BuildOptions{},
+					fmt.Errorf(
+						"missing output path after %s",
+						arg,
+					)
 			}
 
 			i++
@@ -373,24 +505,84 @@ func runBuild(args []string) {
 
 		case "-compiler", "--compiler":
 			// extractCompilerOverride should already have removed these.
-			fmt.Fprintln(
-				os.Stderr,
-				"internal error: compiler option was not extracted",
-			)
-			os.Exit(1)
+			return "",
+				build.BuildOptions{},
+				fmt.Errorf(
+					"internal error: compiler option was not extracted",
+				)
 
 		default:
-			if strings.HasPrefix(arg, "-") {
-				fmt.Fprintf(
-					os.Stderr,
-					"unknown build option %q\n",
-					arg,
-				)
-				os.Exit(1)
+			if strings.HasPrefix(
+				arg,
+				"-",
+			) {
+				return "",
+					build.BuildOptions{},
+					fmt.Errorf(
+						"unknown %s option %q",
+						command,
+						arg,
+					)
 			}
 
 			path = arg
 		}
+	}
+
+	return path,
+		options,
+		nil
+}
+
+func splitProgramArguments(
+	args []string,
+) (
+	[]string,
+	[]string,
+) {
+	for index, arg := range args {
+		if arg != "--" {
+			continue
+		}
+
+		commandArgs := append(
+			[]string(nil),
+			args[:index]...,
+		)
+
+		programArgs := append(
+			[]string(nil),
+			args[index+1:]...,
+		)
+
+		return commandArgs,
+			programArgs
+	}
+
+	return append(
+			[]string(nil),
+			args...,
+		),
+		nil
+}
+
+func runBuild(args []string) {
+	path,
+		options,
+		err :=
+		parseBuildLikeArguments(
+			"build",
+			args,
+			true,
+		)
+
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			err,
+		)
+
+		os.Exit(1)
 	}
 
 	result, err := build.BuildWorkspace(
@@ -399,7 +591,11 @@ func runBuild(args []string) {
 	)
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(
+			os.Stderr,
+			err,
+		)
+
 		os.Exit(1)
 	}
 
@@ -408,6 +604,7 @@ func runBuild(args []string) {
 			"generated C in %s\n",
 			result.OutDir,
 		)
+
 		return
 	}
 
@@ -417,10 +614,69 @@ func runBuild(args []string) {
 	)
 }
 
-func printToken(tok token.Token) {
-	pos := tok.Span.File.Position(tok.Span.Start)
+func runRun(args []string) {
+	commandArgs,
+		programArgs :=
+		splitProgramArguments(args)
 
-	fmt.Printf("%s:%d:%d  %-12s  %q\n",
+	path,
+		options,
+		err :=
+		parseBuildLikeArguments(
+			"run",
+			commandArgs,
+			false,
+		)
+
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			err,
+		)
+
+		os.Exit(1)
+	}
+
+	_, err = build.RunWorkspace(
+		path,
+		options,
+		programArgs,
+	)
+
+	if err == nil {
+		return
+	}
+
+	var exitErr *exec.ExitError
+
+	if errors.As(
+		err,
+		&exitErr,
+	) {
+		exitCode := exitErr.ExitCode()
+
+		if exitCode < 0 {
+			exitCode = 1
+		}
+
+		os.Exit(exitCode)
+	}
+
+	fmt.Fprintln(
+		os.Stderr,
+		err,
+	)
+
+	os.Exit(1)
+}
+
+func printToken(tok token.Token) {
+	pos := tok.Span.File.Position(
+		tok.Span.Start,
+	)
+
+	fmt.Printf(
+		"%s:%d:%d  %-12s  %q\n",
 		tok.Span.File.Path,
 		pos.Line,
 		pos.Column,
