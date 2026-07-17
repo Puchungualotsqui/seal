@@ -3065,13 +3065,16 @@ Main :: task() {
 	})
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct types_Box_int {",
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
 		"intptr_t value;",
-		"} types_Box_int;",
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int b = types_MakeBox_int(10);",
 		"intptr_t x = (b).value;",
@@ -3080,7 +3083,11 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -3180,26 +3187,42 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	lex := lexer.New(file, reporter)
 	tokens := lex.LexAll()
+
 	if reporter.HasErrors() {
-		t.Fatalf("lexer diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"lexer diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	p := parser.New(tokens, reporter)
 	parsed := p.ParseFile()
+
 	if reporter.HasErrors() {
-		t.Fatalf("parser diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"parser diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	r := resolver.New(reporter)
 	r.ResolveFile(parsed)
+
 	if reporter.HasErrors() {
-		t.Fatalf("resolver diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"resolver diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	c := checker.New(reporter)
 	c.CheckFile(parsed)
+
 	if reporter.HasErrors() {
-		t.Fatalf("checker diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"checker diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	g := NewWithPackagesAndSemanticInfo(
@@ -3231,10 +3254,17 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	out := g.Generate(parsed)
 
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
 	checks := []string{
-		"typedef struct types_Box_int {",
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
 		"intptr_t value;",
-		"} types_Box_int;",
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int types_MakeBox_int(intptr_t value) {",
 		"return __seal_return_value_",
@@ -3242,7 +3272,11 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -3777,13 +3811,16 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct Box_int {",
+		"typedef struct Box_int Box_int;",
+		"struct Box_int {",
 		"intptr_t value;",
-		"} Box_int;",
 		"Box_int Wrap_int(intptr_t value);",
 		"Box_int ApplyWrap_int_Wrap_int(intptr_t value);",
 		"Box_int b = ApplyWrap_int_Wrap_int(10);",
@@ -3794,7 +3831,11 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -3870,13 +3911,16 @@ Main :: task() {
 	})
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct types_Cell_int {",
+		"typedef struct types_Cell_int types_Cell_int;",
+		"struct types_Cell_int {",
 		"intptr_t health;",
-		"} types_Cell_int;",
 		"intptr_t HealthOf_types_Cell_int(types_Cell_int target);",
 		"types_Cell_int c = (types_Cell_int){.health = 15};",
 		"intptr_t h = HealthOf_types_Cell_int(c);",
@@ -3885,7 +3929,11 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -3963,13 +4011,16 @@ Main :: task() {
 	})
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct types_Box_int {",
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
 		"intptr_t value;",
-		"} types_Box_int;",
 		"types_Box_int types_Wrap_int(intptr_t value);",
 		"types_Box_int ApplyWrap_int_types_Wrap_int(intptr_t value);",
 		"types_Box_int b = ApplyWrap_int_types_Wrap_int(10);",
@@ -3979,7 +4030,11 @@ Main :: task() {
 
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected generated C to contain %q, got:\n%s", want, out)
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
 		}
 	}
 }
@@ -4324,16 +4379,21 @@ Main :: task() {
 `)
 
 	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
 	}
 
 	checks := []string{
-		"typedef struct Box_int {",
+		"typedef struct Box_int Box_int;",
+		"struct Box_int {",
 		"intptr_t value;",
-		"} Box_int;",
-		"typedef struct Holder_int {",
+
+		"typedef struct Holder_int Holder_int;",
+		"struct Holder_int {",
 		"Box_int box;",
-		"} Holder_int;",
+
 		"typedef struct Readable_int {",
 		"Readable_int_Box_int_Read(void *data)",
 		"Readable_int_Holder_int_Read(void *data)",

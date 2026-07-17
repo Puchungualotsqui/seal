@@ -364,15 +364,20 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	outDir := filepath.Join(root, "out")
 
-	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
-		EmitOnly: true,
-		OutDir:   outDir,
-	})
+	_, err := BuildWorkspace(
+		filepath.Join(root, "app"),
+		BuildOptions{
+			EmitOnly: true,
+			OutDir:   outDir,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	appBytes, err := os.ReadFile(filepath.Join(outDir, "app.c"))
+	appBytes, err := os.ReadFile(
+		filepath.Join(outDir, "app.c"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,9 +385,9 @@ MakeBox :: task <T type>(value T) Box<T> {
 	appC := string(appBytes)
 
 	appChecks := []string{
-		"typedef struct types_Box_int {",
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
 		"intptr_t value;",
-		"} types_Box_int;",
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int b = types_MakeBox_int(10);",
 		"intptr_t x = (b).value;",
@@ -391,11 +396,17 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	for _, want := range appChecks {
 		if !strings.Contains(appC, want) {
-			t.Fatalf("expected app.c to contain %q, got:\n%s", want, appC)
+			t.Fatalf(
+				"expected app.c to contain %q, got:\n%s",
+				want,
+				appC,
+			)
 		}
 	}
 
-	typesBytes, err := os.ReadFile(filepath.Join(outDir, "types.c"))
+	typesBytes, err := os.ReadFile(
+		filepath.Join(outDir, "types.c"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,16 +414,20 @@ MakeBox :: task <T type>(value T) Box<T> {
 	typesC := string(typesBytes)
 
 	typesChecks := []string{
-		"typedef struct types_Box_int {",
+		"typedef struct types_Box_int types_Box_int;",
+		"struct types_Box_int {",
 		"intptr_t value;",
-		"} types_Box_int;",
 		"types_Box_int types_MakeBox_int(intptr_t value);",
 		"types_Box_int types_MakeBox_int(intptr_t value) {",
 	}
 
 	for _, want := range typesChecks {
 		if !strings.Contains(typesC, want) {
-			t.Fatalf("expected types.c to contain %q, got:\n%s", want, typesC)
+			t.Fatalf(
+				"expected types.c to contain %q, got:\n%s",
+				want,
+				typesC,
+			)
 		}
 	}
 }
@@ -458,27 +473,57 @@ MakeBox :: task <T type>(value T) Box<T> {
 
 	outDir := filepath.Join(root, "out")
 
-	_, err := BuildWorkspace(filepath.Join(root, "app"), BuildOptions{
-		EmitOnly: true,
-		OutDir:   outDir,
-	})
+	_, err := BuildWorkspace(
+		filepath.Join(root, "app"),
+		BuildOptions{
+			EmitOnly: true,
+			OutDir:   outDir,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	typesBytes, err := os.ReadFile(filepath.Join(outDir, "types.c"))
+	typesBytes, err := os.ReadFile(
+		filepath.Join(outDir, "types.c"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	typesC := string(typesBytes)
 
-	if count := strings.Count(typesC, "typedef struct types_Box_int {"); count != 1 {
-		t.Fatalf("expected one types_Box_int typedef, got %d:\n%s", count, typesC)
+	if count := strings.Count(
+		typesC,
+		"typedef struct types_Box_int types_Box_int;",
+	); count != 1 {
+		t.Fatalf(
+			"expected one types_Box_int forward typedef, got %d:\n%s",
+			count,
+			typesC,
+		)
 	}
 
-	if count := strings.Count(typesC, "types_Box_int types_MakeBox_int(intptr_t value) {"); count != 1 {
-		t.Fatalf("expected one types_MakeBox_int definition, got %d:\n%s", count, typesC)
+	if count := strings.Count(
+		typesC,
+		"struct types_Box_int {",
+	); count != 1 {
+		t.Fatalf(
+			"expected one types_Box_int definition, got %d:\n%s",
+			count,
+			typesC,
+		)
+	}
+
+	if count := strings.Count(
+		typesC,
+		"types_Box_int types_MakeBox_int(intptr_t value) {",
+	); count != 1 {
+		t.Fatalf(
+			"expected one types_MakeBox_int definition, got %d:\n%s",
+			count,
+			typesC,
+		)
 	}
 }
 
