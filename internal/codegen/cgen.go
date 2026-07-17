@@ -558,8 +558,11 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitCImports(file)
 	g.emitRuntimeSupport()
 
+	// Imported distinct aliases must exist before imported task prototypes and
+	// before switch statements using imported integer-backed distinct values.
 	g.emitImportedDistincts()
 	g.emitDistincts(file)
+
 	g.emitEnums(file)
 	g.emitImportedEnums()
 

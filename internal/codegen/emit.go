@@ -128,7 +128,8 @@ func (g *Generator) emitImportedDistincts() {
 		Decl        *ast.DistinctDecl
 	}
 
-	entries := map[string]importedDistinctEmission{}
+	entries :=
+		map[string]importedDistinctEmission{}
 
 	for mapKey, pkg := range g.packages {
 		if pkg == nil {
@@ -136,11 +137,13 @@ func (g *Generator) emitImportedDistincts() {
 		}
 
 		packageName := pkg.Name
+
 		if packageName == "" {
 			packageName = mapKey
 		}
 
-		if packageName == "" {
+		if packageName == "" ||
+			packageName == g.packageName {
 			continue
 		}
 
@@ -149,16 +152,24 @@ func (g *Generator) emitImportedDistincts() {
 				continue
 			}
 
-			cName := cImportedTypeName(
-				packageName,
-				distinctName,
-			)
+			cName :=
+				cImportedTypeName(
+					packageName,
+					distinctName,
+				)
 
-			entries[cName] = importedDistinctEmission{
-				PackageName: packageName,
-				CName:       cName,
-				Decl:        decl,
+			// The same PackageInfo may be reachable under more than one map
+			// key. The generated C name is the stable identity.
+			if _, exists := entries[cName]; exists {
+				continue
 			}
+
+			entries[cName] =
+				importedDistinctEmission{
+					PackageName: packageName,
+					CName:       cName,
+					Decl:        decl,
+				}
 		}
 	}
 
@@ -173,13 +184,16 @@ func (g *Generator) emitImportedDistincts() {
 	)
 
 	for name := range entries {
-		names = append(names, name)
+		names = append(
+			names,
+			name,
+		)
 	}
 
 	sort.Strings(names)
 
 	/*
-		Emit underlying imported distinct types first.
+		Emit distinct dependencies before the aliases that use them.
 
 		For example:
 
@@ -195,16 +209,21 @@ func (g *Generator) emitImportedDistincts() {
 		distinctNotVisited uint8 = iota
 		distinctVisiting
 		distinctEmitted
+		distinctFailed
 	)
 
 	states := map[string]uint8{}
+	emittedAny := false
 
-	var emit func(string)
+	var emit func(string) bool
 
-	emit = func(name string) {
+	emit = func(name string) bool {
 		switch states[name] {
 		case distinctEmitted:
-			return
+			return true
+
+		case distinctFailed:
+			return false
 
 		case distinctVisiting:
 			entry := entries[name]
@@ -217,12 +236,14 @@ func (g *Generator) emitImportedDistincts() {
 				),
 			)
 
-			return
+			states[name] = distinctFailed
+			return false
 		}
 
 		entry, exists := entries[name]
+
 		if !exists {
-			return
+			return true
 		}
 
 		states[name] = distinctVisiting
@@ -233,25 +254,49 @@ func (g *Generator) emitImportedDistincts() {
 				entry.Decl.Underlying,
 			)
 
-		// A distinct may be backed by another imported distinct.
-		if _, exists :=
-			entries[underlying.SealName]; exists {
-			emit(underlying.SealName)
+		if isInvalidCType(underlying) {
+			g.error(
+				entry.Decl.Underlying.Span(),
+				fmt.Sprintf(
+					"cannot lower underlying type of imported distinct %s",
+					name,
+				),
+			)
+
+			states[name] = distinctFailed
+			return false
+		}
+
+		// An imported distinct may itself be backed by another imported
+		// distinct. CType.SealName contains the generated imported C name.
+		if _, isDistinctDependency :=
+			entries[underlying.SealName]; isDistinctDependency {
+			if !emit(underlying.SealName) {
+				states[name] = distinctFailed
+				return false
+			}
 		}
 
 		g.linef(
 			"typedef %s;",
-			underlying.Decl(entry.CName),
+			underlying.Decl(
+				entry.CName,
+			),
 		)
 
 		states[name] = distinctEmitted
+		emittedAny = true
+
+		return true
 	}
 
 	for _, name := range names {
 		emit(name)
 	}
 
-	g.line("")
+	if emittedAny {
+		g.line("")
+	}
 }
 
 func (g *Generator) emitEnumDefinition(
@@ -2650,6 +2695,216 @@ func (g *Generator) emitValueSwitchCaseBody(
 	g.indent--
 	g.line("}")
 	g.indent--
+}
+
+func (g *Generator) emitValueSwitchCaseExpr(
+	expr ast.Expr,
+	expected CType,
+) string {
+	return g.emitValueSwitchCaseExprSeen(
+		expr,
+		expected,
+		map[string]bool{},
+	)
+}
+
+func (g *Generator) emitValueSwitchCaseExprSeen(
+	expr ast.Expr,
+	expected CType,
+	visiting map[string]bool,
+) string {
+	if expr == nil {
+		return "0"
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		name := e.Name.Name
+
+		// A local variable shadows constants and generic parameters. The
+		// checker should reject it as a case value, but do not accidentally
+		// inline another declaration with the same name.
+		if g.scope != nil {
+			if _, isLocal :=
+				g.scope.lookup(name); isLocal {
+				return g.emitExpr(
+					expr,
+					&expected,
+				)
+			}
+		}
+
+		// A generic integer value parameter becomes its concrete argument in
+		// a specialized generic task.
+		if g.genericSubst != nil {
+			if arg, exists :=
+				g.genericSubst[name]; exists &&
+				arg.Kind == ast.GenericArgExpr &&
+				arg.Expr != nil {
+				if !genericArgIsSingleNameForCGen(
+					arg,
+					name,
+				) {
+					return g.emitValueSwitchCaseExprSeen(
+						arg.Expr,
+						expected,
+						visiting,
+					)
+				}
+			}
+		}
+
+		/*
+			Seal constants are emitted elsewhere as:
+
+			    static const intptr_t Value = 10;
+
+			In C, Value is not an integer constant expression and therefore
+			cannot be used directly as a case label. Inline the original Seal
+			constant expression here.
+		*/
+		decl := g.constDecls[name]
+
+		if decl == nil {
+			return g.emitExpr(
+				expr,
+				&expected,
+			)
+		}
+
+		if visiting[name] {
+			g.error(
+				expr.Span(),
+				fmt.Sprintf(
+					"cyclic constant %q in switch case",
+					name,
+				),
+			)
+
+			return "0"
+		}
+
+		visiting[name] = true
+
+		value :=
+			g.emitValueSwitchCaseExprSeen(
+				decl.Value,
+				expected,
+				visiting,
+			)
+
+		delete(
+			visiting,
+			name,
+		)
+
+		return value
+
+	case *ast.UnaryExpr:
+		operator := g.cUnaryOp(
+			e.Op,
+		)
+
+		// cUnaryOp historically has no explicit unary-plus entry.
+		if operator == "" {
+			operator = e.Op.String()
+		}
+
+		return fmt.Sprintf(
+			"(%s%s)",
+			operator,
+			g.emitValueSwitchCaseExprSeen(
+				e.Expr,
+				expected,
+				visiting,
+			),
+		)
+
+	case *ast.BinaryExpr:
+		return fmt.Sprintf(
+			"(%s %s %s)",
+			g.emitValueSwitchCaseExprSeen(
+				e.Left,
+				expected,
+				visiting,
+			),
+			g.cBinaryOp(e.Op),
+			g.emitValueSwitchCaseExprSeen(
+				e.Right,
+				expected,
+				visiting,
+			),
+		)
+
+	case *ast.CallExpr:
+		/*
+			Preserve integer casts while recursively inlining constants:
+
+			    case cast<u8>(Maximum):
+		*/
+		generic, ok :=
+			e.Callee.(*ast.GenericExpr)
+
+		if !ok ||
+			len(generic.Args) != 1 ||
+			len(e.Args) != 1 {
+			return g.emitExpr(
+				expr,
+				&expected,
+			)
+		}
+
+		id, ok :=
+			generic.Base.(*ast.IdentExpr)
+
+		if !ok ||
+			id.Name.Name != "cast" {
+			return g.emitExpr(
+				expr,
+				&expected,
+			)
+		}
+
+		targetArg := generic.Args[0]
+
+		if g.genericSubst != nil {
+			targetArg =
+				g.substituteGenericArgForCGen(
+					targetArg,
+					g.genericSubst,
+				)
+		}
+
+		targetType :=
+			g.cTypeFromGenericArg(
+				targetArg,
+			)
+
+		if isInvalidCType(targetType) {
+			return g.emitExpr(
+				expr,
+				&expected,
+			)
+		}
+
+		value :=
+			g.emitValueSwitchCaseExprSeen(
+				e.Args[0],
+				targetType,
+				visiting,
+			)
+
+		return fmt.Sprintf(
+			"((%s)(%s))",
+			targetType.TypeName(),
+			value,
+		)
+	}
+
+	return g.emitExpr(
+		expr,
+		&expected,
+	)
 }
 
 func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
