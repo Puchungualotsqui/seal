@@ -45,6 +45,14 @@ the conversion fail.
 #define WC_ERR_INVALID_CHARS 0
 #endif
 
+/*
+TCC's Windows errno.h may omit EOVERFLOW. This value only needs to be
+distinct within the native bridge so it can map to ErrorKind.Overflow.
+*/
+#ifndef EOVERFLOW
+#define EOVERFLOW (INT_MAX - 1)
+#endif
+
 #else
 
 #include <unistd.h>
