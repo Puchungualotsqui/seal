@@ -3,6 +3,8 @@ package cgen
 import (
 	"fmt"
 	"seal/internal/ast"
+	"seal/internal/checker"
+	"seal/internal/source"
 	"sort"
 	"strings"
 )
@@ -78,6 +80,17 @@ func (s *scope) lookup(name string) (valueInfo, bool) {
 	}
 
 	return valueInfo{}, false
+}
+
+func (s *scope) lookupLocal(
+	name string,
+) (valueInfo, bool) {
+	if s == nil {
+		return valueInfo{}, false
+	}
+
+	value, ok := s.vars[name]
+	return value, ok
 }
 
 func (g *Generator) emitDistincts(file *ast.File) {
@@ -1310,6 +1323,9 @@ func (g *Generator) emitStmt(stmt ast.Stmt) {
 	case *ast.MultiVarDeclStmt:
 		g.emitMultiVarDeclStmt(s)
 
+	case *ast.MultiAssignStmt:
+		g.emitMultiAssignStmt(s)
+
 	case *ast.IfStmt:
 		cond := g.emitExpr(s.Cond, &CBool)
 
@@ -1452,7 +1468,131 @@ func (g *Generator) emitVarDeclStmt(
 	g.linef("%s;", typ.Decl(s.Name.Name))
 }
 
-func (g *Generator) emitMultiResultBinding(
+func multiResultField(
+	resultTemp string,
+	index int,
+) string {
+	return fmt.Sprintf(
+		"%s._%d",
+		resultTemp,
+		index,
+	)
+}
+
+func (g *Generator) emitMultiResultCall(
+	value ast.Expr,
+	targetCount int,
+	statementSpan source.Span,
+	operation string,
+) (
+	[]CType,
+	string,
+	bool,
+) {
+	if value == nil {
+		g.error(
+			statementSpan,
+			fmt.Sprintf(
+				"%s has no value",
+				operation,
+			),
+		)
+
+		return nil, "", false
+	}
+
+	call, ok := value.(*ast.CallExpr)
+	if !ok {
+		g.error(
+			value.Span(),
+			fmt.Sprintf(
+				"%s requires a task call",
+				operation,
+			),
+		)
+
+		return nil, "", false
+	}
+
+	resultTypes := g.callReturnTypes(call)
+
+	if len(resultTypes) <= 1 {
+		g.error(
+			call.Span(),
+			fmt.Sprintf(
+				"%s requires a task returning at least two values; task returns %d",
+				operation,
+				len(resultTypes),
+			),
+		)
+
+		return nil, "", false
+	}
+
+	if len(resultTypes) != targetCount {
+		g.error(
+			statementSpan,
+			fmt.Sprintf(
+				"%s mismatch: %d target(s), but task returns %d value(s)",
+				operation,
+				targetCount,
+				len(resultTypes),
+			),
+		)
+
+		return nil, "", false
+	}
+
+	for index, resultType := range resultTypes {
+		if isInvalidCType(resultType) {
+			g.error(
+				call.Span(),
+				fmt.Sprintf(
+					"cannot determine C type of result %d in %s",
+					index+1,
+					operation,
+				),
+			)
+
+			return nil, "", false
+		}
+	}
+
+	resultType := g.inferExprType(
+		call,
+		nil,
+	)
+
+	if isInvalidCType(resultType) {
+		g.error(
+			call.Span(),
+			fmt.Sprintf(
+				"cannot determine C result structure type for %s",
+				operation,
+			),
+		)
+
+		return nil, "", false
+	}
+
+	resultTemp := g.newTemp(
+		"multi_result",
+	)
+
+	/*
+		The call must execute exactly once. Every target reads from this
+		temporary result structure.
+	*/
+	g.linef(
+		"%s = %s;",
+		resultType.Decl(resultTemp),
+		g.emitExpr(call, &resultType),
+	)
+
+	return resultTypes, resultTemp, true
+}
+
+func (g *Generator) emitMultiResultDeclaration(
 	name ast.Ident,
 	itemType CType,
 	resultTemp string,
@@ -1462,11 +1602,31 @@ func (g *Generator) emitMultiResultBinding(
 		return
 	}
 
+	if g.scope == nil {
+		g.error(
+			name.Span(),
+			"multi-value declaration outside a CGen scope",
+		)
+		return
+	}
+
 	if isInvalidCType(itemType) {
 		g.error(
 			name.Span(),
 			fmt.Sprintf(
-				"cannot lower multi-value binding %q with invalid type",
+				"cannot lower multi-value declaration %q with invalid type",
+				name.Name,
+			),
+		)
+		return
+	}
+
+	if _, exists :=
+		g.scope.lookupLocal(name.Name); exists {
+		g.error(
+			name.Span(),
+			fmt.Sprintf(
+				"checker classified %q as a new variable, but it already exists in the current CGen scope",
 				name.Name,
 			),
 		)
@@ -1478,21 +1638,11 @@ func (g *Generator) emitMultiResultBinding(
 		itemType,
 	)
 
-	field := fmt.Sprintf(
-		"%s._%d",
+	field := multiResultField(
 		resultTemp,
 		index,
 	)
 
-	/*
-		C arrays cannot be assigned:
-
-			int values[4] = result._0; // invalid C
-
-		Declare the destination and copy the array contents instead.
-		The source and destination types were already checked by the
-		Seal checker.
-	*/
 	if itemType.IsInlineArray {
 		g.linef(
 			"%s;",
@@ -1516,6 +1666,207 @@ func (g *Generator) emitMultiResultBinding(
 	)
 }
 
+func (g *Generator) emitMultiResultConvertedField(
+	name ast.Ident,
+	sourceType CType,
+	targetType CType,
+	field string,
+) string {
+	if sourceType.SealName ==
+		targetType.SealName {
+		return field
+	}
+
+	/*
+		A concrete task result may be assigned into a union target.
+	*/
+	if g.isUnion(targetType) {
+		if sourceType.SealName == "nil" {
+			return fmt.Sprintf(
+				"(%s){.tag = %s_Tag_nil}",
+				targetType.Name,
+				targetType.SealName,
+			)
+		}
+
+		if g.unionHasMember(
+			targetType.SealName,
+			sourceType.SealName,
+		) {
+			return fmt.Sprintf(
+				"(%s){.tag = %s_Tag_%s, .as.%s = %s}",
+				targetType.Name,
+				targetType.SealName,
+				sourceType.SealName,
+				sourceType.SealName,
+				field,
+			)
+		}
+	}
+
+	if sourceType.SealName == "nil" &&
+		strings.HasPrefix(
+			targetType.SealName,
+			"*",
+		) {
+		return "NULL"
+	}
+
+	/*
+		Conversions to `any` and interface types are expression-based in the
+		existing backend. Materialize the result field into an addressable
+		temporary and reuse emitExpr's normal conversion path.
+	*/
+	if targetType.SealName == "any" ||
+		g.isInterfaceCType(targetType) {
+		if g.scope == nil {
+			g.error(
+				name.Span(),
+				"cannot convert multi-result value outside a CGen scope",
+			)
+
+			return field
+		}
+
+		sourceTemp := g.newTemp(
+			"multi_item",
+		)
+
+		g.linef(
+			"%s = %s;",
+			sourceType.Decl(sourceTemp),
+			field,
+		)
+
+		g.scope.declare(
+			sourceTemp,
+			sourceType,
+		)
+
+		syntheticName := name
+		syntheticName.Name = sourceTemp
+
+		syntheticExpr := &ast.IdentExpr{
+			Name: syntheticName,
+		}
+
+		return g.emitExpr(
+			syntheticExpr,
+			&targetType,
+		)
+	}
+
+	/*
+		For checker-approved scalar conversions, ordinary C assignment performs
+		the required representation conversion.
+	*/
+	return field
+}
+
+func (g *Generator) emitMultiResultAssignment(
+	name ast.Ident,
+	sourceType CType,
+	resultTemp string,
+	index int,
+) {
+	if name.Name == "_" {
+		return
+	}
+
+	if g.scope == nil {
+		g.error(
+			name.Span(),
+			"multi-value assignment outside a CGen scope",
+		)
+		return
+	}
+
+	target, exists :=
+		g.scope.lookup(name.Name)
+
+	if !exists {
+		g.error(
+			name.Span(),
+			fmt.Sprintf(
+				"missing CGen variable for multi-value assignment target %q",
+				name.Name,
+			),
+		)
+		return
+	}
+
+	targetType := target.Type
+
+	if isInvalidCType(targetType) ||
+		isInvalidCType(sourceType) {
+		g.error(
+			name.Span(),
+			fmt.Sprintf(
+				"cannot lower multi-value assignment to %q with invalid type",
+				name.Name,
+			),
+		)
+		return
+	}
+
+	field := multiResultField(
+		resultTemp,
+		index,
+	)
+
+	/*
+		C arrays cannot be assigned. Both new declarations and assignments to
+		existing inline arrays therefore use memcpy.
+	*/
+	if targetType.IsInlineArray {
+		if !sourceType.IsInlineArray {
+			g.error(
+				name.Span(),
+				fmt.Sprintf(
+					"cannot assign non-array result %s to inline-array target %q",
+					sourceType.String(),
+					name.Name,
+				),
+			)
+			return
+		}
+
+		g.linef(
+			"memcpy(%s, %s, sizeof(%s));",
+			name.Name,
+			field,
+			name.Name,
+		)
+
+		return
+	}
+
+	if sourceType.IsInlineArray {
+		g.error(
+			name.Span(),
+			fmt.Sprintf(
+				"cannot assign inline-array result to non-array target %q",
+				name.Name,
+			),
+		)
+		return
+	}
+
+	value :=
+		g.emitMultiResultConvertedField(
+			name,
+			sourceType,
+			targetType,
+			field,
+		)
+
+	g.linef(
+		"%s = %s;",
+		name.Name,
+		value,
+	)
+}
+
 func (g *Generator) emitMultiVarDeclStmt(
 	s *ast.MultiVarDeclStmt,
 ) {
@@ -1523,89 +1874,238 @@ func (g *Generator) emitMultiVarDeclStmt(
 		return
 	}
 
-	call, ok := s.Value.(*ast.CallExpr)
+	resolution, ok :=
+		g.multiVarDeclResolutionFor(s)
+
 	if !ok {
 		g.error(
-			s.Value.Span(),
-			"multi-value declaration requires a task call",
+			s.Span(),
+			"missing checker resolution for multi-value short declaration",
 		)
 		return
 	}
 
-	resultTypes := g.callReturnTypes(call)
-
-	/*
-		A multi-value declaration must consume an actual multi-result task.
-
-			left, right := Split()
-
-		A zero-result or single-result task does not have the generated
-		result structure whose fields are named _0, _1, and so on.
-	*/
-	if len(resultTypes) <= 1 {
-		g.error(
-			s.Value.Span(),
-			fmt.Sprintf(
-				"multi-value declaration requires a task returning at least two values; task returns %d",
-				len(resultTypes),
-			),
-		)
-		return
-	}
-
-	if len(resultTypes) != len(s.Names) {
+	if len(resolution.Bindings) !=
+		len(s.Names) {
 		g.error(
 			s.Span(),
 			fmt.Sprintf(
-				"multi-value declaration mismatch: %d name(s), but task returns %d value(s)",
+				"invalid checker resolution for multi-value short declaration: %d target(s), %d binding decision(s)",
 				len(s.Names),
-				len(resultTypes),
+				len(resolution.Bindings),
 			),
 		)
-
-		/*
-			Do not continue emitting partial C. Partial extraction could
-			hide a checker/CGen disagreement and produce misleading C
-			compiler diagnostics.
-		*/
 		return
 	}
 
-	resultType := g.inferExprType(
-		call,
-		nil,
-	)
-
-	if isInvalidCType(resultType) {
+	if g.scope == nil {
 		g.error(
-			call.Span(),
-			"cannot determine the C result type of multi-value task call",
+			s.Span(),
+			"multi-value short declaration outside a CGen scope",
 		)
 		return
 	}
 
-	resultTemp := g.newTemp(
-		"multi_result",
-	)
+	/*
+		Validate the complete resolution before evaluating the call. Invalid
+		checker/CGen state should not cause partial output or unexpected side
+		effects.
+	*/
+	for index, binding := range resolution.Bindings {
+		name := s.Names[index]
+
+		switch binding {
+		case checker.MultiVarBindingDiscard:
+			if name.Name != "_" {
+				g.error(
+					name.Span(),
+					fmt.Sprintf(
+						"checker classified non-discard target %q as discard",
+						name.Name,
+					),
+				)
+				return
+			}
+
+		case checker.MultiVarBindingDeclare:
+			if name.Name == "_" {
+				g.error(
+					name.Span(),
+					"checker classified discard target as declaration",
+				)
+				return
+			}
+
+			if _, exists :=
+				g.scope.lookupLocal(
+					name.Name,
+				); exists {
+				g.error(
+					name.Span(),
+					fmt.Sprintf(
+						"checker classified existing local %q as a declaration",
+						name.Name,
+					),
+				)
+				return
+			}
+
+		case checker.MultiVarBindingAssign:
+			if name.Name == "_" {
+				g.error(
+					name.Span(),
+					"checker classified discard target as assignment",
+				)
+				return
+			}
+
+			if _, exists :=
+				g.scope.lookup(
+					name.Name,
+				); !exists {
+				g.error(
+					name.Span(),
+					fmt.Sprintf(
+						"checker classified undefined target %q as an assignment",
+						name.Name,
+					),
+				)
+				return
+			}
+
+		case checker.MultiVarBindingInvalid:
+			g.error(
+				name.Span(),
+				fmt.Sprintf(
+					"cannot emit invalid short-declaration target %q",
+					name.Name,
+				),
+			)
+			return
+
+		default:
+			g.error(
+				name.Span(),
+				fmt.Sprintf(
+					"unknown short-declaration binding kind for %q",
+					name.Name,
+				),
+			)
+			return
+		}
+	}
+
+	resultTypes,
+		resultTemp,
+		emitted :=
+		g.emitMultiResultCall(
+			s.Value,
+			len(s.Names),
+			s.Span(),
+			"multi-value short declaration",
+		)
+
+	if !emitted {
+		return
+	}
+
+	for index, binding := range resolution.Bindings {
+		name := s.Names[index]
+		itemType := resultTypes[index]
+
+		switch binding {
+		case checker.MultiVarBindingDiscard:
+			// The call was evaluated once above. No storage is emitted.
+
+		case checker.MultiVarBindingDeclare:
+			g.emitMultiResultDeclaration(
+				name,
+				itemType,
+				resultTemp,
+				index,
+			)
+
+		case checker.MultiVarBindingAssign:
+			g.emitMultiResultAssignment(
+				name,
+				itemType,
+				resultTemp,
+				index,
+			)
+		}
+	}
+}
+
+func (g *Generator) emitMultiAssignStmt(
+	s *ast.MultiAssignStmt,
+) {
+	if s == nil || s.Value == nil {
+		return
+	}
+
+	if g.scope == nil {
+		g.error(
+			s.Span(),
+			"multi-value assignment outside a CGen scope",
+		)
+		return
+	}
 
 	/*
-		Evaluate the task call exactly once. This is important both for side
-		effects and for declarations containing discarded values:
-
-			value, _ := Next()
+		Validate all targets before emitting the call. `_` is not a real
+		variable and requires no lookup.
 	*/
-	g.linef(
-		"%s = %s;",
-		resultType.Decl(resultTemp),
-		g.emitExpr(call, &resultType),
-	)
+	for _, name := range s.Names {
+		if name.Name == "_" {
+			continue
+		}
 
-	for i, name := range s.Names {
-		g.emitMultiResultBinding(
+		target, exists :=
+			g.scope.lookup(name.Name)
+
+		if !exists {
+			g.error(
+				name.Span(),
+				fmt.Sprintf(
+					"missing CGen variable for multi-value assignment target %q",
+					name.Name,
+				),
+			)
+			return
+		}
+
+		if isInvalidCType(target.Type) {
+			g.error(
+				name.Span(),
+				fmt.Sprintf(
+					"multi-value assignment target %q has invalid C type",
+					name.Name,
+				),
+			)
+			return
+		}
+	}
+
+	resultTypes,
+		resultTemp,
+		emitted :=
+		g.emitMultiResultCall(
+			s.Value,
+			len(s.Names),
+			s.Span(),
+			"multi-value assignment",
+		)
+
+	if !emitted {
+		return
+	}
+
+	for index, name := range s.Names {
+		g.emitMultiResultAssignment(
 			name,
-			resultTypes[i],
+			resultTypes[index],
 			resultTemp,
-			i,
+			index,
 		)
 	}
 }
@@ -1895,6 +2395,20 @@ func (g *Generator) emitForPart(
 
 	case *ast.ExprStmt:
 		return g.emitExpr(s.Expr, nil)
+
+	case *ast.MultiVarDeclStmt:
+		g.error(
+			s.Span(),
+			"multi-value short declaration cannot be emitted in a C for-loop header",
+		)
+		return ""
+
+	case *ast.MultiAssignStmt:
+		g.error(
+			s.Span(),
+			"multi-value assignment cannot be emitted in a C for-loop header",
+		)
+		return ""
 
 	default:
 		g.error(

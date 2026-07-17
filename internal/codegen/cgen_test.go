@@ -8484,3 +8484,381 @@ Main :: task() {
 
 	runGeneratedC(t, out)
 }
+
+func TestGenerateMultiAssignmentUpdatesExistingTargets(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Pair :: task() (int, bool) {
+    return 42, true
+}
+
+Main :: task() {
+    value := 0
+    valid := false
+
+    value, valid = Pair()
+
+    assert(value == 42)
+    assert(valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected assignment to existing value, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected assignment to existing valid, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"intptr_t value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"multi-assignment must not redeclare value, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"bool valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"multi-assignment must not redeclare valid, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiAssignmentDiscardUpdatesTarget(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Pair :: task() (int, bool) {
+    return 42, false
+}
+
+Main :: task() {
+    valid := true
+
+    _, valid = Pair()
+
+    assert(!valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected assignment to valid from the second result, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiShortDeclarationDeclaresAndAssigns(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Pair :: task() (int, bool) {
+    return 42, true
+}
+
+Main :: task() {
+    valid := false
+
+    value, valid := Pair()
+
+    assert(value == 42)
+    assert(valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected value to be declared from the first result, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected existing valid to be assigned from the second result, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"bool valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"existing valid must not be redeclared, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiShortDeclarationShadowsOuterVariable(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Pair :: task() (int, bool) {
+    return 42, true
+}
+
+Main :: task() {
+    valid := false
+
+    {
+        value, valid := Pair()
+
+        assert(value == 42)
+        assert(valid)
+    }
+
+    assert(!valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected value declaration in child scope, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"bool valid = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected inner valid declaration, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiAssignmentEvaluatesCallOnce(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+NextPair :: task(
+    counter *int,
+) (int, bool) {
+    *counter += 1
+
+    return *counter, true
+}
+
+Main :: task() {
+    counter := 0
+    value := 0
+    valid := false
+
+    value, valid = NextPair(
+        &counter,
+    )
+
+    assert(counter == 1)
+    assert(value == 1)
+    assert(valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	callCount := strings.Count(
+		out,
+		"= NextPair(",
+	)
+
+	if callCount != 1 {
+		t.Fatalf(
+			"expected NextPair call to be evaluated once, found %d occurrence(s):\n%s",
+			callCount,
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiShortDeclarationWithDiscard(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Pair :: task() (int, bool) {
+    return 42, true
+}
+
+Main :: task() {
+    value, _ := Pair()
+
+    assert(value == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"intptr_t value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected value declaration from first result, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"\n\t_ = ",
+	) {
+		t.Fatalf(
+			"discard target must not generate an assignment, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateMultiAssignmentCollectsInterfaceInstances(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ValueReader :: interface {
+    Read :: task(
+        self *self,
+    ) int
+}
+
+Source :: struct {
+    Value int
+}
+
+ValueReader :: impl Source {
+    Read :: task(
+        self *Source,
+    ) int {
+        return self.Value
+    }
+}
+
+ReadPair :: task(
+    reader ValueReader,
+) (int, bool) {
+    return Read(reader), true
+}
+
+Main :: task() {
+    source := Source{
+        Value = 42,
+    }
+
+    value := 0
+    valid := false
+
+    value, valid = ReadPair(
+        cast<ValueReader>(
+            &source,
+        ),
+    )
+
+    assert(value == 42)
+    assert(valid)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"value = __seal_multi_result_",
+	) {
+		t.Fatalf(
+			"expected assignment from multi-result call, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}

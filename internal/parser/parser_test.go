@@ -791,33 +791,6 @@ Example :: task(a, b ...int) {
 	}
 }
 
-func TestParseMultiVarDeclStmt(t *testing.T) {
-	file, reporter := parse(t, `
-Foo :: task() rawptr, rawptr {
-    return nil, nil
-}
-
-Main :: task() {
-    a, b := Foo()
-}
-`)
-
-	if reporter.HasErrors() {
-		t.Fatalf("unexpected diagnostics:\n%s", reporter.String())
-	}
-
-	mainDecl := file.Decls[1].(*ast.TaskDecl)
-	stmt := mainDecl.Body.Stmts[0].(*ast.MultiVarDeclStmt)
-
-	if len(stmt.Names) != 2 {
-		t.Fatalf("expected 2 names, got %d", len(stmt.Names))
-	}
-
-	if stmt.Names[0].Name != "a" || stmt.Names[1].Name != "b" {
-		t.Fatalf("unexpected names: %#v", stmt.Names)
-	}
-}
-
 func TestParseMultiVarDeclWithBlankIdentifier(t *testing.T) {
 	file, reporter := parse(t, `
 Foo :: task() rawptr, rawptr {
@@ -2572,6 +2545,441 @@ Main :: task() {
 		t.Fatalf(
 			"expected length diagnostic, got:\n%s",
 			reporter.String(),
+		)
+	}
+}
+
+func TestParseMultiVarDeclStmt(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    value, valid := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	stmt, ok :=
+		task.Body.Stmts[0].(*ast.MultiVarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected MultiVarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(stmt.Names) != 2 {
+		t.Fatalf(
+			"expected 2 names, got %d",
+			len(stmt.Names),
+		)
+	}
+
+	if stmt.Names[0].Name != "value" {
+		t.Fatalf(
+			"expected first name value, got %q",
+			stmt.Names[0].Name,
+		)
+	}
+
+	if stmt.Names[1].Name != "valid" {
+		t.Fatalf(
+			"expected second name valid, got %q",
+			stmt.Names[1].Name,
+		)
+	}
+
+	call, ok := stmt.Value.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"expected value to be CallExpr, got %T",
+			stmt.Value,
+		)
+	}
+
+	callee, ok := call.Callee.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"expected call callee to be IdentExpr, got %T",
+			call.Callee,
+		)
+	}
+
+	if callee.Name.Name != "Foo" {
+		t.Fatalf(
+			"expected call to Foo, got %q",
+			callee.Name.Name,
+		)
+	}
+}
+
+func TestParseMultiAssignStmt(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    value, valid = Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if len(file.Decls) != 1 {
+		t.Fatalf(
+			"expected 1 declaration, got %d",
+			len(file.Decls),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	stmt, ok :=
+		task.Body.Stmts[0].(*ast.MultiAssignStmt)
+	if !ok {
+		t.Fatalf(
+			"expected MultiAssignStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(stmt.Names) != 2 {
+		t.Fatalf(
+			"expected 2 names, got %d",
+			len(stmt.Names),
+		)
+	}
+
+	if stmt.Names[0].Name != "value" {
+		t.Fatalf(
+			"expected first name value, got %q",
+			stmt.Names[0].Name,
+		)
+	}
+
+	if stmt.Names[1].Name != "valid" {
+		t.Fatalf(
+			"expected second name valid, got %q",
+			stmt.Names[1].Name,
+		)
+	}
+
+	call, ok := stmt.Value.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf(
+			"expected value to be CallExpr, got %T",
+			stmt.Value,
+		)
+	}
+
+	callee, ok := call.Callee.(*ast.IdentExpr)
+	if !ok {
+		t.Fatalf(
+			"expected call callee to be IdentExpr, got %T",
+			call.Callee,
+		)
+	}
+
+	if callee.Name.Name != "Foo" {
+		t.Fatalf(
+			"expected call to Foo, got %q",
+			callee.Name.Name,
+		)
+	}
+}
+
+func TestParseMultiVarDeclPreservesDiscard(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    _, valid := Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	stmt, ok :=
+		task.Body.Stmts[0].(*ast.MultiVarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected MultiVarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(stmt.Names) != 2 {
+		t.Fatalf(
+			"expected 2 names, got %d",
+			len(stmt.Names),
+		)
+	}
+
+	if stmt.Names[0].Name != "_" {
+		t.Fatalf(
+			"expected first name _, got %q",
+			stmt.Names[0].Name,
+		)
+	}
+
+	if stmt.Names[1].Name != "valid" {
+		t.Fatalf(
+			"expected second name valid, got %q",
+			stmt.Names[1].Name,
+		)
+	}
+}
+
+func TestParseMultiAssignPreservesDiscard(t *testing.T) {
+	file, reporter := parse(t, `
+Main :: task() {
+    value, _ = Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	stmt, ok :=
+		task.Body.Stmts[0].(*ast.MultiAssignStmt)
+	if !ok {
+		t.Fatalf(
+			"expected MultiAssignStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(stmt.Names) != 2 {
+		t.Fatalf(
+			"expected 2 names, got %d",
+			len(stmt.Names),
+		)
+	}
+
+	if stmt.Names[0].Name != "value" {
+		t.Fatalf(
+			"expected first name value, got %q",
+			stmt.Names[0].Name,
+		)
+	}
+
+	if stmt.Names[1].Name != "_" {
+		t.Fatalf(
+			"expected second name _, got %q",
+			stmt.Names[1].Name,
+		)
+	}
+}
+
+func TestParseMultiStatementsWithMultipleDiscards(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Main :: task() {
+    _, _ := Foo()
+    _, _ = Foo()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 2 {
+		t.Fatalf(
+			"expected 2 statements, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	decl, ok :=
+		task.Body.Stmts[0].(*ast.MultiVarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"expected first statement MultiVarDeclStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if len(decl.Names) != 2 ||
+		decl.Names[0].Name != "_" ||
+		decl.Names[1].Name != "_" {
+		t.Fatalf(
+			"unexpected declaration names: %#v",
+			decl.Names,
+		)
+	}
+
+	assign, ok :=
+		task.Body.Stmts[1].(*ast.MultiAssignStmt)
+	if !ok {
+		t.Fatalf(
+			"expected second statement MultiAssignStmt, got %T",
+			task.Body.Stmts[1],
+		)
+	}
+
+	if len(assign.Names) != 2 ||
+		assign.Names[0].Name != "_" ||
+		assign.Names[1].Name != "_" {
+		t.Fatalf(
+			"unexpected assignment names: %#v",
+			assign.Names,
+		)
+	}
+}
+
+func TestParseMultiStatementsInsideForHeader(
+	t *testing.T,
+) {
+	file, reporter := parse(t, `
+Main :: task() {
+    for value, valid := Foo(); valid; value, valid = Foo() {
+        Use(value)
+    }
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	task, ok := file.Decls[0].(*ast.TaskDecl)
+	if !ok {
+		t.Fatalf(
+			"expected TaskDecl, got %T",
+			file.Decls[0],
+		)
+	}
+
+	if len(task.Body.Stmts) != 1 {
+		t.Fatalf(
+			"expected 1 statement, got %d",
+			len(task.Body.Stmts),
+		)
+	}
+
+	loop, ok := task.Body.Stmts[0].(*ast.ForStmt)
+	if !ok {
+		t.Fatalf(
+			"expected ForStmt, got %T",
+			task.Body.Stmts[0],
+		)
+	}
+
+	if _, ok :=
+		loop.Init.(*ast.MultiVarDeclStmt); !ok {
+		t.Fatalf(
+			"expected MultiVarDeclStmt init, got %T",
+			loop.Init,
+		)
+	}
+
+	if _, ok :=
+		loop.Cond.(*ast.IdentExpr); !ok {
+		t.Fatalf(
+			"expected IdentExpr condition, got %T",
+			loop.Cond,
+		)
+	}
+
+	if _, ok :=
+		loop.Post.(*ast.MultiAssignStmt); !ok {
+		t.Fatalf(
+			"expected MultiAssignStmt post, got %T",
+			loop.Post,
 		)
 	}
 }

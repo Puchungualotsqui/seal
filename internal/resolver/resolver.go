@@ -291,6 +291,57 @@ func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, spa
 	return sym
 }
 
+func (r *Resolver) declareShortVar(
+	scope *Scope,
+	name ast.Ident,
+	node ast.Node,
+) *Symbol {
+	if scope == nil ||
+		name.Name == "" ||
+		name.Name == "_" {
+		return nil
+	}
+
+	/*
+		A name already declared in this exact scope is reused by :=.
+
+		    valid := false
+		    value, valid := Pair()
+
+		The checker determines whether the existing symbol is assignable.
+	*/
+	if existing := scope.LookupLocal(
+		name.Name,
+	); existing != nil {
+		return existing
+	}
+
+	/*
+		Short declarations intentionally use current-scope lookup rather than
+		visible-scope lookup.
+
+		    valid := false
+
+		    {
+		        value, valid := Pair()
+		    }
+
+		The inner valid is a new variable that shadows the outer valid.
+	*/
+	sym := &Symbol{
+		Name:   name.Name,
+		Kind:   SymbolVar,
+		Span:   name.Span(),
+		Node:   node,
+		Scope:  scope,
+		TaskID: scope.TaskID,
+	}
+
+	scope.Symbols[name.Name] = sym
+
+	return sym
+}
+
 func genericParamSymbolKind(category ast.GenericParamCategory) SymbolKind {
 	switch category {
 	case ast.GenericParamType:
@@ -786,21 +837,48 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 		r.resolveExpr(scope, s.Expr)
 
 	case *ast.MultiVarDeclStmt:
-		r.resolveExpr(scope, s.Value)
+		/*
+			The RHS is resolved before any newly declared names become visible.
 
+			    left, right := Make(left)
+
+			The left used by Make(left) refers to the previously visible symbol,
+			not the left being declared by this statement.
+		*/
+		r.resolveExpr(
+			scope,
+			s.Value,
+		)
+
+		for _, name := range s.Names {
+			r.declareShortVar(
+				scope,
+				name,
+				s,
+			)
+		}
+
+	case *ast.MultiAssignStmt:
+		/*
+			Multi-assignment introduces no symbols. Resolve each non-discard
+			target as an ordinary symbol use, then resolve the RHS call.
+		*/
 		for _, name := range s.Names {
 			if name.Name == "_" {
 				continue
 			}
 
-			r.declareSymbol(
+			r.resolveSymbolUse(
 				scope,
 				name.Name,
-				SymbolVar,
 				name.Span(),
-				s,
 			)
 		}
+
+		r.resolveExpr(
+			scope,
+			s.Value,
+		)
 
 	case *ast.AssignStmt:
 		r.resolveExpr(scope, s.Left)

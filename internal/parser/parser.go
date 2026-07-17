@@ -2321,52 +2321,77 @@ func (p *Parser) synchronizeSwitchCase() {
 	}
 }
 
-func (p *Parser) looksLikeMultiAssignStmt() bool {
+func (p *Parser) looksLikeMultiNameStmt(
+	operator token.Kind,
+) bool {
 	if !p.at(token.Ident) {
 		return false
 	}
 
-	i := p.pos + 1
-	seenComma := false
+	index := p.pos + 1
+	nameCount := 1
 
-	for i < len(p.tokens) &&
-		p.tokens[i].Kind == token.Comma {
-		seenComma = true
-		i++
+	for index < len(p.tokens) &&
+		p.tokens[index].Kind == token.Comma {
+		index++
 
-		if i >= len(p.tokens) ||
-			p.tokens[i].Kind != token.Ident {
+		if index >= len(p.tokens) ||
+			p.tokens[index].Kind != token.Ident {
 			return false
 		}
 
-		i++
+		nameCount++
+		index++
 	}
 
-	return seenComma &&
-		i < len(p.tokens) &&
-		p.tokens[i].Kind == token.Assign
+	return nameCount >= 2 &&
+		index < len(p.tokens) &&
+		p.tokens[index].Kind == operator
 }
 
 func (p *Parser) looksLikeMultiVarDeclStmt() bool {
-	if !p.at(token.Ident) {
-		return false
+	return p.looksLikeMultiNameStmt(
+		token.ColonEq,
+	)
+}
+
+func (p *Parser) looksLikeMultiAssignStmt() bool {
+	return p.looksLikeMultiNameStmt(
+		token.Assign,
+	)
+}
+
+func (p *Parser) parseMultiStmtNames(
+	firstMessage string,
+	nextMessage string,
+) ([]ast.Ident, bool) {
+	first := p.expectIdent(firstMessage)
+	if first.Name == "" {
+		return nil, false
 	}
 
-	i := p.pos + 1
-	seenComma := false
+	names := []ast.Ident{first}
 
-	for i < len(p.tokens) && p.tokens[i].Kind == token.Comma {
-		seenComma = true
-		i++
-
-		if i >= len(p.tokens) || p.tokens[i].Kind != token.Ident {
-			return false
+	for p.match(token.Comma) {
+		name := p.expectIdent(nextMessage)
+		if name.Name == "" {
+			return nil, false
 		}
 
-		i++
+		names = append(
+			names,
+			name,
+		)
 	}
 
-	return seenComma && i < len(p.tokens) && p.tokens[i].Kind == token.ColonEq
+	if len(names) < 2 {
+		p.errorHere(
+			"multi-value statement requires at least two names",
+		)
+		return nil, false
+	}
+
+	return names, true
 }
 
 func (p *Parser) parseSimpleStmt() ast.Stmt {
@@ -2379,28 +2404,20 @@ func (p *Parser) parseSimpleStmtUntil(
 	start := p.peek().Span.Start
 
 	if p.looksLikeMultiVarDeclStmt() {
-		var names []ast.Ident
-
-		first := p.expectIdent(
+		names, ok := p.parseMultiStmtNames(
 			"expected variable name",
+			"expected variable name after ','",
 		)
-		names = append(names, first)
-
-		for p.match(token.Comma) {
-			name := p.expectIdent(
-				"expected variable name after ','",
-			)
-			if name.Name == "" {
-				return nil
-			}
-
-			names = append(names, name)
+		if !ok {
+			return nil
 		}
 
-		p.expect(
+		if !p.expect(
 			token.ColonEq,
-			"expected ':='",
-		)
+			"expected ':=' after variable names",
+		) {
+			return nil
+		}
 
 		value := p.parseExprUntil(
 			0,
@@ -2424,28 +2441,12 @@ func (p *Parser) parseSimpleStmtUntil(
 	}
 
 	if p.looksLikeMultiAssignStmt() {
-		var names []ast.Ident
-
-		first := p.expectIdent(
+		names, ok := p.parseMultiStmtNames(
 			"expected assignment target",
+			"expected assignment target after ','",
 		)
-		names = append(
-			names,
-			first,
-		)
-
-		for p.match(token.Comma) {
-			name := p.expectIdent(
-				"expected assignment target after ','",
-			)
-			if name.Name == "" {
-				return nil
-			}
-
-			names = append(
-				names,
-				name,
-			)
+		if !ok {
+			return nil
 		}
 
 		if !p.expect(

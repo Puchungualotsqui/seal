@@ -593,6 +593,20 @@ type InterfaceConversionResolution struct {
 	Impl *ResolvedImpl
 }
 
+type MultiVarBindingKind int
+
+const (
+	MultiVarBindingInvalid MultiVarBindingKind = iota
+	MultiVarBindingDiscard
+	MultiVarBindingDeclare
+	MultiVarBindingAssign
+)
+
+type MultiVarDeclResolution struct {
+	// Bindings[i] describes Names[i].
+	Bindings []MultiVarBindingKind
+}
+
 type SemanticInfo struct {
 	// ExprTypes contains the checker-resolved type of every expression.
 	//
@@ -604,6 +618,14 @@ type SemanticInfo struct {
 	LenResolutions   map[*ast.CallExpr]LenResolution
 
 	GenericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
+
+	// MultiVarDeclResolutions records how every name in:
+	//
+	//     value, valid := Read()
+	//
+	// must be lowered. Each name independently declares, assigns, discards,
+	// or is invalid.
+	MultiVarDeclResolutions map[*ast.MultiVarDeclStmt]MultiVarDeclResolution
 
 	// InterfaceConversions records successful:
 	//
@@ -631,6 +653,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 			map[*ast.GenericExpr]GenericOverloadCallResolution,
 			len(c.genericOverloadCalls),
 		),
+		MultiVarDeclResolutions: make(
+			map[*ast.MultiVarDeclStmt]MultiVarDeclResolution,
+			len(c.multiVarDeclResolutions),
+		),
 		InterfaceConversions: make(
 			map[*ast.GenericExpr]InterfaceConversionResolution,
 			len(c.interfaceConversions),
@@ -657,6 +683,16 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		)
 
 		info.GenericOverloadCalls[expr] = cloned
+	}
+
+	for stmt, resolution := range c.multiVarDeclResolutions {
+		cloned := resolution
+		cloned.Bindings = append(
+			[]MultiVarBindingKind(nil),
+			resolution.Bindings...,
+		)
+
+		info.MultiVarDeclResolutions[stmt] = cloned
 	}
 
 	for expr, resolution := range c.interfaceConversions {
@@ -765,6 +801,8 @@ type Checker struct {
 
 	genericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
 
+	multiVarDeclResolutions map[*ast.MultiVarDeclStmt]MultiVarDeclResolution
+
 	interfaceConversions map[*ast.GenericExpr]InterfaceConversionResolution
 
 	options Options
@@ -809,6 +847,8 @@ func NewWithPackagesAndOptions(
 
 		genericOverloadCalls: map[*ast.GenericExpr]GenericOverloadCallResolution{},
 
+		multiVarDeclResolutions: map[*ast.MultiVarDeclStmt]MultiVarDeclResolution{},
+
 		interfaceConversions: map[*ast.GenericExpr]InterfaceConversionResolution{},
 
 		options:       options,
@@ -822,6 +862,73 @@ func NewWithPackagesAndOptions(
 	c.importPackageImpls()
 
 	return c
+}
+
+func (c *Checker) MultiVarDeclResolutionFor(
+	stmt *ast.MultiVarDeclStmt,
+) (MultiVarDeclResolution, bool) {
+	if c == nil || stmt == nil {
+		return MultiVarDeclResolution{}, false
+	}
+
+	resolution, ok :=
+		c.multiVarDeclResolutions[stmt]
+
+	return resolution, ok
+}
+
+func (c *Checker) inferredMultiVarType(
+	resultType *Type,
+	span source.Span,
+) *Type {
+	if resultType == nil {
+		return InvalidType
+	}
+
+	switch resultType.Kind {
+	case TypeEnumLiteral:
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"enum literal .%s needs explicit type",
+				resultType.Name,
+			),
+		)
+
+		return InvalidType
+
+	case TypeNil:
+		c.diags.Add(
+			span,
+			"nil needs explicit type",
+		)
+
+		return InvalidType
+
+	case TypeUntypedInt:
+		if resultType.IntConstant != nil &&
+			!integerConstantFitsType(
+				resultType.IntConstant,
+				IntType,
+			) {
+			c.diags.Add(
+				span,
+				fmt.Sprintf(
+					"integer constant %s cannot be inferred as int because it is outside the range %s; specify an explicit integer type",
+					resultType.IntConstant.String(),
+					integerRangeDescription(
+						IntType,
+					),
+				),
+			)
+
+			return InvalidType
+		}
+	}
+
+	return c.defaultType(
+		resultType,
+	)
 }
 
 func (c *Checker) IndexResolutionFor(
@@ -14825,52 +14932,244 @@ func (c *Checker) checkMultiAssignStmt(
 	}
 }
 
-func (c *Checker) checkMultiVarDeclStmt(scope *Scope, s *ast.MultiVarDeclStmt) {
-	call, ok := s.Value.(*ast.CallExpr)
-	if !ok {
-		c.diags.Add(s.Value.Span(), "multi-value declaration requires a task call")
-		c.checkExpr(scope, s.Value)
+func (c *Checker) checkMultiVarDeclStmt(
+	scope *Scope,
+	s *ast.MultiVarDeclStmt,
+) {
+	if s == nil {
 		return
 	}
 
-	resultTypes := c.checkCallResultTypes(scope, call)
+	resolution := MultiVarDeclResolution{
+		Bindings: make(
+			[]MultiVarBindingKind,
+			len(s.Names),
+		),
+	}
+
+	/*
+		Always retain the checker decision, including for invalid statements.
+		CGen will only consume successful programs, while checker tests can
+		still inspect partial resolutions.
+	*/
+	defer func() {
+		c.multiVarDeclResolutions[s] =
+			resolution
+	}()
+
+	call, ok := s.Value.(*ast.CallExpr)
+	if !ok {
+		c.diags.Add(
+			s.Value.Span(),
+			"multi-value short declaration requires a task call",
+		)
+
+		c.checkExpr(
+			scope,
+			s.Value,
+		)
+
+		return
+	}
+
+	resultTypes := c.checkCallResultTypes(
+		scope,
+		call,
+	)
 
 	if len(resultTypes) != len(s.Names) {
 		c.diags.Add(
 			s.Span(),
-			fmt.Sprintf("multi-value declaration mismatch: expected %d name(s), got %d result value(s)", len(s.Names), len(resultTypes)),
+			fmt.Sprintf(
+				"multi-value declaration mismatch: expected %d name(s), got %d result value(s)",
+				len(s.Names),
+				len(resultTypes),
+			),
 		)
 	}
 
-	count := len(s.Names)
-	if len(resultTypes) < count {
-		count = len(resultTypes)
-	}
+	/*
+		Classify every name before declaring anything.
 
-	for i := 0; i < count; i++ {
-		name := s.Names[i]
+		This prevents:
+
+		    value, value := Pair()
+
+		from treating the second value as an assignment to the first value
+		created by the same statement.
+	*/
+	existingSymbols := make(
+		[]*Symbol,
+		len(s.Names),
+	)
+
+	seen := map[string]source.Span{}
+	newVariableCount := 0
+
+	for i, name := range s.Names {
 		if name.Name == "_" {
+			resolution.Bindings[i] =
+				MultiVarBindingDiscard
 			continue
 		}
 
-		varType := c.defaultType(resultTypes[i])
-		if varType.Kind == TypeEnumLiteral {
-			c.diags.Add(name.Span(), fmt.Sprintf("enum literal .%s needs explicit type", varType.Name))
-			varType = InvalidType
+		if previous, duplicate :=
+			seen[name.Name]; duplicate {
+			c.diags.Add(
+				name.Span(),
+				fmt.Sprintf(
+					"duplicate short declaration target %q, previous target at %s",
+					name.Name,
+					previous.String(),
+				),
+			)
+
+			resolution.Bindings[i] =
+				MultiVarBindingInvalid
+			continue
 		}
 
-		if varType.Kind == TypeNil {
-			c.diags.Add(name.Span(), "nil needs explicit type")
-			varType = InvalidType
+		seen[name.Name] = name.Span()
+
+		/*
+			Only the current lexical scope participates in short-declaration
+			reuse.
+
+			An identically named variable in an outer scope is shadowed by a
+			new declaration, matching Go's short-declaration behavior.
+		*/
+		existing :=
+			scope.LookupLocal(
+				name.Name,
+			)
+
+		if existing == nil {
+			resolution.Bindings[i] =
+				MultiVarBindingDeclare
+
+			newVariableCount++
+			continue
 		}
 
-		scope.Declare(&Symbol{
-			Name: name.Name,
-			Kind: SymbolVar,
-			Type: varType,
-			Span: name.Span(),
-			Node: s,
-		})
+		resolution.Bindings[i] =
+			MultiVarBindingAssign
+
+		existingSymbols[i] =
+			existing
+	}
+
+	if newVariableCount == 0 {
+		c.diags.Add(
+			s.Span(),
+			"short declaration requires at least one new non-discard variable",
+		)
+	}
+
+	/*
+		Validate assignments and commit declarations only after classification
+		has completed.
+	*/
+	for i, name := range s.Names {
+		resultType := InvalidType
+
+		if i < len(resultTypes) &&
+			resultTypes[i] != nil {
+			resultType = resultTypes[i]
+		}
+
+		switch resolution.Bindings[i] {
+		case MultiVarBindingDiscard:
+			// The corresponding result is evaluated but not stored.
+
+		case MultiVarBindingDeclare:
+			varType :=
+				c.inferredMultiVarType(
+					resultType,
+					name.Span(),
+				)
+
+			scope.Declare(
+				&Symbol{
+					Name: name.Name,
+					Kind: SymbolVar,
+					Type: varType,
+					Span: name.Span(),
+					Node: s,
+				},
+			)
+
+		case MultiVarBindingAssign:
+			sym := existingSymbols[i]
+
+			if sym == nil {
+				resolution.Bindings[i] =
+					MultiVarBindingInvalid
+				continue
+			}
+
+			switch sym.Kind {
+			case SymbolVar:
+				c.checkAssignable(
+					sym.Type,
+					resultType,
+					name.Span(),
+				)
+
+			case SymbolParam:
+				c.diags.Add(
+					name.Span(),
+					fmt.Sprintf(
+						"cannot reassign parameter %q",
+						name.Name,
+					),
+				)
+
+				resolution.Bindings[i] =
+					MultiVarBindingInvalid
+
+			case SymbolConst:
+				c.diags.Add(
+					name.Span(),
+					fmt.Sprintf(
+						"cannot assign to constant %q",
+						name.Name,
+					),
+				)
+
+				resolution.Bindings[i] =
+					MultiVarBindingInvalid
+
+			case SymbolTask,
+				SymbolType,
+				SymbolPackage,
+				SymbolOverload:
+				c.diags.Add(
+					name.Span(),
+					fmt.Sprintf(
+						"cannot assign to %q",
+						name.Name,
+					),
+				)
+
+				resolution.Bindings[i] =
+					MultiVarBindingInvalid
+
+			default:
+				c.diags.Add(
+					name.Span(),
+					fmt.Sprintf(
+						"%q is not an assignable variable",
+						name.Name,
+					),
+				)
+
+				resolution.Bindings[i] =
+					MultiVarBindingInvalid
+			}
+
+		case MultiVarBindingInvalid:
+			// A diagnostic was already emitted.
+		}
 	}
 }
 

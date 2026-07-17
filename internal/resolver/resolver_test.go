@@ -796,3 +796,369 @@ NewStaticArray :: task <
 		)
 	}
 }
+
+func TestResolveMultiShortDeclReusesCurrentScopeVariable(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    value, valid := Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclDiscardAndExistingVariable(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    _, valid := Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclAllowsAllCurrentScopeNames(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value := 0
+    valid := false
+    value, valid := Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclCanShadowOuterVariable(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+
+    {
+        value, valid := Pair()
+        assert(valid)
+    }
+
+    assert(!valid)
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveExplicitVarDeclStillCannotShadowOuterVariable(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Main :: task() {
+    value := 10
+
+    {
+        value: int = 20
+    }
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected shadowing diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		`declaration of "value" shadows visible variable`,
+	) {
+		t.Fatalf(
+			"expected variable shadowing diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclDuplicateNamesDeferredToChecker(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value, value := Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclNamesVisibleAfterStatement(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+UseInt :: task(value int) {
+}
+
+UseBool :: task(value bool) {
+}
+
+Main :: task() {
+    value, valid := Pair()
+    UseInt(value)
+    UseBool(valid)
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclNamesNotVisibleInRHS(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Make :: task(value int) (int, bool) {
+    return value, true
+}
+
+Main :: task() {
+    value, valid := Make(value)
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected undefined value diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		`undefined symbol "value"`,
+	) {
+		t.Fatalf(
+			"expected undefined value diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclRHSUsesOuterVariable(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Make :: task(value int) (int, bool) {
+    return value, true
+}
+
+Main :: task() {
+    value := 10
+
+    {
+        result, value := Make(value)
+    }
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiAssignmentExistingTargets(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value := 0
+    valid := false
+    value, valid = Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiAssignmentDiscard(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    _, valid = Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiAssignmentUndefinedTarget(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    value, valid = Pair()
+}
+`,
+	)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected undefined assignment target diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		`undefined symbol "value"`,
+	) {
+		t.Fatalf(
+			"expected undefined value diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+}
+
+func TestResolveMultiShortDeclAllowsRepeatedDiscard(
+	t *testing.T,
+) {
+	_, reporter := resolve(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    _, _ := Pair()
+}
+`,
+	)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected resolver diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+}

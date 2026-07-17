@@ -48,6 +48,9 @@ type PackageInfo struct {
 	Interfaces map[string]*ast.InterfaceDecl
 
 	Impls []*ast.ImplDecl
+
+	// Needed when an imported generic task body is materialized by CGen.
+	MultiVarDeclResolutions map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution
 }
 
 type Generator struct {
@@ -82,6 +85,8 @@ type Generator struct {
 
 	indexResolutions map[*ast.IndexExpr]checker.IndexResolution
 	lenResolutions   map[*ast.CallExpr]checker.LenResolution
+
+	multiVarDeclResolutions map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution
 
 	genericOverloadCalls map[*ast.GenericExpr]checker.GenericOverloadCallResolution
 
@@ -187,8 +192,11 @@ func NewWithPackagesAndSemanticInfo(
 		exprTypes: cloneExprTypes(
 			semantic.ExprTypes,
 		),
-		indexResolutions:              cloneIndexResolutions(semantic.IndexResolutions),
-		lenResolutions:                cloneLenResolutions(semantic.LenResolutions),
+		indexResolutions: cloneIndexResolutions(semantic.IndexResolutions),
+		lenResolutions:   cloneLenResolutions(semantic.LenResolutions),
+		multiVarDeclResolutions: cloneMultiVarDeclResolutions(
+			semantic.MultiVarDeclResolutions,
+		),
 		genericInstanceRequests:       NewGenericInstanceRequestSet(),
 		structs:                       map[string]*ast.StructDecl{},
 		enums:                         map[string]*ast.EnumDecl{},
@@ -311,6 +319,40 @@ func cloneIndexResolutions(
 	return out
 }
 
+func cloneMultiVarDeclResolution(
+	input checker.MultiVarDeclResolution,
+) checker.MultiVarDeclResolution {
+	out := input
+	out.Bindings = append(
+		[]checker.MultiVarBindingKind(nil),
+		input.Bindings...,
+	)
+
+	return out
+}
+
+func cloneMultiVarDeclResolutions(
+	input map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution,
+) map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution {
+	if len(input) == 0 {
+		return map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution{}
+	}
+
+	out := make(
+		map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution,
+		len(input),
+	)
+
+	for stmt, resolution := range input {
+		out[stmt] =
+			cloneMultiVarDeclResolution(
+				resolution,
+			)
+	}
+
+	return out
+}
+
 func cloneLenResolutions(
 	input map[*ast.CallExpr]checker.LenResolution,
 ) map[*ast.CallExpr]checker.LenResolution {
@@ -347,6 +389,55 @@ func cloneGenericOverloadCalls(
 	}
 
 	return out
+}
+
+func (g *Generator) multiVarDeclResolutionFor(
+	stmt *ast.MultiVarDeclStmt,
+) (
+	checker.MultiVarDeclResolution,
+	bool,
+) {
+	if g == nil || stmt == nil {
+		return checker.MultiVarDeclResolution{},
+			false
+	}
+
+	if resolution, ok :=
+		g.multiVarDeclResolutions[stmt]; ok {
+		return resolution, true
+	}
+
+	lookupPackages := func(
+		packages map[string]*PackageInfo,
+	) (
+		checker.MultiVarDeclResolution,
+		bool,
+	) {
+		for _, pkg := range packages {
+			if pkg == nil {
+				continue
+			}
+
+			resolution, ok :=
+				pkg.MultiVarDeclResolutions[stmt]
+
+			if ok {
+				return resolution, true
+			}
+		}
+
+		return checker.MultiVarDeclResolution{},
+			false
+	}
+
+	if resolution, ok :=
+		lookupPackages(g.packages); ok {
+		return resolution, true
+	}
+
+	return lookupPackages(
+		g.workspacePackages,
+	)
 }
 
 func ExportPackageInfo(
@@ -391,6 +482,9 @@ func ExportPackageInfoWithSemanticInfo(
 		Impls: append(
 			[]*ast.ImplDecl(nil),
 			g.implDecls...,
+		),
+		MultiVarDeclResolutions: cloneMultiVarDeclResolutions(
+			g.multiVarDeclResolutions,
 		),
 	}
 }

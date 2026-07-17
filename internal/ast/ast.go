@@ -768,6 +768,17 @@ func (s *VarDeclStmt) Span() source.Span {
 	return s.Loc
 }
 
+// MultiVarDeclStmt represents a multi-value short declaration:
+//
+//	value, ok := Read()
+//
+// The checker determines independently for each name whether it:
+//
+//   - declares a new variable,
+//   - assigns an existing variable,
+//   - or discards the result when the name is `_`.
+//
+// At least one non-discard name must be newly declared in the current scope.
 type MultiVarDeclStmt struct {
 	Names []Ident
 	Value Expr

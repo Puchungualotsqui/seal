@@ -868,6 +868,14 @@ func (g *Generator) collectGenericStructInstancesFromStmtWithGenericArgs(
 			),
 		)
 
+	case *ast.MultiAssignStmt:
+		g.collectGenericStructInstancesFromExpr(
+			g.substituteExprForCGen(
+				s.Value,
+				subst,
+			),
+		)
+
 	case *ast.AssignStmt:
 		g.collectGenericStructInstancesFromExpr(
 			g.substituteExprForCGen(
@@ -1131,6 +1139,11 @@ func (g *Generator) collectGenericStructInstancesFromStmt(
 		)
 
 	case *ast.MultiVarDeclStmt:
+		g.collectGenericStructInstancesFromExpr(
+			s.Value,
+		)
+
+	case *ast.MultiAssignStmt:
 		g.collectGenericStructInstancesFromExpr(
 			s.Value,
 		)

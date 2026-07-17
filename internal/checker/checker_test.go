@@ -11950,3 +11950,351 @@ Main :: task() {
 		)
 	}
 }
+
+func TestCheckMultiShortDeclDeclaresAndAssigns(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    value, valid := Pair()
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		1,
+	)
+
+	decl, ok :=
+		stmt.(*ast.MultiVarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.MultiVarDeclStmt",
+			stmt,
+		)
+	}
+
+	resolution, ok :=
+		run.Checker.MultiVarDeclResolutionFor(
+			decl,
+		)
+	if !ok {
+		t.Fatal(
+			"multi-value declaration has no checker resolution",
+		)
+	}
+
+	if len(resolution.Bindings) != 2 {
+		t.Fatalf(
+			"binding count = %d, want 2",
+			len(resolution.Bindings),
+		)
+	}
+
+	if resolution.Bindings[0] !=
+		MultiVarBindingDeclare {
+		t.Fatalf(
+			"first binding = %v, want declaration",
+			resolution.Bindings[0],
+		)
+	}
+
+	if resolution.Bindings[1] !=
+		MultiVarBindingAssign {
+		t.Fatalf(
+			"second binding = %v, want assignment",
+			resolution.Bindings[1],
+		)
+	}
+}
+
+func TestCheckMultiShortDeclDiscardWithNewVariable(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value, _ := Pair()
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	decl := stmt.(*ast.MultiVarDeclStmt)
+
+	resolution, ok :=
+		run.Checker.MultiVarDeclResolutionFor(
+			decl,
+		)
+	if !ok {
+		t.Fatal(
+			"multi-value declaration has no checker resolution",
+		)
+	}
+
+	if resolution.Bindings[0] !=
+		MultiVarBindingDeclare {
+		t.Fatalf(
+			"first binding = %v, want declaration",
+			resolution.Bindings[0],
+		)
+	}
+
+	if resolution.Bindings[1] !=
+		MultiVarBindingDiscard {
+		t.Fatalf(
+			"second binding = %v, want discard",
+			resolution.Bindings[1],
+		)
+	}
+}
+
+func TestCheckMultiShortDeclDiscardDoesNotCountAsNew(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+    _, valid := Pair()
+}
+`,
+	)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected short-declaration diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		run.Reporter.String(),
+		"short declaration requires at least one new non-discard variable",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckMultiShortDeclRejectsAllExistingNames(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value := 0
+    valid := false
+    value, valid := Pair()
+}
+`,
+	)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected short-declaration diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		run.Reporter.String(),
+		"short declaration requires at least one new non-discard variable",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckMultiShortDeclUsesCurrentScopeOnly(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid := false
+
+    {
+        value, valid := Pair()
+    }
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	outerStmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		1,
+	)
+
+	block, ok := outerStmt.(*ast.BlockStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.BlockStmt",
+			outerStmt,
+		)
+	}
+
+	if len(block.Stmts) != 1 {
+		t.Fatalf(
+			"inner statement count = %d, want 1",
+			len(block.Stmts),
+		)
+	}
+
+	decl, ok :=
+		block.Stmts[0].(*ast.MultiVarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"inner statement type = %T, want *ast.MultiVarDeclStmt",
+			block.Stmts[0],
+		)
+	}
+
+	resolution, ok :=
+		run.Checker.MultiVarDeclResolutionFor(
+			decl,
+		)
+	if !ok {
+		t.Fatal(
+			"multi-value declaration has no checker resolution",
+		)
+	}
+
+	if resolution.Bindings[0] !=
+		MultiVarBindingDeclare ||
+		resolution.Bindings[1] !=
+			MultiVarBindingDeclare {
+		t.Fatalf(
+			"bindings = %v, want two declarations",
+			resolution.Bindings,
+		)
+	}
+}
+
+func TestCheckMultiShortDeclChecksExistingVariableType(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    valid: int = 0
+    value, valid := Pair()
+}
+`,
+	)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected assignment type diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		run.Reporter.String(),
+		"cannot assign bool to int",
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}
+
+func TestCheckMultiShortDeclRejectsDuplicateNames(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Pair :: task() (int, bool) {
+    return 10, true
+}
+
+Main :: task() {
+    value, value := Pair()
+}
+`,
+	)
+
+	if !run.Reporter.HasErrors() {
+		t.Fatal(
+			"expected duplicate-name diagnostic",
+		)
+	}
+
+	if !strings.Contains(
+		run.Reporter.String(),
+		`duplicate short declaration target "value"`,
+	) {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+}

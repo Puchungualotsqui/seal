@@ -916,6 +916,11 @@ func (g *Generator) collectInterfaceInstancesFromStmt(
 			s.Right,
 		)
 
+	case *ast.MultiAssignStmt:
+		g.collectInterfaceInstancesFromExpr(
+			s.Value,
+		)
+
 	case *ast.VarDeclStmt:
 		if s.HasType {
 			g.collectInterfaceInstancesFromType(
