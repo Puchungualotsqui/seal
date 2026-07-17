@@ -29,6 +29,22 @@
 #define _O_BINARY 0
 #endif
 
+/*
+Older Windows SDK headers, including those bundled with some TCC
+versions, may not expose these conversion flags.
+
+Passing zero keeps the conversions available, but invalid input may be
+replaced by the Windows default replacement character instead of making
+the conversion fail.
+*/
+#ifndef MB_ERR_INVALID_CHARS
+#define MB_ERR_INVALID_CHARS 0
+#endif
+
+#ifndef WC_ERR_INVALID_CHARS
+#define WC_ERR_INVALID_CHARS 0
+#endif
+
 #else
 
 #include <unistd.h>
