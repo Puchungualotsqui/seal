@@ -8,6 +8,7 @@ dependencies = [
     "strings",
     "mem",
     "io",
+    "strconv"
 ]
 
 [build]

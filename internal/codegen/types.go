@@ -1915,6 +1915,169 @@ func (g *Generator) isUnion(t CType) bool {
 	return ok
 }
 
+func isBuiltinSwitchIntegerCType(
+	t CType,
+) bool {
+	if isInvalidCType(t) ||
+		t.IsInlineArray ||
+		t.IsVariadic {
+		return false
+	}
+
+	switch t.SealName {
+	case "int",
+		"uint",
+		"i8",
+		"i16",
+		"i32",
+		"i64",
+		"u8",
+		"u16",
+		"u32",
+		"u64",
+		"char":
+		return true
+
+	default:
+		return false
+	}
+}
+
+func (g *Generator) directDistinctUnderlyingCType(
+	t CType,
+) (
+	CType,
+	bool,
+) {
+	if isInvalidCType(t) {
+		return CInvalid, false
+	}
+
+	// Distinct declared by the package currently being generated.
+	if decl := g.distincts[t.SealName]; decl != nil {
+		return g.cTypeFromAst(
+			decl.Underlying,
+		), true
+	}
+
+	lookupPackages := func(
+		packages map[string]*PackageInfo,
+	) (
+		CType,
+		bool,
+	) {
+		for mapKey, pkg := range packages {
+			if pkg == nil {
+				continue
+			}
+
+			packageName := pkg.Name
+			if packageName == "" {
+				packageName = mapKey
+			}
+
+			if packageName == "" {
+				continue
+			}
+
+			for distinctName, decl := range pkg.Distincts {
+				if decl == nil {
+					continue
+				}
+
+				contextPackageName := packageName
+
+				matches :=
+					cImportedTypeName(
+						packageName,
+						distinctName,
+					) == t.SealName
+
+				/*
+					The same PackageInfo can occasionally be stored under a
+					different metadata-map key. Accept the key-derived C name
+					as well.
+				*/
+				if !matches &&
+					mapKey != "" &&
+					mapKey != packageName &&
+					cImportedTypeName(
+						mapKey,
+						distinctName,
+					) == t.SealName {
+					matches = true
+					contextPackageName = mapKey
+				}
+
+				if !matches {
+					continue
+				}
+
+				return g.cTypeFromAstInTypeContext(
+					contextPackageName,
+					decl.Underlying,
+				), true
+			}
+		}
+
+		return CInvalid, false
+	}
+
+	if underlying, ok :=
+		lookupPackages(g.packages); ok {
+		return underlying, true
+	}
+
+	return lookupPackages(
+		g.workspacePackages,
+	)
+}
+
+func (g *Generator) switchIntegerBaseCType(
+	t CType,
+) (
+	CType,
+	bool,
+) {
+	visited := map[string]bool{}
+
+	for {
+		if isBuiltinSwitchIntegerCType(t) {
+			return t, true
+		}
+
+		if isInvalidCType(t) ||
+			t.SealName == "" ||
+			visited[t.SealName] {
+			return CInvalid, false
+		}
+
+		visited[t.SealName] = true
+
+		underlying, ok :=
+			g.directDistinctUnderlyingCType(t)
+
+		if !ok {
+			return CInvalid, false
+		}
+
+		t = underlying
+	}
+}
+
+func (g *Generator) isValueSwitchCType(
+	t CType,
+) bool {
+	// Preserve existing enum switches, including enums with explicit
+	// integer storage types.
+	if g.isEnumCType(t) {
+		return true
+	}
+
+	_, ok := g.switchIntegerBaseCType(t)
+	return ok
+}
+
 func (g *Generator) isEnumCType(
 	t CType,
 ) bool {

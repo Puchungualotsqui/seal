@@ -558,6 +558,7 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitCImports(file)
 	g.emitRuntimeSupport()
 
+	g.emitImportedDistincts()
 	g.emitDistincts(file)
 	g.emitEnums(file)
 	g.emitImportedEnums()

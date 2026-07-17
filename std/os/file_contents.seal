@@ -1,0 +1,231 @@
+/*
+OwnedBytes owns a contiguous byte allocation.
+
+Copying OwnedBytes performs a shallow ownership copy and must be avoided.
+*/
+OwnedBytes :: struct {
+    Data rawptr
+    Length uint
+    _deallocator mem.Deallocator
+}
+
+/*
+OwnedBytesSpan returns a borrowed ByteSpan over owned bytes.
+
+The returned span becomes invalid when owner is destroyed.
+*/
+OwnedBytesSpan :: pure task(
+    owner *OwnedBytes,
+) io.ByteSpan {
+    return io.ByteSpan{
+        Data = owner.Data,
+        Length = owner.Length,
+    }
+}
+
+/*
+DestroyOwnedBytes releases an OwnedBytes allocation.
+
+Calling it repeatedly on the same owner is valid.
+*/
+DestroyOwnedBytes :: task(
+    owner *OwnedBytes,
+) {
+    if owner.Data == nil {
+        return
+    }
+
+    mem.FreeWith(
+        owner._deallocator,
+        owner.Data,
+    )
+
+    owner.Data = nil
+    owner.Length = 0
+}
+
+/*
+ReadFile reads an entire file into owned memory.
+
+The result must be released with DestroyOwnedBytes.
+*/
+ReadFile :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    path string,
+) (OwnedBytes, Error) {
+    empty := OwnedBytes{
+        Data = nil,
+        Length = 0,
+        _deallocator = deallocator,
+    }
+
+    file, openError :=
+        OpenRead(path)
+
+    if !ErrorIsNone(openError) {
+        return empty, openError
+    }
+
+    writer :=
+        io.NewBufferWriter(
+            allocator,
+            deallocator,
+        )
+
+    scratchLength: uint = 65536
+
+    scratchData :=
+        mem.AllocWith(
+            allocator,
+            scratchLength,
+        )
+
+    if scratchData == nil {
+        CloseFile(&file)
+
+        return empty, _InternalError(
+            .OutOfMemory,
+        )
+    }
+
+    scratch := io.ByteSpan{
+        Data = scratchData,
+        Length = scratchLength,
+    }
+
+    _, copyStatus :=
+        io.CopyWithBuffer(
+            cast<io.Reader>(&file),
+            cast<io.Writer>(&writer),
+            scratch,
+        )
+
+    mem.FreeWith(
+        deallocator,
+        scratchData,
+    )
+
+    closeError :=
+        CloseFile(&file)
+
+    if copyStatus != .Complete {
+        Close(
+            cast<io.Closer>(
+                &writer,
+            ),
+        )
+
+        if copyStatus == .Overflow {
+            return empty, _InternalError(
+                .Overflow,
+            )
+        }
+
+        return empty, _InternalError(
+            .InputOutput,
+        )
+    }
+
+    if !ErrorIsNone(closeError) {
+        Close(
+            cast<io.Closer>(
+                &writer,
+            ),
+        )
+
+        return empty, closeError
+    }
+
+    result := OwnedBytes{
+        Data = writer.Data,
+        Length = writer.Length,
+        _deallocator = deallocator,
+    }
+
+    /*
+    Transfer ownership from BufferWriter to OwnedBytes.
+    */
+    writer.Data = nil
+    writer.Length = 0
+    writer.Capacity = 0
+    writer.Closed = true
+
+    return result, NoError()
+}
+
+/*
+WriteFile creates or truncates a file and writes every source byte.
+*/
+WriteFile :: task(
+    path string,
+    source io.ByteSpan,
+) Error {
+    if !io.ByteSpanIsValid(source) {
+        return _InternalError(
+            .InvalidArgument,
+        )
+    }
+
+    file, openError :=
+        CreateFile(path)
+
+    if !ErrorIsNone(openError) {
+        return openError
+    }
+
+    _, writeStatus :=
+        io.WriteAll(
+            cast<io.Writer>(&file),
+            source,
+        )
+
+    closeError :=
+        CloseFile(&file)
+
+    if writeStatus != .Complete {
+        return _InternalError(
+            .InputOutput,
+        )
+    }
+
+    return closeError
+}
+
+/*
+AppendFile appends every source byte, creating the file when necessary.
+*/
+AppendFile :: task(
+    path string,
+    source io.ByteSpan,
+) Error {
+    if !io.ByteSpanIsValid(source) {
+        return _InternalError(
+            .InvalidArgument,
+        )
+    }
+
+    file, openError :=
+        OpenAppend(path)
+
+    if !ErrorIsNone(openError) {
+        return openError
+    }
+
+    _, writeStatus :=
+        io.WriteAll(
+            cast<io.Writer>(&file),
+            source,
+        )
+
+    closeError :=
+        CloseFile(&file)
+
+    if writeStatus != .Complete {
+        return _InternalError(
+            .InputOutput,
+        )
+    }
+
+    return closeError
+}

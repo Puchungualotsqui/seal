@@ -121,6 +121,139 @@ func (g *Generator) emitDistincts(file *ast.File) {
 	}
 }
 
+func (g *Generator) emitImportedDistincts() {
+	type importedDistinctEmission struct {
+		PackageName string
+		CName       string
+		Decl        *ast.DistinctDecl
+	}
+
+	entries := map[string]importedDistinctEmission{}
+
+	for mapKey, pkg := range g.packages {
+		if pkg == nil {
+			continue
+		}
+
+		packageName := pkg.Name
+		if packageName == "" {
+			packageName = mapKey
+		}
+
+		if packageName == "" {
+			continue
+		}
+
+		for distinctName, decl := range pkg.Distincts {
+			if decl == nil {
+				continue
+			}
+
+			cName := cImportedTypeName(
+				packageName,
+				distinctName,
+			)
+
+			entries[cName] = importedDistinctEmission{
+				PackageName: packageName,
+				CName:       cName,
+				Decl:        decl,
+			}
+		}
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	names := make(
+		[]string,
+		0,
+		len(entries),
+	)
+
+	for name := range entries {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	/*
+		Emit underlying imported distinct types first.
+
+		For example:
+
+		    distinct Identifier uint
+		    distinct UserId Identifier
+
+		must become:
+
+		    typedef uintptr_t pkg_Identifier;
+		    typedef pkg_Identifier pkg_UserId;
+	*/
+	const (
+		distinctNotVisited uint8 = iota
+		distinctVisiting
+		distinctEmitted
+	)
+
+	states := map[string]uint8{}
+
+	var emit func(string)
+
+	emit = func(name string) {
+		switch states[name] {
+		case distinctEmitted:
+			return
+
+		case distinctVisiting:
+			entry := entries[name]
+
+			g.error(
+				entry.Decl.Name.Span(),
+				fmt.Sprintf(
+					"cyclic imported distinct type involving %s",
+					name,
+				),
+			)
+
+			return
+		}
+
+		entry, exists := entries[name]
+		if !exists {
+			return
+		}
+
+		states[name] = distinctVisiting
+
+		underlying :=
+			g.cTypeFromAstInTypeContext(
+				entry.PackageName,
+				entry.Decl.Underlying,
+			)
+
+		// A distinct may be backed by another imported distinct.
+		if _, exists :=
+			entries[underlying.SealName]; exists {
+			emit(underlying.SealName)
+		}
+
+		g.linef(
+			"typedef %s;",
+			underlying.Decl(entry.CName),
+		)
+
+		states[name] = distinctEmitted
+	}
+
+	for _, name := range names {
+		emit(name)
+	}
+
+	g.line("")
+}
+
 func (g *Generator) emitEnumDefinition(
 	cName string,
 	d *ast.EnumDecl,
@@ -2506,10 +2639,34 @@ func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 		return
 	}
 
-	targetType := g.inferExprType(s.Target, nil)
-	target := g.emitExpr(s.Target, nil)
+	targetType :=
+		g.inferExprType(
+			s.Target,
+			nil,
+		)
 
-	g.linef("switch (%s) {", target)
+	if !g.isValueSwitchCType(targetType) {
+		g.error(
+			s.Target.Span(),
+			fmt.Sprintf(
+				"switch target must be an enum, integer, char, or integer-backed distinct type; got %s",
+				targetType.String(),
+			),
+		)
+
+		return
+	}
+
+	target :=
+		g.emitExpr(
+			s.Target,
+			&targetType,
+		)
+
+	g.linef(
+		"switch (%s) {",
+		target,
+	)
 	g.indent++
 
 	for _, swCase := range s.Cases {

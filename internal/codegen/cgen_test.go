@@ -9147,3 +9147,311 @@ Main :: task() {
 
 	runGeneratedC(t, out)
 }
+
+func TestGenerateIntegerSwitches(t *testing.T) {
+	tests := []struct {
+		name          string
+		sealType      string
+		caseValue     string
+		callValue     string
+		expectedCType string
+		expectedCase  string
+	}{
+		{
+			name:          "int",
+			sealType:      "int",
+			caseValue:     "10",
+			callValue:     "10",
+			expectedCType: "intptr_t",
+			expectedCase:  "case 10:",
+		},
+		{
+			name:          "uint",
+			sealType:      "uint",
+			caseValue:     "10",
+			callValue:     "10",
+			expectedCType: "uintptr_t",
+			expectedCase:  "case 10:",
+		},
+		{
+			name:          "i8",
+			sealType:      "i8",
+			caseValue:     "-8",
+			callValue:     "-8",
+			expectedCType: "int8_t",
+			expectedCase:  "case (-8):",
+		},
+		{
+			name:          "i16",
+			sealType:      "i16",
+			caseValue:     "-16",
+			callValue:     "-16",
+			expectedCType: "int16_t",
+			expectedCase:  "case (-16):",
+		},
+		{
+			name:          "i32",
+			sealType:      "i32",
+			caseValue:     "-32",
+			callValue:     "-32",
+			expectedCType: "int32_t",
+			expectedCase:  "case (-32):",
+		},
+		{
+			name:          "i64",
+			sealType:      "i64",
+			caseValue:     "-64",
+			callValue:     "-64",
+			expectedCType: "int64_t",
+			expectedCase:  "case (-64):",
+		},
+		{
+			name:          "u8",
+			sealType:      "u8",
+			caseValue:     "8",
+			callValue:     "8",
+			expectedCType: "uint8_t",
+			expectedCase:  "case 8:",
+		},
+		{
+			name:          "u16",
+			sealType:      "u16",
+			caseValue:     "16",
+			callValue:     "16",
+			expectedCType: "uint16_t",
+			expectedCase:  "case 16:",
+		},
+		{
+			name:          "u32",
+			sealType:      "u32",
+			caseValue:     "32",
+			callValue:     "32",
+			expectedCType: "uint32_t",
+			expectedCase:  "case 32:",
+		},
+		{
+			name:          "u64",
+			sealType:      "u64",
+			caseValue:     "18446744073709551615",
+			callValue:     "18446744073709551615",
+			expectedCType: "uint64_t",
+			expectedCase:  "case UINT64_C(18446744073709551615):",
+		},
+		{
+			name:          "char",
+			sealType:      "char",
+			caseValue:     "'ñ'",
+			callValue:     "'ñ'",
+			expectedCType: "uint32_t",
+			expectedCase:  "case ((uint32_t)241):",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`
+Check :: task(value %s) int {
+    switch value {
+    case %s:
+        return 1
+
+    default:
+        return 0
+    }
+}
+
+Main :: task() {
+    result := Check(%s)
+    assert(result == 1)
+}
+`,
+				test.sealType,
+				test.caseValue,
+				test.callValue,
+			)
+
+			out, reporter := generate(t, input)
+
+			if reporter.HasErrors() {
+				t.Fatalf(
+					"unexpected diagnostics:\n%s",
+					reporter.String(),
+				)
+			}
+
+			expectedSignature := fmt.Sprintf(
+				"intptr_t Check(%s value)",
+				test.expectedCType,
+			)
+
+			if !strings.Contains(
+				out,
+				expectedSignature,
+			) {
+				t.Fatalf(
+					"expected switch task signature %q, got:\n%s",
+					expectedSignature,
+					out,
+				)
+			}
+
+			if !strings.Contains(
+				out,
+				"switch (value) {",
+			) {
+				t.Fatalf(
+					"expected value switch, got:\n%s",
+					out,
+				)
+			}
+
+			if !strings.Contains(
+				out,
+				test.expectedCase,
+			) {
+				t.Fatalf(
+					"expected switch case %q, got:\n%s",
+					test.expectedCase,
+					out,
+				)
+			}
+
+			if !strings.Contains(
+				out,
+				"default:",
+			) {
+				t.Fatalf(
+					"expected default switch case, got:\n%s",
+					out,
+				)
+			}
+
+			compileGeneratedC(t, out)
+			runGeneratedC(t, out)
+		})
+	}
+}
+
+func TestGenerateIntegerBackedDistinctSwitches(t *testing.T) {
+	out, reporter := generate(t, `
+Identifier :: distinct uint
+UserId :: distinct u64
+SignedCode :: distinct i32
+CharacterCode :: distinct char
+
+CheckIdentifier :: task(value Identifier) int {
+    switch value {
+    case cast<Identifier>(7):
+        return 1
+
+    default:
+        return 0
+    }
+}
+
+CheckUserId :: task(value UserId) int {
+    switch value {
+    case cast<UserId>(42):
+        return 1
+
+    default:
+        return 0
+    }
+}
+
+CheckSignedCode :: task(value SignedCode) int {
+    switch value {
+    case cast<SignedCode>(-20):
+        return 1
+
+    default:
+        return 0
+    }
+}
+
+CheckCharacterCode :: task(value CharacterCode) int {
+    switch value {
+    case cast<CharacterCode>('A'):
+        return 1
+
+    default:
+        return 0
+    }
+}
+
+Main :: task() {
+    identifierResult :=
+        CheckIdentifier(
+            cast<Identifier>(7),
+        )
+
+    userIdResult :=
+        CheckUserId(
+            cast<UserId>(42),
+        )
+
+    signedResult :=
+        CheckSignedCode(
+            cast<SignedCode>(-20),
+        )
+
+    characterResult :=
+        CheckCharacterCode(
+            cast<CharacterCode>('A'),
+        )
+
+    assert(identifierResult == 1)
+    assert(userIdResult == 1)
+    assert(signedResult == 1)
+    assert(characterResult == 1)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"typedef uintptr_t Identifier;",
+		"typedef uint64_t UserId;",
+		"typedef int32_t SignedCode;",
+		"typedef uint32_t CharacterCode;",
+
+		"intptr_t CheckIdentifier(Identifier value)",
+		"intptr_t CheckUserId(UserId value)",
+		"intptr_t CheckSignedCode(SignedCode value)",
+		"intptr_t CheckCharacterCode(CharacterCode value)",
+
+		"case ((Identifier)(7)):",
+		"case ((UserId)(42)):",
+		"case ((SignedCode)((-20))):",
+		"case ((CharacterCode)(((uint32_t)65))):",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+
+	if count := strings.Count(
+		out,
+		"switch (value) {",
+	); count != 4 {
+		t.Fatalf(
+			"expected four distinct-type switches, got %d:\n%s",
+			count,
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+	runGeneratedC(t, out)
+}

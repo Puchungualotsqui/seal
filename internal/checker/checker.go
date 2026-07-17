@@ -13937,6 +13937,427 @@ func (c *Checker) compileTimeIntegerValue(
 	), true
 }
 
+// integerConstantAfterCast applies the integer representation of target to a
+// compile-time value.
+//
+// This is needed for case expressions such as:
+//
+//	case cast<u8>(Code):
+//
+// where Code is a compile-time constant but its IntConstant metadata is no
+// longer directly attached to the checked expression type.
+func integerConstantAfterCast(
+	value *big.Int,
+	target *Type,
+) (*big.Int, bool) {
+	if value == nil || target == nil {
+		return nil, false
+	}
+
+	if target.Kind == TypeDistinct {
+		return integerConstantAfterCast(
+			value,
+			target.Underlying,
+		)
+	}
+
+	bits, ok := integerStorageBitWidth(
+		target,
+	)
+	if !ok {
+		return nil, false
+	}
+
+	modulus := new(big.Int).Lsh(
+		big.NewInt(1),
+		bits,
+	)
+
+	normalized := new(big.Int).Mod(
+		new(big.Int).Set(value),
+		modulus,
+	)
+
+	switch target.Kind {
+	case TypeInt,
+		TypeI8,
+		TypeI16,
+		TypeI32,
+		TypeI64:
+		signBit := new(big.Int).Lsh(
+			big.NewInt(1),
+			bits-1,
+		)
+
+		if normalized.Cmp(signBit) >= 0 {
+			normalized.Sub(
+				normalized,
+				modulus,
+			)
+		}
+	}
+
+	return normalized, true
+}
+
+// switchIntegerConstantValue evaluates an integer switch case expression.
+//
+// Case expressions must be compile-time integer constants because they become
+// C case labels. The result uses arbitrary precision so u64 case values are
+// not restricted to Go's int64 range.
+func (c *Checker) switchIntegerConstantValue(
+	scope *Scope,
+	expr ast.Expr,
+) (*big.Int, bool) {
+	return c.switchIntegerConstantValueSeen(
+		scope,
+		expr,
+		map[*ast.ConstDecl]bool{},
+	)
+}
+
+func (c *Checker) switchIntegerConstantValueSeen(
+	scope *Scope,
+	expr ast.Expr,
+	seen map[*ast.ConstDecl]bool,
+) (*big.Int, bool) {
+	if expr == nil {
+		return nil, false
+	}
+
+	/*
+		The normal expression checker already folds direct untyped integer
+		expressions with big.Int. Prefer that result when available.
+	*/
+	if checked := c.exprTypes[expr]; checked != nil &&
+		checked.IntConstant != nil {
+		return cloneBigInt(
+			checked.IntConstant,
+		), true
+	}
+
+	switch e := expr.(type) {
+	case *ast.IntLitExpr:
+		value, err := parseSealBigIntLiteral(
+			e.Value,
+		)
+		if err != nil {
+			return nil, false
+		}
+
+		return value, true
+
+	case *ast.CharLitExpr:
+		value, err := unquoteSealLiteral(
+			e.Value,
+		)
+		if err != nil {
+			return nil, false
+		}
+
+		runes := []rune(value)
+
+		if len(runes) != 1 ||
+			!isUnicodeScalar(runes[0]) {
+			return nil, false
+		}
+
+		return big.NewInt(
+			int64(runes[0]),
+		), true
+
+	case *ast.IdentExpr:
+		if scope == nil {
+			return nil, false
+		}
+
+		sym := scope.Lookup(
+			e.Name.Name,
+		)
+		if sym == nil ||
+			sym.Kind != SymbolConst {
+			return nil, false
+		}
+
+		decl, ok := sym.Node.(*ast.ConstDecl)
+		if !ok ||
+			decl == nil ||
+			decl.Value == nil {
+			return nil, false
+		}
+
+		if seen[decl] {
+			return nil, false
+		}
+
+		seen[decl] = true
+
+		value, valid :=
+			c.switchIntegerConstantValueSeen(
+				scope,
+				decl.Value,
+				seen,
+			)
+
+		delete(
+			seen,
+			decl,
+		)
+
+		return value, valid
+
+	case *ast.SelectorExpr:
+		/*
+			Resolve package-qualified constants:
+
+			    case limits.Maximum:
+		*/
+		id, ok := e.Left.(*ast.IdentExpr)
+		if !ok || scope == nil {
+			break
+		}
+
+		pkgSym := scope.Lookup(
+			id.Name.Name,
+		)
+		if pkgSym == nil ||
+			pkgSym.Kind != SymbolPackage ||
+			pkgSym.Package == nil {
+			break
+		}
+
+		member :=
+			pkgSym.Package.Symbols[e.Name.Name]
+
+		if member == nil ||
+			member.Kind != SymbolConst {
+			return nil, false
+		}
+
+		decl, ok :=
+			member.Node.(*ast.ConstDecl)
+
+		if !ok ||
+			decl == nil ||
+			decl.Value == nil {
+			return nil, false
+		}
+
+		if seen[decl] {
+			return nil, false
+		}
+
+		seen[decl] = true
+
+		packageScope :=
+			c.scopeForPackageInfo(
+				id.Name.Name,
+				pkgSym.Package,
+			)
+
+		value, valid :=
+			c.switchIntegerConstantValueSeen(
+				packageScope,
+				decl.Value,
+				seen,
+			)
+
+		delete(
+			seen,
+			decl,
+		)
+
+		return value, valid
+
+	case *ast.UnaryExpr:
+		value, ok :=
+			c.switchIntegerConstantValueSeen(
+				scope,
+				e.Expr,
+				seen,
+			)
+		if !ok {
+			return nil, false
+		}
+
+		switch e.Op {
+		case token.Minus:
+			return new(big.Int).Neg(
+				value,
+			), true
+
+		case token.Tilde:
+			return new(big.Int).Not(
+				value,
+			), true
+
+		default:
+			return nil, false
+		}
+
+	case *ast.BinaryExpr:
+		left, ok :=
+			c.switchIntegerConstantValueSeen(
+				scope,
+				e.Left,
+				seen,
+			)
+		if !ok {
+			return nil, false
+		}
+
+		right, ok :=
+			c.switchIntegerConstantValueSeen(
+				scope,
+				e.Right,
+				seen,
+			)
+		if !ok {
+			return nil, false
+		}
+
+		result := new(big.Int)
+
+		switch e.Op {
+		case token.Plus:
+			result.Add(left, right)
+
+		case token.Minus:
+			result.Sub(left, right)
+
+		case token.Star:
+			result.Mul(left, right)
+
+		case token.Slash:
+			if right.Sign() == 0 {
+				return nil, false
+			}
+
+			result.Quo(left, right)
+
+		case token.Percent:
+			if right.Sign() == 0 {
+				return nil, false
+			}
+
+			result.Rem(left, right)
+
+		case token.Amp:
+			result.And(left, right)
+
+		case token.Pipe:
+			result.Or(left, right)
+
+		case token.Caret:
+			result.Xor(left, right)
+
+		case token.ShiftLeft:
+			if right.Sign() < 0 ||
+				!right.IsUint64() {
+				return nil, false
+			}
+
+			result.Lsh(
+				left,
+				uint(right.Uint64()),
+			)
+
+		case token.ShiftRight:
+			if right.Sign() < 0 ||
+				!right.IsUint64() {
+				return nil, false
+			}
+
+			result.Rsh(
+				left,
+				uint(right.Uint64()),
+			)
+
+		default:
+			return nil, false
+		}
+
+		/*
+			When the expression has a concrete integer result, preserve that
+			representation. This handles explicitly typed constant arithmetic.
+		*/
+		if resultType := c.exprTypes[expr]; c.isConcreteIntegerType(resultType) {
+			if converted, ok :=
+				integerConstantAfterCast(
+					result,
+					resultType,
+				); ok {
+				return converted, true
+			}
+		}
+
+		return result, true
+
+	case *ast.CallExpr:
+		/*
+			Compile-time integer casts remain valid case expressions:
+
+			    case cast<u32>(1):
+		*/
+		gen, ok :=
+			e.Callee.(*ast.GenericExpr)
+
+		if ok && len(e.Args) == 1 &&
+			len(gen.Args) == 1 {
+			id, ok :=
+				gen.Base.(*ast.IdentExpr)
+
+			if ok &&
+				id.Name.Name == "cast" {
+				value, ok :=
+					c.switchIntegerConstantValueSeen(
+						scope,
+						e.Args[0],
+						seen,
+					)
+				if !ok {
+					return nil, false
+				}
+
+				target :=
+					c.typeFromGenericArg(
+						scope,
+						gen.Args[0],
+					)
+
+				if !c.isConcreteIntegerType(
+					target,
+				) {
+					return nil, false
+				}
+
+				return integerConstantAfterCast(
+					value,
+					target,
+				)
+			}
+		}
+	}
+
+	/*
+		Reuse the existing compile-time evaluator for pure calls and other
+		already-supported int64 constant forms.
+	*/
+	value, ok := c.evalGenericConstExpr(
+		scope,
+		expr,
+	)
+
+	if !ok ||
+		value.Kind != genericConstInt {
+		return nil, false
+	}
+
+	return big.NewInt(
+		value.IntValue,
+	), true
+}
+
 func (c *Checker) checkShiftCount(
 	scope *Scope,
 	e *ast.BinaryExpr,
@@ -16539,76 +16960,342 @@ func (c *Checker) checkOverloadCallResultTypes(sym *Symbol, argTypes []*Type, ar
 	return result.Candidate.Type.Results
 }
 
-func (c *Checker) checkNormalSwitch(scope *Scope, s *ast.SwitchStmt, targetType *Type) {
-	if targetType.Kind != TypeEnum {
-		c.diags.Add(s.Target.Span(), fmt.Sprintf("switch target must be enum for now, got %s", targetType.String()))
+func (c *Checker) checkNormalSwitch(
+	scope *Scope,
+	s *ast.SwitchStmt,
+	targetType *Type,
+) {
+	if targetType == nil {
+		targetType = InvalidType
 	}
 
-	seenEnumVariants := map[string]source.Span{}
-	seenExprCases := map[string]source.Span{}
+	switch {
+	case targetType.Kind == TypeEnum:
+		c.checkEnumSwitch(
+			scope,
+			s,
+			targetType,
+		)
+
+	case c.isConcreteIntegerType(
+		targetType,
+	):
+		c.checkIntegerSwitch(
+			scope,
+			s,
+			targetType,
+		)
+
+	default:
+		if targetType.Kind != TypeInvalid {
+			c.diags.Add(
+				s.Target.Span(),
+				fmt.Sprintf(
+					"switch target must be enum or integer, got %s",
+					targetType.String(),
+				),
+			)
+		}
+
+		/*
+			Continue checking cases and bodies after an invalid target. Using
+			the enum path preserves the previous error-recovery behavior.
+		*/
+		c.checkEnumSwitch(
+			scope,
+			s,
+			targetType,
+		)
+	}
+}
+
+func (c *Checker) checkEnumSwitch(
+	scope *Scope,
+	s *ast.SwitchStmt,
+	targetType *Type,
+) {
+	seenEnumVariants :=
+		map[string]source.Span{}
+
+	seenExprCases :=
+		map[string]source.Span{}
+
 	seenDefault := false
 	var previousDefault source.Span
 
 	for _, swCase := range s.Cases {
-		caseScope := NewScope(scope)
+		caseScope := NewScope(
+			scope,
+		)
 
 		switch swCase.Kind {
 		case ast.SwitchCaseEnumVariant:
-			key := swCase.EnumVariant.Name
+			key :=
+				swCase.EnumVariant.Name
 
-			if prev, ok := seenEnumVariants[key]; ok {
-				c.addDuplicateCaseDiagnostic(swCase.EnumVariant.Span(), prev, "."+key)
+			if prev, ok :=
+				seenEnumVariants[key]; ok {
+				c.addDuplicateCaseDiagnostic(
+					swCase.EnumVariant.Span(),
+					prev,
+					"."+key,
+				)
 			} else {
-				seenEnumVariants[key] = swCase.EnumVariant.Span()
+				seenEnumVariants[key] =
+					swCase.EnumVariant.Span()
 			}
 
-			if targetType.Kind == TypeEnum && !c.enumHasVariant(targetType, swCase.EnumVariant.Name) {
+			if targetType.Kind == TypeEnum &&
+				!c.enumHasVariant(
+					targetType,
+					swCase.EnumVariant.Name,
+				) {
 				c.diags.Add(
 					swCase.EnumVariant.Span(),
-					fmt.Sprintf("enum %s has no variant .%s", targetType.String(), swCase.EnumVariant.Name),
+					fmt.Sprintf(
+						"enum %s has no variant .%s",
+						targetType.String(),
+						swCase.EnumVariant.Name,
+					),
 				)
 			}
 
 		case ast.SwitchCaseDefault:
 			if seenDefault {
-				c.addDuplicateCaseDiagnostic(swCase.Loc, previousDefault, "default")
+				c.addDuplicateCaseDiagnostic(
+					swCase.Loc,
+					previousDefault,
+					"default",
+				)
 			} else {
 				seenDefault = true
-				previousDefault = swCase.Loc
+				previousDefault =
+					swCase.Loc
 			}
 
 		case ast.SwitchCaseExpr:
-			caseType := c.checkExpr(scope, swCase.Expr)
-			c.checkAssignable(targetType, caseType, swCase.Expr.Span())
+			caseType := c.checkExpr(
+				scope,
+				swCase.Expr,
+			)
 
-			key := switchCaseTypeKey(caseType) + ":" + swCase.Expr.Span().String()
-			if lit, ok := swCase.Expr.(*ast.IntLitExpr); ok {
-				key = "int:" + integerLiteralIdentity(
-					lit.Value,
-				)
-			} else if lit, ok := swCase.Expr.(*ast.StringLitExpr); ok {
-				key = "string:" + lit.Value
-			} else if lit, ok := swCase.Expr.(*ast.BoolLitExpr); ok {
-				key = "bool:" + fmt.Sprintf("%v", lit.Value)
-			} else if dot, ok := swCase.Expr.(*ast.DotIdentExpr); ok {
-				key = "enum:" + dot.Name.Name
+			c.checkAssignable(
+				targetType,
+				caseType,
+				swCase.Expr.Span(),
+			)
+
+			key :=
+				switchCaseTypeKey(caseType) +
+					":" +
+					swCase.Expr.Span().String()
+
+			if lit, ok :=
+				swCase.Expr.(*ast.IntLitExpr); ok {
+				key = "int:" +
+					integerLiteralIdentity(
+						lit.Value,
+					)
+			} else if lit, ok :=
+				swCase.Expr.(*ast.StringLitExpr); ok {
+				key = "string:" +
+					lit.Value
+			} else if lit, ok :=
+				swCase.Expr.(*ast.BoolLitExpr); ok {
+				key = "bool:" +
+					fmt.Sprintf(
+						"%v",
+						lit.Value,
+					)
+			} else if dot, ok :=
+				swCase.Expr.(*ast.DotIdentExpr); ok {
+				key = "enum:" +
+					dot.Name.Name
 			}
 
-			if prev, ok := seenExprCases[key]; ok {
-				c.addDuplicateCaseDiagnostic(swCase.Expr.Span(), prev, key)
+			if prev, ok :=
+				seenExprCases[key]; ok {
+				c.addDuplicateCaseDiagnostic(
+					swCase.Expr.Span(),
+					prev,
+					key,
+				)
 			} else {
-				seenExprCases[key] = swCase.Expr.Span()
+				seenExprCases[key] =
+					swCase.Expr.Span()
 			}
 
 		case ast.SwitchCaseNil:
-			c.diags.Add(swCase.Loc, "nil case is only valid in union switch")
+			c.diags.Add(
+				swCase.Loc,
+				"nil case is only valid in union switch",
+			)
 
 		case ast.SwitchCaseUnionMember:
-			c.diags.Add(swCase.Loc, "type case is only valid in union switch")
+			c.diags.Add(
+				swCase.Loc,
+				"type case is only valid in union switch",
+			)
 		}
 
 		for _, stmt := range swCase.Body {
-			c.checkStmt(caseScope, stmt)
+			c.checkStmt(
+				caseScope,
+				stmt,
+			)
+		}
+	}
+}
+
+func (c *Checker) checkIntegerSwitch(
+	scope *Scope,
+	s *ast.SwitchStmt,
+	targetType *Type,
+) {
+	/*
+		Integer switches do not have an exhaustiveness requirement. Therefore
+		@partial has no meaning and is rejected.
+	*/
+	if s.IsPartial {
+		c.diags.Add(
+			s.Span(),
+			"@partial is not valid for integer switches",
+		)
+	}
+
+	seenValues :=
+		map[string]source.Span{}
+
+	seenDefault := false
+	var previousDefault source.Span
+
+	for _, swCase := range s.Cases {
+		caseScope := NewScope(
+			scope,
+		)
+
+		switch swCase.Kind {
+		case ast.SwitchCaseExpr:
+			caseType := c.checkExpr(
+				scope,
+				swCase.Expr,
+			)
+
+			if caseType == nil ||
+				caseType.Kind == TypeInvalid {
+				break
+			}
+
+			assignable :=
+				c.assignable(
+					targetType,
+					caseType,
+				)
+
+			c.checkAssignable(
+				targetType,
+				caseType,
+				swCase.Expr.Span(),
+			)
+
+			/*
+				A type error is already sufficient. Do not add a second
+				constant-evaluation diagnostic for an incompatible case.
+			*/
+			if !assignable {
+				break
+			}
+
+			value, ok :=
+				c.switchIntegerConstantValue(
+					scope,
+					swCase.Expr,
+				)
+
+			if !ok {
+				c.diags.Add(
+					swCase.Expr.Span(),
+					"integer switch case must be a compile-time integer constant",
+				)
+
+				break
+			}
+
+			if !integerConstantFitsType(
+				value,
+				targetType,
+			) {
+				c.diags.Add(
+					swCase.Expr.Span(),
+					fmt.Sprintf(
+						"integer switch case value %s is not representable by %s",
+						value.String(),
+						targetType.String(),
+					),
+				)
+
+				break
+			}
+
+			/*
+				The canonical numeric value is the duplicate key. Therefore
+				these are detected as duplicates:
+
+				    case 1:
+				    case 0x1:
+				    case 1 + 0:
+			*/
+			key := value.String()
+
+			if previous, duplicate :=
+				seenValues[key]; duplicate {
+				c.addDuplicateCaseDiagnostic(
+					swCase.Expr.Span(),
+					previous,
+					key,
+				)
+			} else {
+				seenValues[key] =
+					swCase.Expr.Span()
+			}
+
+		case ast.SwitchCaseDefault:
+			if seenDefault {
+				c.addDuplicateCaseDiagnostic(
+					swCase.Loc,
+					previousDefault,
+					"default",
+				)
+			} else {
+				seenDefault = true
+				previousDefault =
+					swCase.Loc
+			}
+
+		case ast.SwitchCaseEnumVariant:
+			c.diags.Add(
+				swCase.EnumVariant.Span(),
+				"enum variant case is not valid in integer switch",
+			)
+
+		case ast.SwitchCaseNil:
+			c.diags.Add(
+				swCase.Loc,
+				"nil case is not valid in integer switch",
+			)
+
+		case ast.SwitchCaseUnionMember:
+			c.diags.Add(
+				swCase.Loc,
+				"type case is not valid in integer switch",
+			)
+		}
+
+		for _, stmt := range swCase.Body {
+			c.checkStmt(
+				caseScope,
+				stmt,
+			)
 		}
 	}
 }
