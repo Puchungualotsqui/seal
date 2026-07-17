@@ -43,6 +43,21 @@
 
 #endif
 
+/*
+Some C runtimes, including TCC's Windows runtime, do not define
+ENOTSUP. Select the closest available errno value while keeping the
+portable Seal classification as Unsupported.
+*/
+#if defined(ENOTSUP)
+#define SEAL_OS_NATIVE_UNSUPPORTED ENOTSUP
+#elif defined(EOPNOTSUPP)
+#define SEAL_OS_NATIVE_UNSUPPORTED EOPNOTSUPP
+#elif defined(ENOSYS)
+#define SEAL_OS_NATIVE_UNSUPPORTED ENOSYS
+#else
+#define SEAL_OS_NATIVE_UNSUPPORTED INT_MAX
+#endif
+
 typedef struct sealString {
     const uint8_t *data;
     uintptr_t len;
@@ -236,7 +251,7 @@ static int seal_os_errno_from_win32(
 
     case ERROR_NOT_SUPPORTED:
     case ERROR_CALL_NOT_IMPLEMENTED:
-        return ENOTSUP;
+        return SEAL_OS_NATIVE_UNSUPPORTED;
 
     default:
         return EIO;
@@ -498,6 +513,33 @@ intptr_t seal_os_classify_error(
         return SEAL_OS_ERROR_NONE;
     }
 
+    /*
+    Test unsupported codes before the switch because ENOTSUP,
+    EOPNOTSUPP, and ENOSYS may share the same integer value.
+    */
+    if (code ==
+        SEAL_OS_NATIVE_UNSUPPORTED) {
+        return SEAL_OS_ERROR_UNSUPPORTED;
+    }
+
+#ifdef ENOSYS
+    if (code == ENOSYS) {
+        return SEAL_OS_ERROR_UNSUPPORTED;
+    }
+#endif
+
+#ifdef ENOTSUP
+    if (code == ENOTSUP) {
+        return SEAL_OS_ERROR_UNSUPPORTED;
+    }
+#endif
+
+#ifdef EOPNOTSUPP
+    if (code == EOPNOTSUPP) {
+        return SEAL_OS_ERROR_UNSUPPORTED;
+    }
+#endif
+
     switch (code) {
     case ENOENT:
         return SEAL_OS_ERROR_NOT_FOUND;
@@ -548,16 +590,6 @@ intptr_t seal_os_classify_error(
 #ifdef EOVERFLOW
     case EOVERFLOW:
         return SEAL_OS_ERROR_OVERFLOW;
-#endif
-
-#ifdef ENOSYS
-    case ENOSYS:
-        return SEAL_OS_ERROR_UNSUPPORTED;
-#endif
-
-#ifdef ENOTSUP
-    case ENOTSUP:
-        return SEAL_OS_ERROR_UNSUPPORTED;
 #endif
 
     default:
@@ -845,7 +877,7 @@ bool seal_os_argument_count(
 
     seal_os_set_error(
         output_error,
-        ENOTSUP
+        SEAL_OS_NATIVE_UNSUPPORTED
     );
 
     return false;
@@ -1082,7 +1114,7 @@ bool seal_os_argument(
 
     seal_os_set_error(
         output_error,
-        ENOTSUP
+        SEAL_OS_NATIVE_UNSUPPORTED
     );
 
     return false;
@@ -4299,7 +4331,7 @@ bool seal_os_executable_path(
 
     seal_os_set_error(
         output_error,
-        ENOTSUP
+        SEAL_OS_NATIVE_UNSUPPORTED
     );
 
     return false;
