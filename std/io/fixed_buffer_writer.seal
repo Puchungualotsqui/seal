@@ -128,9 +128,7 @@ Writer :: impl FixedBufferWriter {
                 self.MaximumChunk
         }
 
-        valid : bool
-        destination : ByteSpan
-        destination, valid =
+        destination, valid :=
             ByteSpanRange(
                 self.Destination,
                 self.Offset,
@@ -141,8 +139,7 @@ Writer :: impl FixedBufferWriter {
             return 0, .Failed
         }
 
-        sourcePart: ByteSpan
-        sourcePart, valid =
+        sourcePart, valid :=
             ByteSpanPrefix(
                 source,
                 count,

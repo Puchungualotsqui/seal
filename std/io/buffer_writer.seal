@@ -221,9 +221,7 @@ Writer :: impl BufferWriter {
             return 0, .Data
         }
 
-        requiredCapacity : uint
-        valid : bool
-        requiredCapacity, valid =
+        requiredCapacity, valid :=
             _BufferWriterRequiredCapacity(
                 self.Length,
                 source.Length,
@@ -245,8 +243,7 @@ Writer :: impl BufferWriter {
             Length = self.Capacity,
         }
 
-        destination : ByteSpan
-        destination, valid =
+        destination, valid :=
             ByteSpanRange(
                 storage,
                 self.Length,
