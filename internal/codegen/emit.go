@@ -14,9 +14,13 @@ type valueInfo struct {
 }
 
 type loopControl struct {
-	scope         *scope
+	scope *scope
+
 	breakLabel    string
 	continueLabel string
+
+	breakUsed    bool
+	continueUsed bool
 }
 
 type deferredAction struct {
@@ -2213,23 +2217,27 @@ func (g *Generator) emitReturnStmt(s *ast.ReturnStmt) {
 }
 
 func (g *Generator) currentLoopControl() (
-	loopControl,
+	*loopControl,
 	bool,
 ) {
 	if len(g.loopStack) == 0 {
-		return loopControl{}, false
+		return nil, false
 	}
 
-	return g.loopStack[len(g.loopStack)-1], true
+	return &g.loopStack[len(g.loopStack)-1],
+		true
 }
 
 func (g *Generator) emitForStmt(
 	s *ast.ForStmt,
 ) {
 	oldScope := g.scope
-	oldLoopStackLength := len(g.loopStack)
+	oldLoopStackLength :=
+		len(g.loopStack)
 
-	loopScope := newScope(oldScope)
+	loopScope := newScope(
+		oldScope,
+	)
 	g.scope = loopScope
 
 	defer func() {
@@ -2240,7 +2248,9 @@ func (g *Generator) emitForStmt(
 
 	init := ""
 	if s.Init != nil {
-		init = g.emitForPart(s.Init)
+		init = g.emitForPart(
+			s.Init,
+		)
 	}
 
 	cond := ""
@@ -2253,7 +2263,9 @@ func (g *Generator) emitForStmt(
 
 	post := ""
 	if s.Post != nil {
-		post = g.emitForPart(s.Post)
+		post = g.emitForPart(
+			s.Post,
+		)
 	}
 
 	breakLabel := g.newTemp(
@@ -2264,15 +2276,15 @@ func (g *Generator) emitForStmt(
 		"loop_continue",
 	)
 
-	control := loopControl{
-		scope:         loopScope,
-		breakLabel:    breakLabel,
-		continueLabel: continueLabel,
-	}
-
 	g.loopStack = append(
 		g.loopStack,
-		control,
+		loopControl{
+			scope: loopScope,
+
+			breakLabel: breakLabel,
+
+			continueLabel: continueLabel,
+		},
 	)
 
 	switch {
@@ -2303,29 +2315,29 @@ func (g *Generator) emitForStmt(
 		s.Body,
 	)
 
-	// Normal iteration completion exits the lexical body scope, so its
-	// deferred actions execute before the C for-loop post expression.
+	emittedControl :=
+		&g.loopStack[len(g.loopStack)-1]
+
 	g.emitDefersInScope(
 		loopScope,
 	)
 
-	// A generated continue jumps here after explicitly running every defer
-	// belonging to the scopes it exits. Falling through this label causes C
-	// to execute the for-loop post expression and then recheck the condition.
-	g.linef(
-		"%s: ;",
-		continueLabel,
-	)
+	if emittedControl.continueUsed {
+		g.linef(
+			"%s: ;",
+			emittedControl.continueLabel,
+		)
+	}
 
 	g.indent--
 	g.line("}")
 
-	// A generated break jumps outside every intervening switch and exits the
-	// current for loop.
-	g.linef(
-		"%s: ;",
-		breakLabel,
-	)
+	if emittedControl.breakUsed {
+		g.linef(
+			"%s: ;",
+			emittedControl.breakLabel,
+		)
+	}
 }
 
 func (g *Generator) emitForPart(
@@ -2422,7 +2434,9 @@ func (g *Generator) emitForPart(
 func (g *Generator) emitBreakStmt(
 	s *ast.BreakStmt,
 ) {
-	control, ok := g.currentLoopControl()
+	control, ok :=
+		g.currentLoopControl()
+
 	if !ok {
 		g.error(
 			s.Span(),
@@ -2431,13 +2445,17 @@ func (g *Generator) emitBreakStmt(
 		return
 	}
 
-	if !g.emitDefersThroughScope(control.scope) {
+	if !g.emitDefersThroughScope(
+		control.scope,
+	) {
 		g.error(
 			s.Span(),
 			"could not find the target for-loop scope while emitting break",
 		)
 		return
 	}
+
+	control.breakUsed = true
 
 	g.linef(
 		"goto %s;",
@@ -2448,7 +2466,9 @@ func (g *Generator) emitBreakStmt(
 func (g *Generator) emitContinueStmt(
 	s *ast.ContinueStmt,
 ) {
-	control, ok := g.currentLoopControl()
+	control, ok :=
+		g.currentLoopControl()
+
 	if !ok {
 		g.error(
 			s.Span(),
@@ -2457,13 +2477,17 @@ func (g *Generator) emitContinueStmt(
 		return
 	}
 
-	if !g.emitDefersThroughScope(control.scope) {
+	if !g.emitDefersThroughScope(
+		control.scope,
+	) {
 		g.error(
 			s.Span(),
 			"could not find the target for-loop scope while emitting continue",
 		)
 		return
 	}
+
+	control.continueUsed = true
 
 	g.linef(
 		"goto %s;",

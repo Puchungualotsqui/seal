@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -6572,32 +6573,74 @@ Main :: task() {
 		)
 	}
 
-	if strings.Count(
-		out,
-		"goto __seal_loop_continue_",
-	) != 1 {
+	continueGoto :=
+		regexp.MustCompile(
+			`goto (__seal_loop_continue_[0-9]+);`,
+		).FindStringSubmatch(out)
+
+	if len(continueGoto) != 2 {
 		t.Fatalf(
 			"expected one source-level continue jump, got:\n%s",
 			out,
 		)
 	}
 
-	if strings.Count(
-		out,
-		"goto __seal_loop_break_",
-	) != 1 {
+	breakGoto :=
+		regexp.MustCompile(
+			`goto (__seal_loop_break_[0-9]+);`,
+		).FindStringSubmatch(out)
+
+	if len(breakGoto) != 2 {
 		t.Fatalf(
 			"expected one source-level break jump, got:\n%s",
 			out,
 		)
 	}
 
+	continueLabel :=
+		continueGoto[1] + ": ;"
+
 	if strings.Count(
 		out,
-		": ;",
-	) < 4 {
+		continueLabel,
+	) != 1 {
 		t.Fatalf(
-			"expected break and continue labels for both nested loops, got:\n%s",
+			"expected continue jump to target exactly one emitted label %q, got:\n%s",
+			continueLabel,
+			out,
+		)
+	}
+
+	breakLabel :=
+		breakGoto[1] + ": ;"
+
+	if strings.Count(
+		out,
+		breakLabel,
+	) != 1 {
+		t.Fatalf(
+			"expected break jump to target exactly one emitted label %q, got:\n%s",
+			breakLabel,
+			out,
+		)
+	}
+
+	if strings.Count(
+		out,
+		"__seal_loop_continue_",
+	) != 2 {
+		t.Fatalf(
+			"expected only the inner loop continue goto and label, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Count(
+		out,
+		"__seal_loop_break_",
+	) != 2 {
+		t.Fatalf(
+			"expected only the inner loop break goto and label, got:\n%s",
 			out,
 		)
 	}
@@ -8856,6 +8899,248 @@ Main :: task() {
 	) {
 		t.Fatalf(
 			"expected assignment from multi-result call, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateInfiniteReturningLoopOmitsUnusedBreakLabel(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Result :: task(
+    succeed bool,
+) (int, bool) {
+    for {
+        if succeed {
+            return 42, true
+        }
+
+        return 0, false
+    }
+}
+
+Main :: task() {
+    value, valid := Result(true)
+
+    assert(valid)
+    assert(value == 42)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"__seal_loop_break_",
+	) {
+		t.Fatalf(
+			"loop without break must not emit a break label, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedC(t, out)
+	runGeneratedC(t, out)
+}
+
+func TestGenerateLoopWithBreakEmitsBreakLabel(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    count := 0
+
+    for {
+        count += 1
+
+        if count == 3 {
+            break
+        }
+    }
+
+    assert(count == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"goto __seal_loop_break_",
+	) {
+		t.Fatalf(
+			"expected generated goto for break, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"__seal_loop_break_",
+	) {
+		t.Fatalf(
+			"expected generated break target, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateLoopWithoutContinueOmitsContinueLabel(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    count := 0
+
+    for count < 3 {
+        count += 1
+    }
+
+    assert(count == 3)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if strings.Contains(
+		out,
+		"__seal_loop_continue_",
+	) {
+		t.Fatalf(
+			"loop without continue must not emit a continue label, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateLoopWithContinueEmitsContinueLabel(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    count := 0
+    total := 0
+
+    for count < 5 {
+        count += 1
+
+        if count == 3 {
+            continue
+        }
+
+        total += count
+    }
+
+    assert(total == 12)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"goto __seal_loop_continue_",
+	) {
+		t.Fatalf(
+			"expected generated goto for continue, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"__seal_loop_continue_",
+	) {
+		t.Fatalf(
+			"expected generated continue target, got:\n%s",
+			out,
+		)
+	}
+
+	runGeneratedC(t, out)
+}
+
+func TestGenerateNestedLoopsTrackUsedLabelsSeparately(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+Main :: task() {
+    outer := 0
+    total := 0
+
+    for outer < 3 {
+        outer += 1
+        inner := 0
+
+        for inner < 4 {
+            inner += 1
+
+            if inner == 2 {
+                continue
+            }
+
+            if inner == 4 {
+                break
+            }
+
+            total += 1
+        }
+    }
+
+    assert(total == 6)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if strings.Count(
+		out,
+		"goto __seal_loop_continue_",
+	) != 1 {
+		t.Fatalf(
+			"expected one explicit continue goto in the inner loop, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Count(
+		out,
+		"goto __seal_loop_break_",
+	) != 1 {
+		t.Fatalf(
+			"expected one explicit break goto in the inner loop, got:\n%s",
 			out,
 		)
 	}
