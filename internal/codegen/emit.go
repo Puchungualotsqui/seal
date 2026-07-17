@@ -2628,6 +2628,30 @@ func (g *Generator) emitContinueStmt(
 	)
 }
 
+func (g *Generator) emitValueSwitchCaseBody(
+	swCase ast.SwitchCase,
+) {
+	g.indent++
+	g.line("{")
+	g.indent++
+
+	oldScope := g.scope
+	g.scope = newScope(oldScope)
+
+	for _, stmt := range swCase.Body {
+		g.emitStmt(stmt)
+	}
+
+	g.emitDefersInScope(g.scope)
+	g.line("break;")
+
+	g.scope = oldScope
+
+	g.indent--
+	g.line("}")
+	g.indent--
+}
+
 func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 	if s.IsTypeSwitch {
 		g.emitAnyTypeSwitchStmt(s)
@@ -2685,21 +2709,9 @@ func (g *Generator) emitSwitchStmt(s *ast.SwitchStmt) {
 			continue
 		}
 
-		g.indent++
-
-		oldScope := g.scope
-		g.scope = newScope(oldScope)
-
-		for _, stmt := range swCase.Body {
-			g.emitStmt(stmt)
-		}
-
-		g.emitDefersInScope(g.scope)
-		g.line("break;")
-
-		g.scope = oldScope
-
-		g.indent--
+		g.emitValueSwitchCaseBody(
+			swCase,
+		)
 	}
 
 	g.indent--

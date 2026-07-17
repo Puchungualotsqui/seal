@@ -1199,14 +1199,21 @@ func (g *Generator) emitExpr(
 
 	case *ast.SelectorExpr:
 		if id, ok :=
-			e.Left.(*ast.IdentExpr); ok {
-			if _, ok :=
-				g.packages[id.Name.Name]; ok {
-				return cPackageTaskName(
-					id.Name.Name,
+			e.Left.(*ast.IdentExpr); ok &&
+			g.isPackageQualifier(
+				id.Name.Name,
+			) {
+			if id.Name.Name ==
+				g.packageName {
+				return g.cTaskName(
 					e.Name.Name,
 				)
 			}
+
+			return cPackageTaskName(
+				id.Name.Name,
+				e.Name.Name,
+			)
 		}
 
 		left := g.emitExpr(
@@ -2211,10 +2218,22 @@ func (g *Generator) emitCallExprWithArgs(
 		e.Callee.(*ast.SelectorExpr); ok {
 		if id, ok :=
 			selector.Left.(*ast.IdentExpr); ok {
-			if pkg :=
-				g.packages[id.Name.Name]; pkg != nil {
+			packageName := id.Name.Name
+
+			if g.isPackageQualifier(
+				packageName,
+			) {
+				if packageName ==
+					g.packageName {
+					return g.emitTaskCall(
+						selector.Name.Name,
+						e.Args,
+						preparedArgs,
+					)
+				}
+
 				return g.emitPackageTaskCall(
-					id.Name.Name,
+					packageName,
 					selector.Name.Name,
 					e.Args,
 					preparedArgs,

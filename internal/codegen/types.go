@@ -1355,17 +1355,36 @@ func (g *Generator) inferCallExprType(
 		if id, ok :=
 			selector.Left.(*ast.IdentExpr); ok {
 			packageName := id.Name.Name
+			taskName := selector.Name.Name
+
+			/*
+				A task may be explicitly qualified with the package currently
+				being generated:
+
+				    io.ByteSpanIsValid(value)
+
+				The current package is not necessarily present in g.packages,
+				because that map primarily contains imported dependencies.
+			*/
+			if packageName == g.packageName {
+				if info, exists :=
+					g.tasks[taskName]; exists {
+					return info.ReturnType
+				}
+
+				return CInvalid
+			}
 
 			if pkg :=
 				g.typePackageInfo(
 					packageName,
 				); pkg != nil {
-				if rawInfo, ok :=
-					pkg.Tasks[selector.Name.Name]; ok {
+				if rawInfo, exists :=
+					pkg.Tasks[taskName]; exists {
 					info :=
 						g.taskInfoInPackageContext(
 							packageName,
-							selector.Name.Name,
+							taskName,
 							rawInfo,
 						)
 
@@ -1862,6 +1881,28 @@ func isOperatorName(name string) bool {
 
 func isBuiltinTypeName(name string) bool {
 	return builtin.IsType(name)
+}
+
+func (g *Generator) isPackageQualifier(
+	name string,
+) bool {
+	if name == "" {
+		return false
+	}
+
+	// A local value shadows a package name.
+	if g.scope != nil {
+		if _, exists :=
+			g.scope.lookup(name); exists {
+			return false
+		}
+	}
+
+	if name == g.packageName {
+		return true
+	}
+
+	return g.typePackageInfo(name) != nil
 }
 
 func (g *Generator) isLocalValueName(name string) bool {
