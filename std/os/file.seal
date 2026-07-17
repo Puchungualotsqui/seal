@@ -8,6 +8,27 @@ SeekOrigin :: enum {
 }
 
 /*
+_SeekOriginToInt converts a SeekOrigin into the integer representation
+expected by the native OS bridge.
+*/
+_SeekOriginToInt :: pure task(
+    origin SeekOrigin,
+) int {
+    switch origin {
+    case .Start:
+        return 0
+
+    case .Current:
+        return 1
+
+    case .End:
+        return 2
+    }
+
+    return 0
+}
+
+/*
 OpenOptions controls how OpenFile opens a filesystem path.
 
 At least one of Read or Write must be true.
@@ -438,7 +459,9 @@ FileSeek :: task(
         _SeekFileStream(
             file._handle,
             offset,
-            cast<int>(origin),
+            _SeekOriginToInt(
+                origin,
+            ),
             &position,
             &nativeError,
         )

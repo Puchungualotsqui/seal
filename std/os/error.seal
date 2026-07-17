@@ -46,6 +46,66 @@ _ErrorKindFromNative ::
     ) int
 
 /*
+_ErrorKindFromInt converts the native portable error classification into
+an ErrorKind.
+
+Unknown integer values are mapped to ErrorKind.Unknown.
+*/
+_ErrorKindFromInt :: pure task(
+    value int,
+) ErrorKind {
+    switch value {
+    case 0:
+        return .None
+
+    case 1:
+        return .NotFound
+
+    case 2:
+        return .AlreadyExists
+
+    case 3:
+        return .PermissionDenied
+
+    case 4:
+        return .InvalidArgument
+
+    case 5:
+        return .InvalidPath
+
+    case 6:
+        return .NotDirectory
+
+    case 7:
+        return .IsDirectory
+
+    case 8:
+        return .DirectoryNotEmpty
+
+    case 9:
+        return .Interrupted
+
+    case 10:
+        return .OutOfMemory
+
+    case 11:
+        return .InputOutput
+
+    case 12:
+        return .Overflow
+
+    case 13:
+        return .Unsupported
+
+    case 14:
+        return .Unknown
+
+    default:
+        return .Unknown
+    }
+}
+
+/*
 NoError returns the successful error value.
 */
 NoError :: pure task() Error {
@@ -85,7 +145,7 @@ _ErrorFromNative :: pure task(
         )
 
     return Error{
-        Kind = cast<ErrorKind>(
+        Kind = _ErrorKindFromInt(
             kindValue,
         ),
         NativeCode = nativeCode,

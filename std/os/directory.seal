@@ -236,7 +236,7 @@ ReadDirectory :: task(
             &result._values,
             DirectoryEntry{
                 Name = name,
-                Type = cast<FileType>(
+                Type = _FileTypeFromInt(
                     fileType,
                 ),
             },

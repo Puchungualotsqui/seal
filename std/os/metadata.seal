@@ -26,6 +26,33 @@ FileInfo :: struct {
 }
 
 /*
+_FileTypeFromInt converts the native portable file-type value into a
+FileType.
+
+Unknown integer values are mapped to FileType.Other.
+*/
+_FileTypeFromInt :: pure task(
+    value int,
+) FileType {
+    switch value {
+    case 0:
+        return .Regular
+
+    case 1:
+        return .Directory
+
+    case 2:
+        return .Symlink
+
+    case 3:
+        return .Other
+
+    default:
+        return .Other
+    }
+}
+
+/*
 _Stat obtains native filesystem metadata.
 
 followSymlinks selects whether metadata describes a symbolic link or its
@@ -79,7 +106,7 @@ _StatPath :: task(
     }
 
     return FileInfo{
-        Type = cast<FileType>(
+        Type = _FileTypeFromInt(
             fileType,
         ),
         Size = size,
