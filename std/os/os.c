@@ -19,7 +19,6 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
-#include <shellapi.h>
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
@@ -519,6 +518,211 @@ static bool seal_os_wide_to_utf8(
     return true;
 }
 
+/*
+Windows command-line parsing compatible with CommandLineToArgvW rules.
+
+The returned array and all argument strings are stored in one allocation.
+Release it with free().
+*/
+static wchar_t **seal_os_windows_arguments(
+    int *output_count,
+    int *error
+) {
+    if (output_count != NULL) {
+        *output_count = 0;
+    }
+
+    if (error != NULL) {
+        *error = 0;
+    }
+
+    const wchar_t *command_line =
+        GetCommandLineW();
+
+    if (command_line == NULL) {
+        if (error != NULL) {
+            *error =
+                seal_os_errno_from_win32(
+                    GetLastError()
+                );
+        }
+
+        return NULL;
+    }
+
+    size_t command_length =
+        wcslen(command_line);
+
+    if (command_length >
+        (SIZE_MAX / sizeof(wchar_t *)) - 1) {
+        if (error != NULL) {
+            *error = EOVERFLOW;
+        }
+
+        return NULL;
+    }
+
+    /*
+    There cannot be more arguments than UTF-16 code units plus one.
+    Store the pointer table and copied argument text in one allocation.
+    */
+    size_t pointer_capacity =
+        command_length + 1;
+
+    if (pointer_capacity >
+        SIZE_MAX / sizeof(wchar_t *)) {
+        if (error != NULL) {
+            *error = EOVERFLOW;
+        }
+
+        return NULL;
+    }
+
+    size_t pointer_bytes =
+        pointer_capacity *
+        sizeof(wchar_t *);
+
+    if (command_length >
+        (SIZE_MAX / sizeof(wchar_t)) - 1) {
+        if (error != NULL) {
+            *error = EOVERFLOW;
+        }
+
+        return NULL;
+    }
+
+    size_t text_bytes =
+        (command_length + 1) *
+        sizeof(wchar_t);
+
+    if (pointer_bytes >
+        SIZE_MAX - text_bytes) {
+        if (error != NULL) {
+            *error = EOVERFLOW;
+        }
+
+        return NULL;
+    }
+
+    unsigned char *allocation =
+        malloc(
+            pointer_bytes +
+            text_bytes
+        );
+
+    if (allocation == NULL) {
+        if (error != NULL) {
+            *error = ENOMEM;
+        }
+
+        return NULL;
+    }
+
+    wchar_t **arguments =
+        (wchar_t **)allocation;
+
+    wchar_t *text =
+        (wchar_t *)(
+            allocation +
+            pointer_bytes
+        );
+
+    const wchar_t *read =
+        command_line;
+
+    wchar_t *write =
+        text;
+
+    int count = 0;
+
+    while (*read != L'\0') {
+        while (*read == L' ' ||
+               *read == L'\t') {
+            read++;
+        }
+
+        if (*read == L'\0') {
+            break;
+        }
+
+        arguments[count++] =
+            write;
+
+        bool quoted = false;
+
+        for (;;) {
+            size_t slash_count = 0;
+
+            while (*read == L'\\') {
+                slash_count++;
+                read++;
+            }
+
+            if (*read == L'"') {
+                size_t literal_slashes =
+                    slash_count / 2;
+
+                for (size_t index = 0;
+                     index < literal_slashes;
+                     index++) {
+                    *write++ = L'\\';
+                }
+
+                if ((slash_count % 2) != 0) {
+                    *write++ = L'"';
+                    read++;
+                    continue;
+                }
+
+                if (quoted &&
+                    read[1] == L'"') {
+                    *write++ = L'"';
+                    read += 2;
+                    continue;
+                }
+
+                quoted = !quoted;
+                read++;
+                continue;
+            }
+
+            for (size_t index = 0;
+                 index < slash_count;
+                 index++) {
+                *write++ = L'\\';
+            }
+
+            if (*read == L'\0') {
+                break;
+            }
+
+            if (!quoted &&
+                (*read == L' ' ||
+                 *read == L'\t')) {
+                break;
+            }
+
+            *write++ =
+                *read++;
+        }
+
+        *write++ = L'\0';
+
+        while (*read == L' ' ||
+               *read == L'\t') {
+            read++;
+        }
+    }
+
+    arguments[count] = NULL;
+
+    if (output_count != NULL) {
+        *output_count = count;
+    }
+
+    return arguments;
+}
+
 #endif
 
 void seal_os_free_buffer(
@@ -816,25 +1020,24 @@ bool seal_os_argument_count(
 #ifdef _WIN32
 
     int count = 0;
+    int native_error = 0;
 
     wchar_t **arguments =
-        CommandLineToArgvW(
-            GetCommandLineW(),
-            &count
+        seal_os_windows_arguments(
+            &count,
+            &native_error
         );
 
     if (arguments == NULL) {
         seal_os_set_error(
             output_error,
-            seal_os_errno_from_win32(
-                GetLastError()
-            )
+            native_error
         );
 
         return false;
     }
 
-    LocalFree(arguments);
+    free(arguments);
 
     if (output_count != NULL) {
         *output_count =
@@ -935,27 +1138,25 @@ bool seal_os_argument(
 #ifdef _WIN32
 
     int count = 0;
+    int native_error = 0;
 
     wchar_t **arguments =
-        CommandLineToArgvW(
-            GetCommandLineW(),
-            &count
+        seal_os_windows_arguments(
+            &count,
+            &native_error
         );
 
     if (arguments == NULL) {
         seal_os_set_error(
             output_error,
-            seal_os_errno_from_win32(
-                GetLastError()
-            )
+            native_error
         );
 
         return false;
     }
 
     if (index >= (uintptr_t)count) {
-        LocalFree(arguments);
-
+        free(arguments);
         return true;
     }
 
@@ -976,7 +1177,7 @@ bool seal_os_argument(
             &conversion_error
         );
 
-    LocalFree(arguments);
+    free(arguments);
 
     if (!converted) {
         seal_os_set_error(
@@ -1016,7 +1217,6 @@ bool seal_os_argument(
 
     if (index >= (uintptr_t)count) {
         free(data);
-
         return true;
     }
 
@@ -2363,43 +2563,106 @@ bool seal_os_seek_file_stream(
     FILE *stream =
         (FILE *)handle;
 
-#ifdef _WIN32
+    #ifdef _WIN32
 
-    if (_fseeki64(
-            stream,
-            offset,
-            native_origin
-        ) != 0) {
-        seal_os_set_error(
-            output_error,
-            errno != 0
-                ? errno
-                : EIO
-        );
+        /*
+        TCC's runtime may not export _ftelli64. Use the Windows file handle
+        directly after synchronizing the C stream.
+        */
+        if (fflush(stream) != 0) {
+            seal_os_set_error(
+                output_error,
+                errno != 0
+                    ? errno
+                    : EIO
+            );
 
-        return false;
-    }
+            return false;
+        }
 
-    __int64 position =
-        _ftelli64(stream);
+        int descriptor =
+            _fileno(stream);
 
-    if (position < 0) {
-        seal_os_set_error(
-            output_error,
-            errno != 0
-                ? errno
-                : EIO
-        );
+        if (descriptor < 0) {
+            seal_os_set_error(
+                output_error,
+                errno != 0
+                    ? errno
+                    : EIO
+            );
 
-        return false;
-    }
+            return false;
+        }
 
-    if (output_position != NULL) {
-        *output_position =
-            (uint64_t)position;
-    }
+        intptr_t native_handle_value =
+            _get_osfhandle(
+                descriptor
+            );
 
-#else
+        if (native_handle_value == -1) {
+            seal_os_set_error(
+                output_error,
+                errno != 0
+                    ? errno
+                    : EIO
+            );
+
+            return false;
+        }
+
+        HANDLE native_handle =
+            (HANDLE)native_handle_value;
+
+        LARGE_INTEGER distance;
+        LARGE_INTEGER position;
+
+        distance.QuadPart =
+            offset;
+
+        DWORD move_method =
+            origin == 0
+                ? FILE_BEGIN
+                : origin == 1
+                    ? FILE_CURRENT
+                    : FILE_END;
+
+        if (!SetFilePointerEx(
+                native_handle,
+                distance,
+                &position,
+                move_method
+            )) {
+            seal_os_set_error(
+                output_error,
+                seal_os_errno_from_win32(
+                    GetLastError()
+                )
+            );
+
+            return false;
+        }
+
+        if (position.QuadPart < 0) {
+            seal_os_set_error(
+                output_error,
+                EINVAL
+            );
+
+            return false;
+        }
+
+        /*
+        Reset the C stream state after moving its underlying native handle.
+        */
+        clearerr(stream);
+
+        if (output_position != NULL) {
+            *output_position =
+                (uint64_t)
+                    position.QuadPart;
+        }
+
+    #else
 
     if (fseeko(
             stream,
