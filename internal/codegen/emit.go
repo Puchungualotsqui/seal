@@ -2009,6 +2009,16 @@ func (g *Generator) packageTaskSignature(
 		info,
 	)
 
+	if declaration, foreign :=
+		g.foreignTaskDeclaration(
+			info,
+			name,
+			info.ParamNames,
+			taskInfoSpan(info),
+		); foreign {
+		return declaration
+	}
+
 	ret := info.ReturnType.Name
 
 	if len(info.ParamTypes) == 0 {
@@ -2019,7 +2029,7 @@ func (g *Generator) packageTaskSignature(
 		)
 	}
 
-	var params []string
+	params := make([]string, 0, len(info.ParamTypes))
 
 	for i, paramType := range info.ParamTypes {
 		if i < len(info.ParamIsVariadic) &&
@@ -2029,20 +2039,28 @@ func (g *Generator) packageTaskSignature(
 				break
 			}
 
+			paramName := fmt.Sprintf("arg%d", i)
+			if i < len(info.ParamNames) &&
+				info.ParamNames[i] != "" {
+				paramName = info.ParamNames[i]
+			}
+
 			params = append(
 				params,
-				g.variadicCType(paramType).Decl(
-					fmt.Sprintf("arg%d", i),
-				),
+				g.variadicCType(paramType).Decl(paramName),
 			)
 			break
 		}
 
+		paramName := fmt.Sprintf("arg%d", i)
+		if i < len(info.ParamNames) &&
+			info.ParamNames[i] != "" {
+			paramName = info.ParamNames[i]
+		}
+
 		params = append(
 			params,
-			paramType.Decl(
-				fmt.Sprintf("arg%d", i),
-			),
+			paramType.Decl(paramName),
 		)
 	}
 
@@ -2054,18 +2072,39 @@ func (g *Generator) packageTaskSignature(
 	)
 }
 
-func (g *Generator) taskSignature(d *ast.TaskDecl, definition bool) string {
+func (g *Generator) taskSignature(
+	d *ast.TaskDecl,
+	definition bool,
+) string {
 	info := g.tasks[d.Name.Name]
 
-	name := g.cTaskName(d.Name.Name)
-	if info.IsExtern && info.ExternName != "" {
+	name := g.cTaskName(
+		d.Name.Name,
+	)
+
+	if info.IsExtern &&
+		info.ExternName != "" {
 		name = info.ExternName
+	}
+
+	if declaration, foreign :=
+		g.foreignTaskDeclaration(
+			info,
+			name,
+			info.ParamNames,
+			d.Span(),
+		); foreign {
+		return declaration
 	}
 
 	ret := info.ReturnType.Name
 
 	if len(d.Params) == 0 {
-		return fmt.Sprintf("%s %s(void)", ret, name)
+		return fmt.Sprintf(
+			"%s %s(void)",
+			ret,
+			name,
+		)
 	}
 
 	var params []string

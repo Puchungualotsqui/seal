@@ -243,7 +243,8 @@ func (g *Generator) packageHasType(pkg *PackageInfo, typeName string) bool {
 		pkg.Distincts[typeName] != nil ||
 		pkg.Enums[typeName] != nil ||
 		pkg.Unions[typeName] != nil ||
-		pkg.Interfaces[typeName] != nil {
+		pkg.Interfaces[typeName] != nil ||
+		pkg.ForeignTypes[typeName] != nil {
 		return true
 	}
 
@@ -287,7 +288,9 @@ func sanitizeCName(name string) string {
 	return b.String()
 }
 
-func (g *Generator) cTypeFromAst(t ast.Type) CType {
+func (g *Generator) cTypeFromAst(
+	t ast.Type,
+) CType {
 	switch typ := t.(type) {
 	case *ast.NamedType:
 		if len(typ.Parts) == 0 {
@@ -295,13 +298,15 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 		}
 
 		if len(typ.Parts) >= 2 {
-			pkgName := typ.Parts[0].Name
+			pkgName :=
+				typ.Parts[0].Name
+
 			typeName :=
 				typ.Parts[len(typ.Parts)-1].Name
 
 			/*
-				A type can be explicitly qualified with the package currently being
-				generated:
+				A type can be explicitly qualified with the package currently
+				being generated:
 
 				    io.ByteSpan
 
@@ -312,7 +317,17 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 				package is materialized into the interface-owning package.
 			*/
 			if pkgName == g.packageName {
-				if iface := g.interfaces[typeName]; iface != nil {
+				if foreign :=
+					g.foreignTypes[typeName]; foreign != nil {
+					return g.foreignCType(
+						g.packageName,
+						typeName,
+						foreign,
+					)
+				}
+
+				if iface :=
+					g.interfaces[typeName]; iface != nil {
 					instance :=
 						g.registerInterfaceInstance(
 							g.packageName,
@@ -326,9 +341,12 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 					}
 
 					return CType{
-						Name:           instance.CName,
-						SealName:       instance.Key,
-						IsInterface:    true,
+						Name: instance.CName,
+
+						SealName: instance.Key,
+
+						IsInterface: true,
+
 						IsDynInterface: instance.IsDyn,
 					}
 				}
@@ -340,37 +358,52 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			}
 
 			if pkg :=
-				g.typePackageInfo(pkgName); pkg != nil &&
-				g.packageHasType(pkg, typeName) {
+				g.typePackageInfo(
+					pkgName,
+				); pkg != nil &&
+				g.packageHasType(
+					pkg,
+					typeName,
+				) {
 				return g.importedNamedCType(
 					pkgName,
 					typeName,
 				)
 			}
 
+			importedName :=
+				cImportedTypeName(
+					pkgName,
+					typeName,
+				)
+
 			return CType{
-				Name: cImportedTypeName(
-					pkgName,
-					typeName,
-				),
-				SealName: cImportedTypeName(
-					pkgName,
-					typeName,
-				),
+				Name:     importedName,
+				SealName: importedName,
 			}
 		}
 
 		name :=
 			typ.Parts[len(typ.Parts)-1].Name
 
-		// Only a foreign type context produces an imported C name.
+		/*
+			An unqualified type emitted while processing declarations belonging
+			to another package belongs to that package before it belongs to the
+			package currently being generated.
+
+			This includes imported foreign types.
+		*/
 		if g.typeContextPackage != "" &&
-			g.typeContextPackage != g.packageName {
+			g.typeContextPackage !=
+				g.packageName {
 			if pkg :=
 				g.typePackageInfo(
 					g.typeContextPackage,
 				); pkg != nil &&
-				g.packageHasType(pkg, name) {
+				g.packageHasType(
+					pkg,
+					name,
+				) {
 				return g.importedNamedCType(
 					g.typeContextPackage,
 					name,
@@ -379,21 +412,34 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 		}
 
 		if spec, ok :=
-			builtin.LookupType(name); ok {
+			builtin.LookupType(
+				name,
+			); ok {
 			return CType{
 				Name:     spec.CName,
 				SealName: spec.Name,
 			}
 		}
 
-		if _, ok := g.distincts[name]; ok {
+		if foreign :=
+			g.foreignTypes[name]; foreign != nil {
+			return g.foreignCType(
+				g.packageName,
+				name,
+				foreign,
+			)
+		}
+
+		if _, ok :=
+			g.distincts[name]; ok {
 			return CType{
 				Name:     name,
 				SealName: name,
 			}
 		}
 
-		if iface := g.interfaces[name]; iface != nil {
+		if iface :=
+			g.interfaces[name]; iface != nil {
 			instance :=
 				g.registerInterfaceInstance(
 					g.packageName,
@@ -407,9 +453,12 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			}
 
 			return CType{
-				Name:           instance.CName,
-				SealName:       instance.Key,
-				IsInterface:    true,
+				Name: instance.CName,
+
+				SealName: instance.Key,
+
+				IsInterface: true,
+
 				IsDynInterface: instance.IsDyn,
 			}
 		}
@@ -430,17 +479,26 @@ func (g *Generator) cTypeFromAst(t ast.Type) CType {
 			typ.Span(),
 			`interface "self" requires interface requirement or impl context`,
 		)
+
 		return CInvalid
 
 	case *ast.PointerType:
-		elem := g.cTypeFromAst(
-			typ.Elem,
-		)
+		elem :=
+			g.cTypeFromAst(
+				typ.Elem,
+			)
+
+		if isInvalidCType(elem) {
+			return CInvalid
+		}
 
 		return CType{
-			Name:     elem.Name + " *",
-			SealName: "*" + elem.SealName,
-			Elem:     &elem,
+			Name: elem.Name + " *",
+
+			SealName: "*" +
+				elem.SealName,
+
+			Elem: &elem,
 		}
 
 	case *ast.GenericType:
@@ -461,7 +519,19 @@ func (g *Generator) importedNamedCType(
 		typeName,
 	)
 
-	if pkg := g.typePackageInfo(packageName); pkg != nil {
+	if pkg :=
+		g.typePackageInfo(
+			packageName,
+		); pkg != nil {
+		if foreign :=
+			pkg.ForeignTypes[typeName]; foreign != nil {
+			return g.foreignCType(
+				packageName,
+				typeName,
+				foreign,
+			)
+		}
+
 		if iface := pkg.Interfaces[typeName]; iface != nil {
 			instance := g.registerInterfaceInstance(
 				packageName,
@@ -1475,6 +1545,18 @@ func (g *Generator) inferExprType(
 			}
 		}
 
+		if value,
+			packageName,
+			ok :=
+			g.foreignValueInContext(
+				e.Name.Name,
+			); ok {
+			return g.foreignValueType(
+				value,
+				packageName,
+			)
+		}
+
 		if typ, ok :=
 			g.consts[e.Name.Name]; ok {
 			return typ
@@ -1554,6 +1636,9 @@ func (g *Generator) inferExprType(
 		}
 
 		return CNil
+
+	case *ast.TaskPointerExpr:
+		return CRawptr
 
 	case *ast.UnaryExpr:
 		inner :=
@@ -1671,10 +1756,29 @@ func (g *Generator) inferExprType(
 			e.Left.(*ast.IdentExpr); ok {
 			packageName := id.Name.Name
 
+			if packageName ==
+				g.packageName {
+				if value :=
+					g.foreignValues[e.Name.Name]; value != nil {
+					return g.foreignValueType(
+						value,
+						g.packageName,
+					)
+				}
+			}
+
 			if pkg :=
 				g.typePackageInfo(
 					packageName,
 				); pkg != nil {
+				if value :=
+					pkg.ForeignValues[e.Name.Name]; value != nil {
+					return g.foreignValueType(
+						value,
+						packageName,
+					)
+				}
+
 				if rawInfo, ok :=
 					pkg.Tasks[e.Name.Name]; ok {
 					info :=

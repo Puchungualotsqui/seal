@@ -34,6 +34,8 @@ type TaskInfo struct {
 	IsPure        bool
 	IsIntrinsic   bool
 	IsTrustedPure bool
+
+	ForeignABI *ForeignTaskABIInfo
 }
 
 type PackageInfo struct {
@@ -47,9 +49,12 @@ type PackageInfo struct {
 	Unions     map[string]*ast.UnionDecl
 	Interfaces map[string]*ast.InterfaceDecl
 
+	ForeignTypes    map[string]*ForeignTypeInfo
+	ForeignValues   map[string]*ForeignValueInfo
+	ForeignTaskABIs map[string]*ForeignTaskABIInfo
+
 	Impls []*ast.ImplDecl
 
-	// Needed when an imported generic task body is materialized by CGen.
 	MultiVarDeclResolutions map[*ast.MultiVarDeclStmt]checker.MultiVarDeclResolution
 }
 
@@ -140,6 +145,12 @@ type Generator struct {
 	resolvingImpls map[string]bool
 
 	implDecls []*ast.ImplDecl
+
+	taskPointerResolutions map[*ast.TaskPointerExpr]checker.TaskPointerResolution
+
+	foreignTypes    map[string]*ForeignTypeInfo
+	foreignValues   map[string]*ForeignValueInfo
+	foreignTaskABIs map[string]*ForeignTaskABIInfo
 }
 
 func New(diags *diag.Reporter) *Generator {
@@ -221,6 +232,13 @@ func NewWithPackagesAndSemanticInfo(
 		resolvedImpls:                 map[string]*ResolvedImplInstance{},
 		resolvingImpls:                map[string]bool{},
 		implDecls:                     nil,
+		taskPointerResolutions: cloneTaskPointerResolutions(
+			semantic.TaskPointerResolutions,
+		),
+
+		foreignTypes:    map[string]*ForeignTypeInfo{},
+		foreignValues:   map[string]*ForeignValueInfo{},
+		foreignTaskABIs: map[string]*ForeignTaskABIInfo{},
 	}
 }
 
@@ -391,6 +409,25 @@ func cloneGenericOverloadCalls(
 	return out
 }
 
+func cloneTaskPointerResolutions(
+	input map[*ast.TaskPointerExpr]checker.TaskPointerResolution,
+) map[*ast.TaskPointerExpr]checker.TaskPointerResolution {
+	if len(input) == 0 {
+		return map[*ast.TaskPointerExpr]checker.TaskPointerResolution{}
+	}
+
+	out := make(
+		map[*ast.TaskPointerExpr]checker.TaskPointerResolution,
+		len(input),
+	)
+
+	for expr, resolution := range input {
+		out[expr] = resolution
+	}
+
+	return out
+}
+
 func (g *Generator) multiVarDeclResolutionFor(
 	stmt *ast.MultiVarDeclStmt,
 ) (
@@ -479,10 +516,16 @@ func ExportPackageInfoWithSemanticInfo(
 		Enums:      g.enums,
 		Unions:     g.unions,
 		Interfaces: g.interfaces,
+
+		ForeignTypes:    g.foreignTypes,
+		ForeignValues:   g.foreignValues,
+		ForeignTaskABIs: g.foreignTaskABIs,
+
 		Impls: append(
 			[]*ast.ImplDecl(nil),
 			g.implDecls...,
 		),
+
 		MultiVarDeclResolutions: cloneMultiVarDeclResolutions(
 			g.multiVarDeclResolutions,
 		),
@@ -685,6 +728,43 @@ func (g *Generator) collect(file *ast.File) {
 			if info != nil {
 				g.implTemplates = append(g.implTemplates, info)
 			}
+
+		case *ast.ForeignTypeDecl:
+			g.foreignTypes[d.Name.Name] =
+				&ForeignTypeInfo{
+					Name:        d.Name.Name,
+					PackageName: g.packageName,
+					CType: renderForeignTokenSequence(
+						d.CType,
+					),
+					Loc: d.Span(),
+				}
+
+		case *ast.ForeignValueDecl:
+			g.foreignValues[d.Name.Name] =
+				&ForeignValueInfo{
+					Name:        d.Name.Name,
+					PackageName: g.packageName,
+					Type:        d.Type,
+					CValue: renderForeignTokenSequence(
+						d.CValue,
+					),
+					Loc: d.Span(),
+				}
+
+		case *ast.ForeignTaskDecl:
+			g.foreignTaskABIs[d.Name.Name] =
+				&ForeignTaskABIInfo{
+					Name:        d.Name.Name,
+					PackageName: g.packageName,
+					Declaration: renderForeignTokenSequence(
+						d.Declaration,
+					),
+					Address: renderForeignTokenSequence(
+						d.Address,
+					),
+					Loc: d.Span(),
+				}
 		}
 	}
 
@@ -709,6 +789,9 @@ func (g *Generator) collect(file *ast.File) {
 				IsPure:         d.IsPure,
 				IsIntrinsic:    d.IsIntrinsic,
 				IsTrustedPure:  d.IsTrustedPure,
+				ForeignABI: g.foreignTaskABIFromExpr(
+					d.ForeignABI,
+				),
 			}
 
 			for _, param := range d.Params {

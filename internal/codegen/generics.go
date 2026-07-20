@@ -426,7 +426,10 @@ func (g *Generator) semanticTaskSelection(
 			packageName != g.packageName
 
 	if isImported {
-		pkg := g.packages[packageName]
+		pkg :=
+			g.typePackageInfo(
+				packageName,
+			)
 		if pkg == nil {
 			g.error(
 				span,
@@ -1373,6 +1376,38 @@ func (g *Generator) collectGenericStructInstancesFromExpr(
 			g.collectGenericStructInstancesFromExpr(value)
 		}
 
+	case *ast.TaskPointerExpr:
+		resolution, ok :=
+			g.taskPointerResolutions[e]
+
+		if !ok {
+			g.error(
+				e.Span(),
+				"missing checker resolution for @task_pointer",
+			)
+			return
+		}
+
+		if resolution.Candidate == nil {
+			g.error(
+				e.Span(),
+				"checker resolution for @task_pointer has no task candidate",
+			)
+			return
+		}
+
+		/*
+			This registers a generic specialization when needed. The returned
+			name and TaskInfo are not needed during discovery.
+		*/
+		_, _, _ =
+			g.semanticTaskSelection(
+				resolution.Candidate,
+				resolution.PackageName,
+				resolution.GenericArguments,
+				e.Span(),
+			)
+
 	case *ast.CallExpr:
 		g.collectGenericStructInstancesFromExpr(e.Callee)
 
@@ -1800,6 +1835,16 @@ func (g *Generator) substituteExprForCGen(
 			Loc:    e.Loc,
 		}
 
+	case *ast.TaskPointerExpr:
+		/*
+			Keep the original node.
+
+			Task-pointer semantic resolutions are keyed by AST node identity.
+			semanticTaskSelection applies g.genericSubst when the expression is
+			processed, so this node does not need to be structurally rewritten.
+		*/
+		return e
+
 	case *ast.UnaryExpr:
 		return &ast.UnaryExpr{
 			Op: e.Op,
@@ -2071,17 +2116,27 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 		switch arg.Kind {
 		case ast.GenericArgExpr:
 			if id, ok := arg.Expr.(*ast.IdentExpr); ok {
-				if replacement, exists := g.genericSubst[id.Name.Name]; exists {
-					if genericArgIsSingleNameForCGen(replacement, id.Name.Name) {
+				if replacement, exists :=
+					g.genericSubst[id.Name.Name]; exists {
+					if genericArgIsSingleNameForCGen(
+						replacement,
+						id.Name.Name,
+					) {
 						return CInvalid
 					}
 
-					return g.cTypeFromGenericArgWithGenericArgs(replacement, g.genericSubst)
+					return g.cTypeFromGenericArgWithGenericArgs(
+						replacement,
+						g.genericSubst,
+					)
 				}
 			}
 
 		case ast.GenericArgType:
-			return g.cTypeFromAstWithGenericArgs(arg.Type, g.genericSubst)
+			return g.cTypeFromAstWithGenericArgs(
+				arg.Type,
+				g.genericSubst,
+			)
 		}
 	}
 
@@ -2098,57 +2153,155 @@ func (g *Generator) cTypeFromGenericArg(arg ast.GenericArg) CType {
 		case *ast.IdentExpr:
 			name := e.Name.Name
 
-			if spec, ok := builtin.LookupType(name); ok {
-				return CType{Name: spec.CName, SealName: spec.Name}
-			}
-
-			if _, ok := g.distincts[name]; ok {
-				return CType{Name: name, SealName: name}
-			}
-
-			if _, ok := g.structs[name]; ok {
-				return CType{Name: name, SealName: name}
-			}
-
-			if _, ok := g.enums[name]; ok {
-				return CType{Name: name, SealName: name}
-			}
-
-			if _, ok := g.unions[name]; ok {
-				return CType{Name: name, SealName: name}
-			}
-
-			if iface := g.interfaces[name]; iface != nil {
+			if spec, ok :=
+				builtin.LookupType(name); ok {
 				return CType{
-					Name:           name,
-					SealName:       name,
-					IsInterface:    true,
-					IsDynInterface: iface.IsDyn,
+					Name:     spec.CName,
+					SealName: spec.Name,
 				}
 			}
 
-			g.error(e.Span(), fmt.Sprintf("expected type argument, got %q", name))
+			/*
+				While lowering code originating in another package, an
+				unqualified type argument belongs to that package first.
+
+				For example, while specializing code from package threads:
+
+				    Use<ThreadResult>()
+
+				ThreadResult must resolve as threads.ThreadResult rather than
+				as a same-named type in the package currently being generated.
+			*/
+			if g.typeContextPackage != "" &&
+				g.typeContextPackage != g.packageName {
+				pkg :=
+					g.typePackageInfo(
+						g.typeContextPackage,
+					)
+
+				if pkg != nil &&
+					g.packageHasType(
+						pkg,
+						name,
+					) {
+					return g.importedNamedCType(
+						g.typeContextPackage,
+						name,
+					)
+				}
+			}
+
+			if foreign :=
+				g.foreignTypes[name]; foreign != nil {
+				return g.foreignCType(
+					g.packageName,
+					name,
+					foreign,
+				)
+			}
+
+			if _, ok :=
+				g.distincts[name]; ok {
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+
+			if _, ok :=
+				g.structs[name]; ok {
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+
+			if _, ok :=
+				g.enums[name]; ok {
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+
+			if _, ok :=
+				g.unions[name]; ok {
+				return CType{
+					Name:     name,
+					SealName: name,
+				}
+			}
+
+			if iface :=
+				g.interfaces[name]; iface != nil {
+				instance :=
+					g.registerInterfaceInstance(
+						g.packageName,
+						name,
+						iface,
+						nil,
+					)
+
+				if instance == nil {
+					return CInvalid
+				}
+
+				return CType{
+					Name:           instance.CName,
+					SealName:       instance.Key,
+					IsInterface:    true,
+					IsDynInterface: instance.IsDyn,
+				}
+			}
+
+			g.error(
+				e.Span(),
+				fmt.Sprintf(
+					"expected type argument, got %q",
+					name,
+				),
+			)
+
 			return CInvalid
 
 		case *ast.SelectorExpr:
-			if typ := typeAstFromExprForCGen(e); typ != nil {
-				return g.cTypeFromAstInContext(typ)
+			if typ :=
+				typeAstFromExprForCGen(e); typ != nil {
+				return g.cTypeFromAstInContext(
+					typ,
+				)
 			}
 
-			g.error(e.Span(), "expected type argument")
+			g.error(
+				e.Span(),
+				"expected type argument",
+			)
+
 			return CInvalid
 
 		case *ast.GenericExpr:
-			typ := typeAstFromExprForCGen(e)
+			typ :=
+				typeAstFromExprForCGen(e)
+
 			if typ == nil {
-				g.error(e.Span(), "expected type argument")
+				g.error(
+					e.Span(),
+					"expected type argument",
+				)
+
 				return CInvalid
 			}
 
-			return g.cTypeFromAstInContext(typ)
+			return g.cTypeFromAstInContext(
+				typ,
+			)
 
 		default:
-			g.error(arg.Span(), "expected type argument")
+			g.error(
+				arg.Span(),
+				"expected type argument",
+			)
+
 			return CInvalid
 		}
 	}
@@ -3178,7 +3331,9 @@ func (g *Generator) taskInfoFromGenericArg(
 	return TaskInfo{}, false
 }
 
-func (g *Generator) taskInfoFromImportedGenericTaskInstance(instance *ImportedGenericTaskInstance) TaskInfo {
+func (g *Generator) taskInfoFromImportedGenericTaskInstance(
+	instance *ImportedGenericTaskInstance,
+) TaskInfo {
 	if instance == nil {
 		return TaskInfo{
 			ReturnType:  CInvalid,
@@ -3186,68 +3341,135 @@ func (g *Generator) taskInfoFromImportedGenericTaskInstance(instance *ImportedGe
 		}
 	}
 
-	subst := genericArgSubstForCGen(instance.Info.GenericParams, instance.Args)
+	subst :=
+		genericArgSubstForCGen(
+			instance.Info.GenericParams,
+			instance.Args,
+		)
 
 	info := TaskInfo{
-		Decl:           nil,
-		GenericParams:  nil,
-		ReturnType:     g.importedGenericTaskReturnType(instance),
-		ReturnTypes:    g.importedGenericTaskReturnTypes(instance),
+		Decl: instance.Info.Decl,
+
+		GenericParams: nil,
+
+		ParamNames: append(
+			[]string(nil),
+			instance.Info.ParamNames...,
+		),
+
+		ReturnType: g.importedGenericTaskReturnType(
+			instance,
+		),
+
+		ReturnTypes: g.importedGenericTaskReturnTypes(
+			instance,
+		),
+
 		RequiredParams: instance.Info.RequiredParams,
-		IsExtern:       instance.Info.IsExtern,
-		ExternName:     instance.Info.ExternName,
-		IsPure:         instance.Info.IsPure,
-		IsIntrinsic:    instance.Info.IsIntrinsic,
-		IsTrustedPure:  instance.Info.IsTrustedPure,
+
+		IsExtern: instance.Info.IsExtern,
+
+		ExternName: instance.Info.ExternName,
+
+		IsPure: instance.Info.IsPure,
+
+		IsIntrinsic: instance.Info.IsIntrinsic,
+
+		IsTrustedPure: instance.Info.IsTrustedPure,
+
+		ForeignABI: instance.Info.ForeignABI,
 	}
 
-	if info.RequiredParams == 0 {
-		info.RequiredParams = len(instance.Info.ParamTypeAsts)
+	if info.RequiredParams == 0 &&
+		len(instance.Info.ParamTypeAsts) > 0 &&
+		len(instance.Info.ParamHasDefault) == 0 {
+		info.RequiredParams =
+			len(instance.Info.ParamTypeAsts)
 	}
 
-	g.withTypeContext(instance.PackageName, func() {
-		for i, paramAst := range instance.Info.ParamTypeAsts {
-			paramType := g.cTypeFromAstWithGenericArgs(paramAst, subst)
+	g.withTypeContext(
+		instance.PackageName,
+		func() {
+			for i, paramAst := range instance.Info.ParamTypeAsts {
+				paramType :=
+					g.cTypeFromAstWithGenericArgs(
+						paramAst,
+						subst,
+					)
 
-			info.ParamTypes = append(info.ParamTypes, paramType)
+				info.ParamTypes = append(
+					info.ParamTypes,
+					paramType,
+				)
 
-			hasDefault := false
-			if i < len(instance.Info.ParamHasDefault) {
-				hasDefault = instance.Info.ParamHasDefault[i]
-			}
+				hasDefault := false
 
-			isVariadic := false
-			if i < len(instance.Info.ParamIsVariadic) {
-				isVariadic = instance.Info.ParamIsVariadic[i]
-			}
+				if i <
+					len(instance.Info.ParamHasDefault) {
+					hasDefault =
+						instance.Info.ParamHasDefault[i]
+				}
 
-			info.ParamHasDefault = append(info.ParamHasDefault, hasDefault)
-			info.ParamIsVariadic = append(info.ParamIsVariadic, isVariadic)
+				isVariadic := false
 
-			if hasDefault && i < len(instance.Info.ParamDefaults) {
-				info.ParamDefaults = append(info.ParamDefaults, g.substituteExprForCGen(instance.Info.ParamDefaults[i], subst))
-			} else {
-				info.ParamDefaults = append(info.ParamDefaults, nil)
-			}
+				if i <
+					len(instance.Info.ParamIsVariadic) {
+					isVariadic =
+						instance.Info.ParamIsVariadic[i]
+				}
 
-			if isVariadic {
-				info.IsVariadic = true
-				if info.RequiredParams == len(instance.Info.ParamTypeAsts) {
+				info.ParamHasDefault = append(
+					info.ParamHasDefault,
+					hasDefault,
+				)
+
+				info.ParamIsVariadic = append(
+					info.ParamIsVariadic,
+					isVariadic,
+				)
+
+				if hasDefault &&
+					i < len(instance.Info.ParamDefaults) {
+					info.ParamDefaults = append(
+						info.ParamDefaults,
+						g.substituteExprForCGen(
+							instance.Info.ParamDefaults[i],
+							subst,
+						),
+					)
+				} else {
+					info.ParamDefaults = append(
+						info.ParamDefaults,
+						nil,
+					)
+				}
+
+				if isVariadic {
+					info.IsVariadic = true
+
+					if info.RequiredParams ==
+						len(instance.Info.ParamTypeAsts) {
+						info.RequiredParams = i
+					}
+				}
+
+				if hasDefault &&
+					info.RequiredParams ==
+						len(instance.Info.ParamTypeAsts) {
 					info.RequiredParams = i
 				}
 			}
-
-			if hasDefault && info.RequiredParams == len(instance.Info.ParamTypeAsts) {
-				info.RequiredParams = i
-			}
-		}
-	})
+		},
+	)
 
 	return info
 }
 
-func (g *Generator) taskInfoFromGenericTaskInstance(instance *GenericTaskInstance) TaskInfo {
-	if instance == nil || instance.Decl == nil {
+func (g *Generator) taskInfoFromGenericTaskInstance(
+	instance *GenericTaskInstance,
+) TaskInfo {
+	if instance == nil ||
+		instance.Decl == nil {
 		return TaskInfo{
 			ReturnType:  CInvalid,
 			ReturnTypes: []CType{CInvalid},
@@ -3255,42 +3477,109 @@ func (g *Generator) taskInfoFromGenericTaskInstance(instance *GenericTaskInstanc
 	}
 
 	decl := instance.Decl
-	subst := genericTaskSubstForCGen(decl.GenericParams, instance.Args)
+
+	subst :=
+		genericTaskSubstForCGen(
+			decl.GenericParams,
+			instance.Args,
+		)
+
+	foreignABI :=
+		g.foreignTaskABIFromExpr(
+			decl.ForeignABI,
+		)
+
+	/*
+		The declaration should normally be resolvable directly. Retain the
+		already-collected metadata as a fallback, because it is the canonical
+		TaskInfo for this template.
+	*/
+	if foreignABI == nil {
+		if template, ok :=
+			g.tasks[decl.Name.Name]; ok {
+			foreignABI =
+				template.ForeignABI
+		}
+	}
 
 	info := TaskInfo{
-		Decl:           decl,
-		GenericParams:  nil,
-		ReturnType:     g.genericTaskReturnType(instance),
-		ReturnTypes:    g.genericTaskReturnTypes(instance),
+		Decl:          decl,
+		GenericParams: nil,
+
+		ReturnType: g.genericTaskReturnType(
+			instance,
+		),
+
+		ReturnTypes: g.genericTaskReturnTypes(
+			instance,
+		),
+
 		RequiredParams: len(decl.Params),
-		IsExtern:       decl.IsExtern,
-		ExternName:     decl.ExternName,
-		IsPure:         decl.IsPure,
-		IsIntrinsic:    decl.IsIntrinsic,
-		IsTrustedPure:  decl.IsTrustedPure,
+
+		IsExtern:   decl.IsExtern,
+		ExternName: decl.ExternName,
+
+		IsPure:        decl.IsPure,
+		IsIntrinsic:   decl.IsIntrinsic,
+		IsTrustedPure: decl.IsTrustedPure,
+
+		ForeignABI: foreignABI,
 	}
 
 	for i, param := range decl.Params {
-		paramType := g.cTypeFromAstWithGenericArgs(param.Type, subst)
+		paramType :=
+			g.cTypeFromAstWithGenericArgs(
+				param.Type,
+				subst,
+			)
 
-		info.ParamTypes = append(info.ParamTypes, paramType)
-		info.ParamHasDefault = append(info.ParamHasDefault, param.HasDefault)
-		info.ParamIsVariadic = append(info.ParamIsVariadic, param.IsVariadic)
+		info.ParamNames = append(
+			info.ParamNames,
+			param.Name.Name,
+		)
+
+		info.ParamTypes = append(
+			info.ParamTypes,
+			paramType,
+		)
+
+		info.ParamHasDefault = append(
+			info.ParamHasDefault,
+			param.HasDefault,
+		)
+
+		info.ParamIsVariadic = append(
+			info.ParamIsVariadic,
+			param.IsVariadic,
+		)
 
 		if param.HasDefault {
-			info.ParamDefaults = append(info.ParamDefaults, g.substituteExprForCGen(param.Default, subst))
+			info.ParamDefaults = append(
+				info.ParamDefaults,
+				g.substituteExprForCGen(
+					param.Default,
+					subst,
+				),
+			)
 		} else {
-			info.ParamDefaults = append(info.ParamDefaults, nil)
+			info.ParamDefaults = append(
+				info.ParamDefaults,
+				nil,
+			)
 		}
 
 		if param.IsVariadic {
 			info.IsVariadic = true
-			if info.RequiredParams == len(decl.Params) {
+
+			if info.RequiredParams ==
+				len(decl.Params) {
 				info.RequiredParams = i
 			}
 		}
 
-		if param.HasDefault && info.RequiredParams == len(decl.Params) {
+		if param.HasDefault &&
+			info.RequiredParams ==
+				len(decl.Params) {
 			info.RequiredParams = i
 		}
 	}
@@ -3821,7 +4110,8 @@ func (g *Generator) crossPackageTypeOwner(
 		g.distincts[name] != nil ||
 		g.enums[name] != nil ||
 		g.unions[name] != nil ||
-		g.interfaces[name] != nil {
+		g.interfaces[name] != nil ||
+		g.foreignTypes[name] != nil {
 		return g.packageName
 	}
 
@@ -4192,42 +4482,105 @@ func (g *Generator) importedGenericTaskResultStructName(instanceName string) str
 	return instanceName + "_Result"
 }
 
-func (g *Generator) importedGenericTaskSignature(info *ImportedGenericTaskInstance) string {
-	if info == nil {
+func (g *Generator) importedGenericTaskSignature(
+	instance *ImportedGenericTaskInstance,
+) string {
+	if instance == nil {
 		return "/*invalid*/ int invalid_imported_generic(void)"
 	}
 
-	subst := genericArgSubstForCGen(info.Info.GenericParams, info.Args)
-	ret := g.importedGenericTaskReturnType(info)
+	info :=
+		g.taskInfoFromImportedGenericTaskInstance(
+			instance,
+		)
 
-	var params []string
+	span := source.Span{}
 
-	for i, paramAst := range info.Info.ParamTypeAsts {
-		paramType := g.cTypeFromAstWithGenericArgsInTypeContext(info.PackageName, paramAst, subst)
+	if info.Decl != nil {
+		span = info.Decl.Span()
+	} else if info.ForeignABI != nil {
+		span = info.ForeignABI.Loc
+	}
 
-		name := fmt.Sprintf("arg%d", i)
-		if i < len(info.Info.ParamNames) && info.Info.ParamNames[i] != "" {
-			name = info.Info.ParamNames[i]
+	if declaration, foreign :=
+		g.foreignTaskDeclaration(
+			info,
+			instance.Name,
+			info.ParamNames,
+			span,
+		); foreign {
+		return declaration
+	}
+
+	ret := info.ReturnType.Name
+
+	if len(info.ParamTypes) == 0 {
+		return fmt.Sprintf(
+			"%s %s(void)",
+			ret,
+			instance.Name,
+		)
+	}
+
+	params := make(
+		[]string,
+		0,
+		len(info.ParamTypes),
+	)
+
+	for index, paramType := range info.ParamTypes {
+		paramName :=
+			fmt.Sprintf(
+				"arg%d",
+				index,
+			)
+
+		if index < len(info.ParamNames) &&
+			info.ParamNames[index] != "" {
+			paramName =
+				info.ParamNames[index]
 		}
 
-		if i < len(info.Info.ParamIsVariadic) && info.Info.ParamIsVariadic[i] {
-			if info.Info.IsExtern {
-				params = append(params, "...")
+		if index <
+			len(info.ParamIsVariadic) &&
+			info.ParamIsVariadic[index] {
+			if info.IsExtern {
+				params = append(
+					params,
+					"...",
+				)
 				break
 			}
 
-			params = append(params, g.variadicCType(paramType).Decl(name))
+			params = append(
+				params,
+				g.variadicCType(
+					paramType,
+				).Decl(
+					paramName,
+				),
+			)
+
 			break
 		}
 
-		params = append(params, paramType.Decl(name))
+		params = append(
+			params,
+			paramType.Decl(
+				paramName,
+			),
+		)
 	}
 
-	if len(params) == 0 {
-		return fmt.Sprintf("%s %s(void)", ret.Name, info.Name)
-	}
-
-	return fmt.Sprintf("%s %s(%s)", ret.Name, info.Name, strings.Join(params, ", "))
+	return fmt.Sprintf(
+		"%s %s(%s)",
+		ret,
+		instance.Name,
+		strings.Join(
+			params,
+			", ",
+		),
+	)
 }
 
 func (g *Generator) emitGenericResultStructs() {
@@ -4456,30 +4809,92 @@ func (g *Generator) emitGenericTaskInstance(name string) {
 	g.currentResults = oldResults
 }
 
-func (g *Generator) genericTaskSignature(info *GenericTaskInstance, definition bool) string {
-	decl := info.Decl
-	subst := genericTaskSubstForCGen(decl.GenericParams, info.Args)
-
-	ret := g.genericTaskReturnType(info)
-
-	if len(decl.Params) == 0 {
-		return fmt.Sprintf("%s %s(void)", ret.Name, info.Name)
+func (g *Generator) genericTaskSignature(
+	instance *GenericTaskInstance,
+	definition bool,
+) string {
+	if instance == nil ||
+		instance.Decl == nil {
+		return "/*invalid*/ int invalid_generic_task(void)"
 	}
 
-	var params []string
+	decl := instance.Decl
 
-	for _, param := range decl.Params {
-		paramType := g.cTypeFromAstWithGenericArgs(param.Type, subst)
+	info :=
+		g.taskInfoFromGenericTaskInstance(
+			instance,
+		)
 
-		if param.IsVariadic {
-			g.error(param.Name.Span(), fmt.Sprintf("generic task %q with variadic parameters is not supported by C codegen yet", decl.Name.Name))
+	if declaration, foreign :=
+		g.foreignTaskDeclaration(
+			info,
+			instance.Name,
+			info.ParamNames,
+			decl.Span(),
+		); foreign {
+		return declaration
+	}
+
+	ret := info.ReturnType.Name
+
+	if len(info.ParamTypes) == 0 {
+		return fmt.Sprintf(
+			"%s %s(void)",
+			ret,
+			instance.Name,
+		)
+	}
+
+	params := make(
+		[]string,
+		0,
+		len(info.ParamTypes),
+	)
+
+	for index, paramType := range info.ParamTypes {
+		paramName :=
+			fmt.Sprintf(
+				"arg%d",
+				index,
+			)
+
+		if index < len(info.ParamNames) &&
+			info.ParamNames[index] != "" {
+			paramName =
+				info.ParamNames[index]
+		}
+
+		if index <
+			len(info.ParamIsVariadic) &&
+			info.ParamIsVariadic[index] {
+			g.error(
+				decl.Params[index].Name.Span(),
+				fmt.Sprintf(
+					"generic task %q with variadic parameters is not supported by C codegen yet",
+					decl.Name.Name,
+				),
+			)
+
 			paramType = CInvalid
 		}
 
-		params = append(params, paramType.Decl(param.Name.Name))
+		params = append(
+			params,
+			paramType.Decl(
+				paramName,
+			),
+		)
 	}
 
-	return fmt.Sprintf("%s %s(%s)", ret.Name, info.Name, strings.Join(params, ", "))
+	return fmt.Sprintf(
+		"%s %s(%s)",
+		ret,
+		instance.Name,
+		strings.Join(
+			params,
+			", ",
+		),
+	)
 }
 
 func externalConcreteTypeKey(

@@ -968,7 +968,17 @@ func (g *Generator) emitExpr(
 			}
 		}
 
+		if value, _, ok :=
+			g.foreignValueInContext(
+				e.Name.Name,
+			); ok {
+			return value.CValue
+		}
+
 		return e.Name.Name
+
+	case *ast.TaskPointerExpr:
+		return g.emitTaskPointerExpr(e)
 
 	case *ast.InlineArrayExpr:
 		typ := g.inferExprType(
@@ -1203,15 +1213,31 @@ func (g *Generator) emitExpr(
 			g.isPackageQualifier(
 				id.Name.Name,
 			) {
-			if id.Name.Name ==
-				g.packageName {
+			packageName := id.Name.Name
+
+			if packageName == g.packageName {
+				if value :=
+					g.foreignValues[e.Name.Name]; value != nil {
+					return value.CValue
+				}
+
 				return g.cTaskName(
 					e.Name.Name,
 				)
 			}
 
+			if pkg :=
+				g.typePackageInfo(
+					packageName,
+				); pkg != nil {
+				if value :=
+					pkg.ForeignValues[e.Name.Name]; value != nil {
+					return value.CValue
+				}
+			}
+
 			return cPackageTaskName(
-				id.Name.Name,
+				packageName,
 				e.Name.Name,
 			)
 		}
@@ -1772,7 +1798,8 @@ func (g *Generator) cTypeFromSizeArg(
 			g.structs[name] != nil ||
 			g.enums[name] != nil ||
 			g.unions[name] != nil ||
-			g.interfaces[name] != nil {
+			g.interfaces[name] != nil ||
+			g.foreignTypes[name] != nil {
 			typ := g.cTypeFromAstInContext(
 				&ast.NamedType{
 					Parts: []ast.Ident{id.Name},

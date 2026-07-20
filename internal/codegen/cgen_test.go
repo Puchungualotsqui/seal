@@ -68,6 +68,39 @@ func compileGeneratedC(t *testing.T, generated string) {
 	}
 }
 
+func compactC(source string) string {
+	return strings.Join(
+		strings.Fields(source),
+		"",
+	)
+}
+
+func compileGeneratedCWithThreadABI(
+	t *testing.T,
+	generated string,
+) {
+	t.Helper()
+
+	/*
+		Keep the ABI shim independent of system thread headers. These tests
+		verify that the generated C is syntactically valid and that CGen places
+		the configured ABI fragments correctly.
+	*/
+	const abiShim = `
+typedef int SEAL_THREAD_RESULT;
+
+#define SEAL_THREAD_CALL
+#define SEAL_THREAD_SUCCESS 0
+#define SEAL_THREAD_FAILURE 1
+#define SEAL_THREAD_ADDRESS(name) ((void *)(name))
+`
+
+	compileGeneratedC(
+		t,
+		abiShim+"\n"+generated,
+	)
+}
+
 func generate(t *testing.T, input string) (string, *diag.Reporter) {
 	t.Helper()
 
@@ -9571,4 +9604,592 @@ Main :: task() {
 
 	compileGeneratedC(t, out)
 	runGeneratedC(t, out)
+}
+
+func TestGenerateForeignTaskPointer(t *testing.T) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+WorkerEntry :: @foreign(ThreadEntryABI) task(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+Main :: task() {
+    pointer := @task_pointer(WorkerEntry)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULTSEAL_THREAD_CALLWorkerEntry(void*context);",
+	) {
+		t.Fatalf(
+			"expected foreign ABI prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULTSEAL_THREAD_CALLWorkerEntry(void*context){",
+	) {
+		t.Fatalf(
+			"expected foreign ABI function definition, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULT__seal_return_value_",
+	) ||
+		!strings.Contains(
+			compact,
+			"=SEAL_THREAD_SUCCESS;",
+		) {
+		t.Fatalf(
+			"expected foreign value in WorkerEntry return, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"void*pointer=SEAL_THREAD_ADDRESS(WorkerEntry);",
+	) {
+		t.Fatalf(
+			"expected foreign task address expression, got:\n%s",
+			out,
+		)
+	}
+
+	/*
+		A foreign type is a nominal Seal type whose physical C spelling is
+		used directly. CGen must not invent a typedef for it.
+	*/
+	if strings.Contains(
+		compact,
+		"typedefSEAL_THREAD_RESULTThreadResult;",
+	) {
+		t.Fatalf(
+			"foreign type must not emit a Seal-named typedef, got:\n%s",
+			out,
+		)
+	}
+
+	/*
+		A foreign value is substituted directly and must not be emitted as a
+		normal Seal constant.
+	*/
+	if strings.Contains(
+		compact,
+		"staticconstSEAL_THREAD_RESULTthread_success",
+	) {
+		t.Fatalf(
+			"foreign value must not emit static storage, got:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedCWithThreadABI(
+		t,
+		out,
+	)
+}
+
+func TestGenerateForeignTaskABIUsesParameterNamePlaceholder(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+NamedWorkerEntry :: @foreign(ThreadEntryABI) task(
+    thread_context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+Main :: task() {
+    pointer := @task_pointer(NamedWorkerEntry)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	expected :=
+		"SEAL_THREAD_RESULTSEAL_THREAD_CALLNamedWorkerEntry(void*thread_context)"
+
+	if !strings.Contains(
+		compact,
+		expected+";",
+	) {
+		t.Fatalf(
+			"expected parameter name in foreign prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		expected+"{",
+	) {
+		t.Fatalf(
+			"expected parameter name in foreign definition, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		compact,
+		"NamedWorkerEntry(void*arg0)",
+	) {
+		t.Fatalf(
+			"foreign ABI used fallback argument name instead of declaration name:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedCWithThreadABI(
+		t,
+		out,
+	)
+}
+
+func TestGenerateGenericForeignTaskPointerRegistersSpecialization(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+WorkerEntry :: @foreign(ThreadEntryABI) task<T type>(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+Main :: task() {
+    pointer := @task_pointer(WorkerEntry<int>)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	const specializedName = "WorkerEntry_int"
+
+	signature :=
+		"SEAL_THREAD_RESULTSEAL_THREAD_CALL" +
+			specializedName +
+			"(void*context)"
+
+	if !strings.Contains(
+		compact,
+		signature+";",
+	) {
+		t.Fatalf(
+			"expected generic foreign task prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		signature+"{",
+	) {
+		t.Fatalf(
+			"expected generic foreign task definition, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"void*pointer=SEAL_THREAD_ADDRESS("+specializedName+");",
+	) {
+		t.Fatalf(
+			"expected address of specialized foreign task, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		compact,
+		"SEAL_THREAD_ADDRESS(WorkerEntry);",
+	) {
+		t.Fatalf(
+			"generic task pointer used unspecialized task name:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedCWithThreadABI(
+		t,
+		out,
+	)
+}
+
+func TestGenerateForeignTaskPointerInsideGenericSpecialization(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+WorkerEntry :: @foreign(ThreadEntryABI) task<T type>(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+GetWorkerPointer :: task<T type>() rawptr {
+    return @task_pointer(WorkerEntry<T>)
+}
+
+Main :: task() {
+    pointer := GetWorkerPointer<int>()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULTSEAL_THREAD_CALLWorkerEntry_int(void*context);",
+	) {
+		t.Fatalf(
+			"expected concrete WorkerEntry<int> prototype, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"return__seal_return_value_",
+	) ||
+		!strings.Contains(
+			compact,
+			"=SEAL_THREAD_ADDRESS(WorkerEntry_int);",
+		) {
+		t.Fatalf(
+			"expected specialized task address in generic body, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		compact,
+		"SEAL_THREAD_ADDRESS(WorkerEntry_T)",
+	) ||
+		strings.Contains(
+			compact,
+			"SEAL_THREAD_ADDRESS(WorkerEntry);",
+		) {
+		t.Fatalf(
+			"task pointer retained an unresolved generic task name:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedCWithThreadABI(
+		t,
+		out,
+	)
+}
+
+func TestGenerateForeignTypesRemainNominalInSealButShareCType(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+OtherThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+thread_failure :: @foreign_value(
+    OtherThreadResult,
+    SEAL_THREAD_FAILURE
+)
+
+GetThreadResult :: task() ThreadResult {
+    return thread_success
+}
+
+GetOtherThreadResult :: task() OtherThreadResult {
+    return thread_failure
+}
+
+Main :: task() {
+    first := GetThreadResult()
+    second := GetOtherThreadResult()
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULTGetThreadResult(void);",
+	) {
+		t.Fatalf(
+			"expected first foreign physical return type, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"SEAL_THREAD_RESULTGetOtherThreadResult(void);",
+	) {
+		t.Fatalf(
+			"expected second foreign physical return type, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"=SEAL_THREAD_SUCCESS;",
+	) {
+		t.Fatalf(
+			"expected first foreign value substitution, got:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		compact,
+		"=SEAL_THREAD_FAILURE;",
+	) {
+		t.Fatalf(
+			"expected second foreign value substitution, got:\n%s",
+			out,
+		)
+	}
+
+	if strings.Contains(
+		compact,
+		"typedefSEAL_THREAD_RESULTThreadResult;",
+	) ||
+		strings.Contains(
+			compact,
+			"typedefSEAL_THREAD_RESULTOtherThreadResult;",
+		) {
+		t.Fatalf(
+			"foreign nominal types must not emit wrapper typedefs:\n%s",
+			out,
+		)
+	}
+
+	compileGeneratedCWithThreadABI(
+		t,
+		out,
+	)
+}
+
+func TestGenerateForeignTaskABIReportsUnresolvedDeclarationPlaceholder(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+InvalidThreadABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT {unknown_placeholder}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+WorkerEntry :: @foreign(InvalidThreadABI) task(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+Main :: task() {
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf(
+			"expected unresolved-placeholder diagnostic, got none:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"unresolved declaration placeholder",
+	) {
+		t.Fatalf(
+			"expected unresolved declaration placeholder diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+
+	if !strings.Contains(
+		out,
+		"invalid foreign declaration",
+	) {
+		t.Fatalf(
+			"expected defensive invalid declaration output, got:\n%s",
+			out,
+		)
+	}
+}
+
+func TestGenerateForeignTaskABIReportsUnresolvedAddressPlaceholder(
+	t *testing.T,
+) {
+	out, reporter := generate(t, `
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+
+InvalidAddressABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({missing_name}),
+)
+
+WorkerEntry :: @foreign(InvalidAddressABI) task(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+
+Main :: task() {
+    pointer := @task_pointer(WorkerEntry)
+}
+`)
+
+	if !reporter.HasErrors() {
+		t.Fatalf(
+			"expected unresolved-address diagnostic, got none:\n%s",
+			out,
+		)
+	}
+
+	if !strings.Contains(
+		reporter.String(),
+		"unresolved address placeholder",
+	) {
+		t.Fatalf(
+			"expected unresolved address placeholder diagnostic, got:\n%s",
+			reporter.String(),
+		)
+	}
+
+	compact := compactC(out)
+
+	if !strings.Contains(
+		compact,
+		"void*pointer=NULL;",
+	) {
+		t.Fatalf(
+			"expected NULL fallback for invalid foreign address, got:\n%s",
+			out,
+		)
+	}
 }
