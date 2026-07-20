@@ -166,8 +166,11 @@ Double :: task(x int) int {
 
 	gameC := string(gameBytes)
 
-	if !strings.Contains(gameC, "intptr_t helper_Double(intptr_t arg0);") {
-		t.Fatalf("expected imported helper prototype, got:\n%s", gameC)
+	if !strings.Contains(gameC, "intptr_t helper_Double(intptr_t x);") {
+		t.Fatalf(
+			"expected imported helper prototype with the declared parameter name, got:\n%s",
+			gameC,
+		)
 	}
 
 	if !strings.Contains(gameC, "intptr_t x = helper_Double(10);") {
