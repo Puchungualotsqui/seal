@@ -28,6 +28,9 @@ const (
 	SymbolBitSet
 	SymbolOverload
 
+	SymbolForeignType
+	SymbolForeignTaskABI
+
 	SymbolGenericType
 	SymbolGenericEnum
 	SymbolGenericUnion
@@ -64,6 +67,10 @@ func (k SymbolKind) String() string {
 		return "bit_set"
 	case SymbolOverload:
 		return "overload"
+	case SymbolForeignType:
+		return "foreign type"
+	case SymbolForeignTaskABI:
+		return "foreign task ABI"
 	case SymbolBuiltinType:
 		return "builtin type"
 	case SymbolBuiltinTask:
@@ -443,6 +450,7 @@ func isTypeSymbolKind(kind SymbolKind) bool {
 		SymbolUnion,
 		SymbolInterface,
 		SymbolBitSet,
+		SymbolForeignType,
 		SymbolGenericType,
 		SymbolGenericEnum,
 		SymbolGenericUnion,
@@ -467,19 +475,76 @@ func (r *Resolver) declareGenericSymbol(scope *Scope, name string, kind SymbolKi
 func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 	switch d := decl.(type) {
 	case *ast.ConstDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolConst, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolConst,
+			d.Name.Span(),
+			d,
+		)
+
+	case *ast.ForeignValueDecl:
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolConst,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.StructDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolStruct, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolStruct,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.TaskDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolTask, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolTask,
+			d.Name.Span(),
+			d,
+		)
+
+	case *ast.ForeignTypeDecl:
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolForeignType,
+			d.Name.Span(),
+			d,
+		)
+
+	case *ast.ForeignTaskDecl:
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolForeignTaskABI,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.EnumDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolEnum, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolEnum,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.UnionDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolUnion, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolUnion,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.InterfaceDecl:
 		sym := r.declareSymbol(
@@ -498,17 +563,32 @@ func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 				continue
 			}
 
-			scope.DeclareInterfaceRequirement(requirement.Name.Name)
+			scope.DeclareInterfaceRequirement(
+				requirement.Name.Name,
+			)
 		}
 
 	case *ast.OverloadDecl:
-		r.declareSymbol(scope, d.Name, SymbolOverload, d.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name,
+			SymbolOverload,
+			d.Span(),
+			d,
+		)
 
 	case *ast.DistinctDecl:
-		r.declareSymbol(scope, d.Name.Name, SymbolDistinct, d.Name.Span(), d)
+		r.declareSymbol(
+			scope,
+			d.Name.Name,
+			SymbolDistinct,
+			d.Name.Span(),
+			d,
+		)
 
 	case *ast.DirectiveDecl:
-		// c :: @c_import { ... } is codegen metadata, not a visible Seal symbol.
+		// c :: @c_import { ... } is codegen metadata, not a visible
+		// Seal symbol.
 		return
 
 	case *ast.ImplDecl:
@@ -521,6 +601,16 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 	switch d := decl.(type) {
 	case *ast.ConstDecl:
 		r.resolveExpr(scope, d.Value)
+
+	case *ast.ForeignValueDecl:
+		if d.Type != nil {
+			r.resolveType(scope, d.Type)
+		}
+
+	case *ast.ForeignTypeDecl,
+		*ast.ForeignTaskDecl:
+		// Their C token sequences are opaque to the resolver.
+		return
 
 	case *ast.StructDecl:
 		r.resolveStructDecl(scope, d)
@@ -547,7 +637,11 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 
 	case *ast.OverloadDecl:
 		for _, name := range d.Names {
-			r.resolveSymbolUse(scope, name.Name, name.Span())
+			r.resolveSymbolUse(
+				scope,
+				name.Name,
+				name.Span(),
+			)
 		}
 
 	case *ast.DirectiveDecl:
@@ -757,32 +851,75 @@ func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
 	}
 }
 
-func (r *Resolver) resolveTaskDecl(parent *Scope, d *ast.TaskDecl) {
-	genericScope := NewScope(ScopeDecl, parent)
+func (r *Resolver) resolveTaskDecl(
+	parent *Scope,
+	d *ast.TaskDecl,
+) {
+	genericScope := NewScope(
+		ScopeDecl,
+		parent,
+	)
 
-	r.declareGenericParams(genericScope, d.GenericParams)
-	r.resolveGenericParams(genericScope, d.GenericParams)
+	r.declareGenericParams(
+		genericScope,
+		d.GenericParams,
+	)
 
-	taskScope := NewScope(ScopeTask, genericScope)
+	r.resolveGenericParams(
+		genericScope,
+		d.GenericParams,
+	)
+
+	if d.ForeignABI != nil {
+		r.resolveExpr(
+			genericScope,
+			d.ForeignABI,
+		)
+	}
+
+	taskScope := NewScope(
+		ScopeTask,
+		genericScope,
+	)
+
 	taskScope.TaskID = r.nextTaskID
 	r.nextTaskID++
 
 	for _, param := range d.Params {
-		r.resolveType(taskScope, param.Type)
+		r.resolveType(
+			taskScope,
+			param.Type,
+		)
 
 		if param.HasDefault {
-			r.resolveExpr(genericScope, param.Default)
+			r.resolveExpr(
+				genericScope,
+				param.Default,
+			)
 		}
 
-		r.declareSymbol(taskScope, param.Name.Name, SymbolParam, param.Name.Span(), nil)
+		r.declareSymbol(
+			taskScope,
+			param.Name.Name,
+			SymbolParam,
+			param.Name.Span(),
+			nil,
+		)
 	}
 
 	for _, result := range d.Results {
-		r.resolveType(taskScope, result)
+		r.resolveType(
+			taskScope,
+			result,
+		)
 	}
 
 	if d.Body != nil {
-		r.resolveBlockInScope(d.Body, taskScope, false)
+		r.resolveBlockInScope(
+			d.Body,
+			taskScope,
+			false,
+		)
 	}
 }
 
@@ -1200,6 +1337,12 @@ func (r *Resolver) resolveExpr(
 			)
 		}
 
+	case *ast.TaskPointerExpr:
+		r.resolveExpr(
+			scope,
+			e.Task,
+		)
+
 	case *ast.InlineArrayExpr:
 		r.resolveType(
 			scope,
@@ -1392,9 +1535,11 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 		}
 
 		if sym.Kind == SymbolInterface {
-			if decl, ok := sym.Node.(*ast.InterfaceDecl); ok && decl != nil {
+			if decl, ok := sym.Node.(*ast.InterfaceDecl); ok &&
+				decl != nil {
 				for _, requirement := range decl.Requirements {
-					if requirement == nil || requirement.Name.Name == "" {
+					if requirement == nil ||
+						requirement.Name.Name == "" {
 						continue
 					}
 
@@ -1412,7 +1557,9 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 			SymbolUnion,
 			SymbolInterface,
 			SymbolBitSet,
-			SymbolOverload:
+			SymbolOverload,
+			SymbolForeignType,
+			SymbolForeignTaskABI:
 			info.Symbols[symbolName] = &PackageSymbol{
 				Name: symbolName,
 				Kind: sym.Kind,

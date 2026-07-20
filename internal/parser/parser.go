@@ -21,6 +21,16 @@ type declModifiers struct {
 	Test        bool
 	Intrinsic   bool
 	TrustedPure bool
+
+	ForeignABI ast.Expr
+}
+
+func (m declModifiers) hasAny() bool {
+	return m.Pure ||
+		m.Test ||
+		m.Intrinsic ||
+		m.TrustedPure ||
+		m.ForeignABI != nil
 }
 
 func New(tokens []token.Token, diags *diag.Reporter) *Parser {
@@ -112,52 +122,152 @@ func (p *Parser) parseDecl() ast.Decl {
 
 	mods := declModifiers{}
 
-	if p.match(token.At) {
-		dir := p.expectIdent("expected directive name after '@'")
-		if dir.Name == "" {
-			return nil
-		}
-
-		switch dir.Name {
-		case "rawUnion":
-			if !p.expect(token.KeywordUnion, "expected 'union' after @rawUnion") {
-				return nil
-			}
-
-			if operatorName != "" {
-				p.errorHere("@rawUnion cannot be used with operator declaration")
-				return nil
-			}
-
-			simpleName, ok := isSimpleNamedType(declHead)
-			if !ok {
-				p.errorHere("@rawUnion declaration name cannot be generic")
-				return nil
-			}
-
-			return p.parseUnionDecl(simpleName, start, true)
-
-		case "trusted_pure":
-			mods.TrustedPure = true
-
-		default:
-			if operatorName != "" {
-				p.errorHere("directive declaration name cannot be an operator")
-				return nil
-			}
-
-			simpleName, ok := isSimpleNamedType(declHead)
-			if !ok {
-				p.errorHere("directive declaration name cannot be generic")
-				return nil
-			}
-
-			return p.parseDirectiveDecl(simpleName, dir, start)
-		}
-	}
-
 	for {
 		switch {
+		case p.match(token.At):
+			dir := p.expectIdent("expected directive name after '@'")
+			if dir.Name == "" {
+				return nil
+			}
+
+			switch dir.Name {
+			case "rawUnion":
+				if mods.hasAny() {
+					p.diags.Add(
+						dir.Span(),
+						"@rawUnion cannot follow task qualifiers",
+					)
+					return nil
+				}
+
+				if !p.expect(token.KeywordUnion, "expected 'union' after @rawUnion") {
+					return nil
+				}
+
+				if operatorName != "" {
+					p.errorHere("@rawUnion cannot be used with operator declaration")
+					return nil
+				}
+
+				simpleName, ok := isSimpleNamedType(declHead)
+				if !ok {
+					p.errorHere("@rawUnion declaration name cannot be generic")
+					return nil
+				}
+
+				return p.parseUnionDecl(simpleName, start, true)
+
+			case "foreign_type":
+				if mods.hasAny() {
+					p.diags.Add(
+						dir.Span(),
+						"@foreign_type cannot follow task qualifiers",
+					)
+					return nil
+				}
+
+				if operatorName != "" {
+					p.errorHere("@foreign_type declaration name cannot be an operator")
+					return nil
+				}
+
+				simpleName, ok := isSimpleNamedType(declHead)
+				if !ok {
+					p.errorHere("@foreign_type declaration name cannot be generic")
+					return nil
+				}
+
+				return p.parseForeignTypeDecl(simpleName, start)
+
+			case "foreign_value":
+				if mods.hasAny() {
+					p.diags.Add(
+						dir.Span(),
+						"@foreign_value cannot follow task qualifiers",
+					)
+					return nil
+				}
+
+				if operatorName != "" {
+					p.errorHere("@foreign_value declaration name cannot be an operator")
+					return nil
+				}
+
+				simpleName, ok := isSimpleNamedType(declHead)
+				if !ok {
+					p.errorHere("@foreign_value declaration name cannot be generic")
+					return nil
+				}
+
+				return p.parseForeignValueDecl(simpleName, start)
+
+			case "foreign_task":
+				if mods.hasAny() {
+					p.diags.Add(
+						dir.Span(),
+						"@foreign_task cannot follow task qualifiers",
+					)
+					return nil
+				}
+
+				if operatorName != "" {
+					p.errorHere("@foreign_task declaration name cannot be an operator")
+					return nil
+				}
+
+				simpleName, ok := isSimpleNamedType(declHead)
+				if !ok {
+					p.errorHere("@foreign_task declaration name cannot be generic")
+					return nil
+				}
+
+				return p.parseForeignTaskDecl(simpleName, start)
+
+			case "trusted_pure":
+				mods.TrustedPure = true
+
+			case "foreign":
+				if mods.ForeignABI != nil {
+					p.diags.Add(
+						dir.Span(),
+						"task declaration has more than one @foreign qualifier",
+					)
+					return nil
+				}
+
+				foreignABI := p.parseForeignQualifier()
+				if foreignABI == nil {
+					return nil
+				}
+
+				mods.ForeignABI = foreignABI
+
+			default:
+				if mods.hasAny() {
+					p.diags.Add(
+						dir.Span(),
+						fmt.Sprintf(
+							"unsupported task qualifier @%s",
+							dir.Name,
+						),
+					)
+					return nil
+				}
+
+				if operatorName != "" {
+					p.errorHere("directive declaration name cannot be an operator")
+					return nil
+				}
+
+				simpleName, ok := isSimpleNamedType(declHead)
+				if !ok {
+					p.errorHere("directive declaration name cannot be generic")
+					return nil
+				}
+
+				return p.parseDirectiveDecl(simpleName, dir, start)
+			}
+
 		case p.match(token.KeywordPure):
 			mods.Pure = true
 
@@ -184,11 +294,26 @@ doneModifiers:
 		return nil
 	}
 
+	if mods.Test && mods.ForeignABI != nil {
+		p.errorHere("test task cannot use @foreign")
+		return nil
+	}
+
+	if mods.Intrinsic && mods.ForeignABI != nil {
+		p.errorHere("intrinsic task cannot use @foreign")
+		return nil
+	}
+
 	if p.at(token.Ident) && p.peek().Lexeme == "extern" {
 		p.advance()
 
 		if mods.Intrinsic {
 			p.errorHere("extern task cannot be intrinsic")
+			return nil
+		}
+
+		if mods.ForeignABI != nil {
+			p.errorHere("extern task cannot use @foreign")
 			return nil
 		}
 
@@ -223,8 +348,7 @@ doneModifiers:
 					Loc:  operatorLoc,
 				},
 				start,
-				true,
-				false,
+				mods,
 			)
 		}
 
@@ -267,20 +391,20 @@ doneModifiers:
 			return nil
 		}
 
-		return p.parseTaskDecl(simpleName, start, false, true)
+		return p.parseTaskDecl(simpleName, start, mods)
 	}
 
-	if mods.Pure {
+	if mods.Pure || mods.ForeignABI != nil {
 		if !simple {
-			p.errorHere("pure task name cannot be generic")
+			p.errorHere("task declaration name cannot be generic")
 			return nil
 		}
 
-		if !p.expect(token.KeywordTask, "expected 'task' after 'pure'") {
+		if !p.expect(token.KeywordTask, "expected 'task' after task qualifier") {
 			return nil
 		}
 
-		return p.parseTaskDecl(simpleName, start, true, false)
+		return p.parseTaskDecl(simpleName, start, mods)
 	}
 
 	switch {
@@ -298,7 +422,7 @@ doneModifiers:
 			return nil
 		}
 
-		return p.parseTaskDecl(simpleName, start, false, false)
+		return p.parseTaskDecl(simpleName, start, mods)
 
 	case p.match(token.KeywordStruct):
 		if !simple {
@@ -372,6 +496,328 @@ doneModifiers:
 			Loc:   p.span(start, value.Span().End),
 		}
 	}
+}
+
+func (p *Parser) parseForeignQualifier() ast.Expr {
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @foreign",
+	) {
+		return nil
+	}
+
+	abi := p.parseExprUntil(
+		0,
+		token.RParen,
+	)
+	if abi == nil {
+		p.errorHere(
+			"expected foreign task ABI inside @foreign(...)",
+		)
+		return nil
+	}
+
+	if !p.expect(
+		token.RParen,
+		"expected ')' after @foreign ABI",
+	) {
+		return nil
+	}
+
+	return abi
+}
+
+func (p *Parser) parseForeignTypeDecl(
+	name ast.Ident,
+	start int,
+) ast.Decl {
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @foreign_type",
+	) {
+		return nil
+	}
+
+	cType := p.parseRawDirectiveTokensUntil(
+		token.RParen,
+	)
+
+	if len(cType) == 0 {
+		p.errorHere(
+			"expected C type expression inside @foreign_type(...)",
+		)
+	}
+
+	endTok := p.expectToken(
+		token.RParen,
+		"expected ')' after @foreign_type C type",
+	)
+
+	if len(cType) == 0 {
+		return nil
+	}
+
+	return &ast.ForeignTypeDecl{
+		Name:  name,
+		CType: cType,
+		Loc: p.span(
+			start,
+			endTok.Span.End,
+		),
+	}
+}
+
+func (p *Parser) parseForeignValueDecl(
+	name ast.Ident,
+	start int,
+) ast.Decl {
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @foreign_value",
+	) {
+		return nil
+	}
+
+	valueType := p.parseType()
+	if valueType == nil {
+		p.errorHere(
+			"expected Seal type as first @foreign_value argument",
+		)
+		p.synchronizeUntil(
+			token.Comma,
+			token.RParen,
+		)
+		return nil
+	}
+
+	if !p.expect(
+		token.Comma,
+		"expected ',' after @foreign_value type",
+	) {
+		return nil
+	}
+
+	cValue := p.parseRawDirectiveTokensUntil(
+		token.RParen,
+	)
+
+	if len(cValue) == 0 {
+		p.errorHere(
+			"expected C expression as second @foreign_value argument",
+		)
+	}
+
+	endTok := p.expectToken(
+		token.RParen,
+		"expected ')' after @foreign_value C expression",
+	)
+
+	if len(cValue) == 0 {
+		return nil
+	}
+
+	return &ast.ForeignValueDecl{
+		Name:   name,
+		Type:   valueType,
+		CValue: cValue,
+		Loc: p.span(
+			start,
+			endTok.Span.End,
+		),
+	}
+}
+
+func (p *Parser) parseForeignTaskDecl(
+	name ast.Ident,
+	start int,
+) ast.Decl {
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @foreign_task",
+	) {
+		return nil
+	}
+
+	var declaration []token.Token
+	var address []token.Token
+
+	hasDeclaration := false
+	hasAddress := false
+
+	for !p.at(token.RParen) &&
+		!p.at(token.EOF) {
+		field := p.expectIdent(
+			"expected @foreign_task field name",
+		)
+		if field.Name == "" {
+			p.synchronizeUntil(
+				token.Comma,
+				token.RParen,
+			)
+
+			if p.match(token.Comma) {
+				continue
+			}
+
+			break
+		}
+
+		value := p.parseRawDirectiveTokensUntil(
+			token.Comma,
+			token.RParen,
+		)
+
+		if len(value) == 0 {
+			p.diags.Add(
+				field.Span(),
+				fmt.Sprintf(
+					"expected token sequence after @foreign_task field %q",
+					field.Name,
+				),
+			)
+		}
+
+		switch field.Name {
+		case "declaration":
+			if hasDeclaration {
+				p.diags.Add(
+					field.Span(),
+					"duplicate @foreign_task declaration field",
+				)
+			} else {
+				hasDeclaration = true
+				declaration = value
+			}
+
+		case "address":
+			if hasAddress {
+				p.diags.Add(
+					field.Span(),
+					"duplicate @foreign_task address field",
+				)
+			} else {
+				hasAddress = true
+				address = value
+			}
+
+		default:
+			p.diags.Add(
+				field.Span(),
+				fmt.Sprintf(
+					"unknown @foreign_task field %q",
+					field.Name,
+				),
+			)
+		}
+
+		if p.match(token.Comma) {
+			continue
+		}
+
+		if !p.at(token.RParen) {
+			p.errorHere(
+				"expected ',' between @foreign_task fields",
+			)
+			p.synchronizeUntil(
+				token.Comma,
+				token.RParen,
+			)
+			p.match(token.Comma)
+		}
+	}
+
+	endTok := p.expectToken(
+		token.RParen,
+		"expected ')' after @foreign_task fields",
+	)
+
+	valid := true
+
+	if !hasDeclaration ||
+		len(declaration) == 0 {
+		p.diags.Add(
+			name.Span(),
+			"@foreign_task requires a declaration field",
+		)
+		valid = false
+	}
+
+	if !hasAddress ||
+		len(address) == 0 {
+		p.diags.Add(
+			name.Span(),
+			"@foreign_task requires an address field",
+		)
+		valid = false
+	}
+
+	if !valid {
+		return nil
+	}
+
+	return &ast.ForeignTaskDecl{
+		Name:        name,
+		Declaration: declaration,
+		Address:     address,
+		Loc: p.span(
+			start,
+			endTok.Span.End,
+		),
+	}
+}
+
+func (p *Parser) parseRawDirectiveTokensUntil(
+	stops ...token.Kind,
+) []token.Token {
+	var out []token.Token
+
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+
+	for !p.at(token.EOF) {
+		atTopLevel :=
+			parenDepth == 0 &&
+				bracketDepth == 0 &&
+				braceDepth == 0
+
+		if atTopLevel &&
+			p.atAny(stops...) {
+			break
+		}
+
+		tok := p.advance()
+
+		switch tok.Kind {
+		case token.LParen:
+			parenDepth++
+
+		case token.RParen:
+			if parenDepth > 0 {
+				parenDepth--
+			}
+
+		case token.LBracket:
+			bracketDepth++
+
+		case token.RBracket:
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+
+		case token.LBrace:
+			braceDepth++
+
+		case token.RBrace:
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		}
+
+		out = append(out, tok)
+	}
+
+	return out
 }
 
 func (p *Parser) parseDirectiveDecl(name ast.Ident, dir ast.Ident, start int) ast.Decl {
@@ -776,7 +1222,7 @@ func (p *Parser) parseInlineArraySpec(
 		p.diags.Add(
 			name.Span(),
 			fmt.Sprintf(
-				"unknown type or expression directive @%s",
+				"unknown type directive @%s",
 				name.Name,
 			),
 		)
@@ -784,11 +1230,22 @@ func (p *Parser) parseInlineArraySpec(
 		return nil, nil, name.Span().End, false
 	}
 
+	return p.parseInlineArraySpecAfterName(start)
+}
+
+func (p *Parser) parseInlineArraySpecAfterName(
+	start int,
+) (
+	ast.Type,
+	ast.Expr,
+	int,
+	bool,
+) {
 	if !p.expect(
 		token.Lt,
 		"expected '<' after @inline_array",
 	) {
-		return nil, nil, name.Span().End, false
+		return nil, nil, p.peek().Span.Start, false
 	}
 
 	elem := p.parseType()
@@ -836,7 +1293,7 @@ func (p *Parser) parseInlineArrayExpr(
 	start int,
 ) ast.Expr {
 	elem, length, _, ok :=
-		p.parseInlineArraySpec(start)
+		p.parseInlineArraySpecAfterName(start)
 
 	if !ok {
 		return nil
@@ -860,6 +1317,70 @@ func (p *Parser) parseInlineArrayExpr(
 		Elem:   elem,
 		Length: length,
 		Values: values,
+		Loc: p.span(
+			start,
+			endTok.Span.End,
+		),
+	}
+}
+
+func (p *Parser) parseDirectiveExpr(
+	start int,
+) ast.Expr {
+	name := p.expectIdent(
+		"expected expression directive name after '@'",
+	)
+	if name.Name == "" {
+		return nil
+	}
+
+	switch name.Name {
+	case "inline_array":
+		return p.parseInlineArrayExpr(start)
+
+	case "task_pointer":
+		return p.parseTaskPointerExpr(start)
+
+	default:
+		p.diags.Add(
+			name.Span(),
+			fmt.Sprintf(
+				"unknown expression directive @%s",
+				name.Name,
+			),
+		)
+		return nil
+	}
+}
+
+func (p *Parser) parseTaskPointerExpr(
+	start int,
+) ast.Expr {
+	if !p.expect(
+		token.LParen,
+		"expected '(' after @task_pointer",
+	) {
+		return nil
+	}
+
+	taskExpr := p.parseExprUntil(
+		0,
+		token.RParen,
+	)
+	if taskExpr == nil {
+		p.errorHere(
+			"expected task inside @task_pointer(...)",
+		)
+		return nil
+	}
+
+	endTok := p.expectToken(
+		token.RParen,
+		"expected ')' after @task_pointer task",
+	)
+
+	return &ast.TaskPointerExpr{
+		Task: taskExpr,
 		Loc: p.span(
 			start,
 			endTok.Span.End,
@@ -985,7 +1506,11 @@ func (p *Parser) parseDistinctDecl(name ast.Ident, start int) ast.Decl {
 	}
 }
 
-func (p *Parser) parseTaskDecl(name ast.Ident, start int, isPure bool, isTest bool) ast.Decl {
+func (p *Parser) parseTaskDecl(
+	name ast.Ident,
+	start int,
+	mods declModifiers,
+) ast.Decl {
 	genericParams := p.parseGenericParamsIfPresent()
 	params := p.parseParamList()
 	results := p.parseResultTypesUntilBodyOrDeclEnd()
@@ -998,8 +1523,9 @@ func (p *Parser) parseTaskDecl(name ast.Ident, start int, isPure bool, isTest bo
 	return &ast.TaskDecl{
 		Name:          name,
 		GenericParams: genericParams,
-		IsPure:        isPure,
-		IsTest:        isTest,
+		IsPure:        mods.Pure,
+		IsTest:        mods.Test,
+		ForeignABI:    mods.ForeignABI,
 		Params:        params,
 		Results:       results,
 		Body:          body,
@@ -2711,7 +3237,7 @@ func (p *Parser) parsePrefixUntil(
 
 	switch {
 	case p.match(token.At):
-		return p.parseInlineArrayExpr(start)
+		return p.parseDirectiveExpr(start)
 
 	case p.at(token.Ident) ||
 		p.at(token.KeywordSelf):

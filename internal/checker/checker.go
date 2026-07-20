@@ -45,6 +45,7 @@ const (
 	TypeString
 	TypeCstring
 	TypeRawptr
+	TypeForeign
 	TypeAny
 
 	TypeNil
@@ -190,6 +191,55 @@ func (r ImplResolution) Ambiguous() bool {
 	return r.Kind == ImplResolutionAmbiguous
 }
 
+type ForeignTaskABIInfo struct {
+	Name        string
+	PackageName string
+
+	Decl *ast.ForeignTaskDecl
+
+	Span source.Span
+}
+
+func cloneForeignTaskABIInfo(
+	info *ForeignTaskABIInfo,
+) *ForeignTaskABIInfo {
+	if info == nil {
+		return nil
+	}
+
+	out := *info
+	return &out
+}
+
+func qualifyForeignTaskABIInfo(
+	packageName string,
+	info *ForeignTaskABIInfo,
+) *ForeignTaskABIInfo {
+	if info == nil {
+		return nil
+	}
+
+	out := *info
+
+	if out.PackageName == "" {
+		out.PackageName = packageName
+	}
+
+	return &out
+}
+
+func (info *ForeignTaskABIInfo) String() string {
+	if info == nil {
+		return "<nil foreign task ABI>"
+	}
+
+	if info.PackageName != "" {
+		return info.PackageName + "." + info.Name
+	}
+
+	return info.Name
+}
+
 type Type struct {
 	Kind TypeKind
 	Name string
@@ -220,6 +270,7 @@ type Type struct {
 	ParamIsVariadic []bool
 	IsVariadic      bool
 	IsExtern        bool
+	ForeignABI      *ForeignTaskABIInfo
 	ExternName      string
 
 	IsPure        bool
@@ -419,6 +470,9 @@ func (t *Type) String() string {
 	case TypeNil:
 		return "nil"
 
+	case TypeForeign:
+		return t.Name
+
 	case TypeEnumLiteral:
 		return "." + t.Name
 
@@ -509,6 +563,7 @@ const (
 	SymbolType
 	SymbolTask
 	SymbolOverload
+	SymbolForeignTaskABI
 	SymbolPackage
 )
 
@@ -563,6 +618,24 @@ const (
 	IndexResolutionOverloadRead
 	IndexResolutionOverloadWrite
 )
+
+type TaskPointerResolution struct {
+	// Candidate is the checker-selected task symbol. For a generic task
+	// parameter such as F task[(T)], Candidate is the symbolic task parameter
+	// symbol and codegen resolves it using the active specialization.
+	Candidate *Symbol
+
+	// TaskType is the exact concrete or symbolically specialized task type.
+	TaskType *Type
+
+	// PackageName is non-empty for package-qualified tasks.
+	PackageName string
+
+	// GenericArguments is populated for:
+	//
+	//     @task_pointer(WorkerEntry<int, Work>)
+	GenericArguments []GenericArgumentInfo
+}
 
 type GenericOverloadCallResolution struct {
 	Candidate *Symbol
@@ -632,7 +705,8 @@ type SemanticInfo struct {
 	//     cast<SomeInterface>(&value)
 	//
 	// conversions. The key is the GenericExpr used as the call callee.
-	InterfaceConversions map[*ast.GenericExpr]InterfaceConversionResolution
+	InterfaceConversions   map[*ast.GenericExpr]InterfaceConversionResolution
+	TaskPointerResolutions map[*ast.TaskPointerExpr]TaskPointerResolution
 }
 
 func (c *Checker) SemanticInfo() SemanticInfo {
@@ -660,6 +734,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		InterfaceConversions: make(
 			map[*ast.GenericExpr]InterfaceConversionResolution,
 			len(c.interfaceConversions),
+		),
+		TaskPointerResolutions: make(
+			map[*ast.TaskPointerExpr]TaskPointerResolution,
+			len(c.taskPointerResolutions),
 		),
 	}
 
@@ -697,6 +775,16 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 
 	for expr, resolution := range c.interfaceConversions {
 		info.InterfaceConversions[expr] = resolution
+	}
+
+	for expr, resolution := range c.taskPointerResolutions {
+		cloned := resolution
+		cloned.GenericArguments = append(
+			[]GenericArgumentInfo(nil),
+			resolution.GenericArguments...,
+		)
+
+		info.TaskPointerResolutions[expr] = cloned
 	}
 
 	return info
@@ -805,6 +893,8 @@ type Checker struct {
 
 	interfaceConversions map[*ast.GenericExpr]InterfaceConversionResolution
 
+	taskPointerResolutions map[*ast.TaskPointerExpr]TaskPointerResolution
+
 	options Options
 
 	genericConstraintEvalStack []string
@@ -851,6 +941,8 @@ func NewWithPackagesAndOptions(
 
 		interfaceConversions: map[*ast.GenericExpr]InterfaceConversionResolution{},
 
+		taskPointerResolutions: map[*ast.TaskPointerExpr]TaskPointerResolution{},
+
 		options:       options,
 		packageScopes: map[string]*Scope{},
 		implByDecl:    map[*ast.ImplDecl]*ImplInfo{},
@@ -862,6 +954,19 @@ func NewWithPackagesAndOptions(
 	c.importPackageImpls()
 
 	return c
+}
+
+func (c *Checker) TaskPointerResolutionFor(
+	expr *ast.TaskPointerExpr,
+) (TaskPointerResolution, bool) {
+	if c == nil || expr == nil {
+		return TaskPointerResolution{}, false
+	}
+
+	resolution, ok :=
+		c.taskPointerResolutions[expr]
+
+	return resolution, ok
 }
 
 func (c *Checker) MultiVarDeclResolutionFor(
@@ -1120,6 +1225,7 @@ func currentPackageOwnsImplTarget(typ *Type) bool {
 
 	case TypeStruct,
 		TypeDistinct,
+		TypeForeign,
 		TypeEnum,
 		TypeUnion:
 		name := nominalBaseName(typ)
@@ -2371,9 +2477,16 @@ func (c *Checker) qualifyImportedTypeForPackageSeen(packageName string, typ *Typ
 	out := *typ
 	seen[typ] = &out
 
+	out.ForeignABI =
+		qualifyForeignTaskABIInfo(
+			packageName,
+			typ.ForeignABI,
+		)
+
 	switch typ.Kind {
 	case TypeStruct,
 		TypeDistinct,
+		TypeForeign,
 		TypeEnum,
 		TypeUnion,
 		TypeInterface:
@@ -2501,6 +2614,36 @@ func (c *Checker) declareDecl(
 			Node: d,
 		})
 
+	case *ast.ForeignTypeDecl:
+		scope.Declare(&Symbol{
+			Name: d.Name.Name,
+			Kind: SymbolType,
+			Type: &Type{
+				Kind: TypeForeign,
+				Name: d.Name.Name,
+			},
+			Span: d.Name.Span(),
+			Node: d,
+		})
+
+	case *ast.ForeignValueDecl:
+		scope.Declare(&Symbol{
+			Name: d.Name.Name,
+			Kind: SymbolConst,
+			Type: InvalidType,
+			Span: d.Name.Span(),
+			Node: d,
+		})
+
+	case *ast.ForeignTaskDecl:
+		scope.Declare(&Symbol{
+			Name: d.Name.Name,
+			Kind: SymbolForeignTaskABI,
+			Type: InvalidType,
+			Span: d.Name.Span(),
+			Node: d,
+		})
+
 	case *ast.StructDecl:
 		scope.Declare(&Symbol{
 			Name: d.Name.Name,
@@ -2603,6 +2746,68 @@ func (c *Checker) declareDecl(
 	}
 }
 
+func (c *Checker) prepareForeignValueDecl(
+	scope *Scope,
+	d *ast.ForeignValueDecl,
+) {
+	if d == nil {
+		return
+	}
+
+	sym := scope.LookupLocal(d.Name.Name)
+	if sym == nil {
+		return
+	}
+
+	typ := c.typeFromAst(
+		scope,
+		d.Type,
+	)
+
+	if typ == nil {
+		typ = InvalidType
+	}
+
+	switch typ.Kind {
+	case TypeInvalid:
+		sym.Type = InvalidType
+		return
+
+	case TypeVoid,
+		TypeNil,
+		TypeEnumLiteral,
+		TypeUntypedInt,
+		TypeUntypedFloat,
+		TypeVariadic,
+		TypeTask,
+		TypePackage,
+		TypeValueParam,
+		TypeInterfaceSelf:
+		c.diags.Add(
+			d.Type.Span(),
+			fmt.Sprintf(
+				"%s cannot be used as @foreign_value type",
+				typ.String(),
+			),
+		)
+
+		sym.Type = InvalidType
+		return
+	}
+
+	if c.typeContainsGenericPlaceholder(typ) {
+		c.diags.Add(
+			d.Type.Span(),
+			"@foreign_value requires a concrete type",
+		)
+
+		sym.Type = InvalidType
+		return
+	}
+
+	sym.Type = typ
+}
+
 func (c *Checker) prepareTaskSymbolType(scope *Scope, sym *Symbol, d *ast.TaskDecl) *Type {
 	if sym == nil || d == nil {
 		return InvalidType
@@ -2686,6 +2891,18 @@ func (c *Checker) prepareDecl(scope *Scope, decl ast.Decl) {
 			c.prepareTaskSymbolType(scope, sym, d)
 		}
 
+	case *ast.ForeignValueDecl:
+		c.prepareForeignValueDecl(
+			scope,
+			d,
+		)
+
+	case *ast.ForeignTypeDecl:
+		// Fully prepared during declaration.
+
+	case *ast.ForeignTaskDecl:
+		// Untyped ABI metadata. The attached task validates the reference.
+		//
 	case *ast.InterfaceDecl:
 		c.prepareInterfaceDecl(scope, d)
 
@@ -2945,6 +3162,12 @@ func (c *Checker) genericExprReferencesPlaceholder(
 	}
 
 	switch e := expr.(type) {
+	case *ast.TaskPointerExpr:
+		return c.genericExprReferencesPlaceholder(
+			scope,
+			e.Task,
+		)
+
 	case *ast.IdentExpr:
 		sym := scope.Lookup(e.Name.Name)
 		if sym == nil {
@@ -3510,7 +3733,16 @@ func (c *Checker) checkDecl(scope *Scope, decl ast.Decl) {
 	// Already prepared.
 
 	case *ast.EnumDecl:
-		// Already prepared and validated.
+	// Already prepared and validated.
+
+	case *ast.ForeignTypeDecl:
+		// Already prepared.
+
+	case *ast.ForeignValueDecl:
+		// Already prepared.
+
+	case *ast.ForeignTaskDecl:
+		// Compile-time C ABI metadata only.
 
 	case *ast.UnionDecl:
 	// Later phase.
@@ -4572,6 +4804,7 @@ func sameOverloadSignatureType(
 		return true
 
 	case TypeDistinct,
+		TypeForeign,
 		TypeEnum,
 		TypeUnion,
 		TypeTypeParam,
@@ -4719,6 +4952,24 @@ func (c *Checker) substituteInterfaceSelf(
 	}
 }
 
+func (c *Checker) taskTypeFromImplAlias(
+	scope *Scope,
+	expr ast.Expr,
+) *Type {
+	if expr == nil {
+		return InvalidType
+	}
+
+	return c.taskFromGenericArg(
+		scope,
+		ast.GenericArg{
+			Kind: ast.GenericArgExpr,
+			Expr: expr,
+			Loc:  expr.Span(),
+		},
+	)
+}
+
 func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 	valid := true
 	usedEntries := map[string]bool{}
@@ -4769,7 +5020,8 @@ func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 		case entry.TaskSymbol != nil:
 			actual = entry.TaskSymbol.Type
 
-			if taskDecl, ok := entry.TaskSymbol.Node.(*ast.TaskDecl); ok {
+			if taskDecl, ok :=
+				entry.TaskSymbol.Node.(*ast.TaskDecl); ok {
 				if len(taskDecl.GenericParams) > 0 {
 					c.diags.Add(
 						taskDecl.Name.Span(),
@@ -4780,7 +5032,10 @@ func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 			}
 
 		case entry.Alias != nil:
-			actual = c.checkExpr(info.Scope, entry.Alias)
+			actual = c.taskTypeFromImplAlias(
+				info.Scope,
+				entry.Alias,
+			)
 
 		default:
 			c.diags.Add(
@@ -4794,9 +5049,15 @@ func (c *Checker) checkManualImplInfo(info *ImplInfo) bool {
 			continue
 		}
 
+		if actual == nil ||
+			actual.Kind == TypeInvalid {
+			valid = false
+			continue
+		}
+
 		if (req.IsPure || req.IsTrustedPure) &&
-			(actual == nil ||
-				(!actual.IsPure && !actual.IsTrustedPure)) {
+			(!actual.IsPure &&
+				!actual.IsTrustedPure) {
 			c.diags.Add(
 				entry.Span,
 				fmt.Sprintf(
@@ -5103,6 +5364,7 @@ func (c *Checker) matchImplType(
 		return pattern.Name == actual.Name
 
 	case TypeDistinct,
+		TypeForeign,
 		TypeEnum,
 		TypeUnion,
 		TypeTypeParam,
@@ -6431,6 +6693,10 @@ func (c *Checker) taskTypeFromImportedGenericSignature(scope *Scope, packageName
 		IsPure:          generic.IsPure,
 		IsIntrinsic:     generic.IsIntrinsic,
 		IsTrustedPure:   generic.IsTrustedPure,
+		ForeignABI: qualifyForeignTaskABIInfo(
+			packageName,
+			generic.ForeignABI,
+		),
 	}
 }
 
@@ -6440,6 +6706,18 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 	}
 
 	switch typ.Kind {
+	case TypeForeign:
+		out := *typ
+
+		if out.Name != "" &&
+			packageName != "" &&
+			!strings.Contains(out.Name, ".") {
+			out.Name =
+				packageName + "." + out.Name
+		}
+
+		return &out
+
 	case TypeTypeParam:
 		// Important: substituted caller-provided type arguments must NOT be
 		// qualified with the imported package name.
@@ -6483,6 +6761,11 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 
 	case TypeStruct:
 		out := *typ
+		out.ForeignABI =
+			qualifyForeignTaskABIInfo(
+				packageName,
+				typ.ForeignABI,
+			)
 		out.Fields = nil
 		out.GenericParams = nil
 		out.GenericArguments = nil
@@ -6673,6 +6956,9 @@ func (c *Checker) taskTypeFromGenericSignature(scope *Scope, generic *Type, args
 		IsPure:          generic.IsPure,
 		IsIntrinsic:     generic.IsIntrinsic,
 		IsTrustedPure:   generic.IsTrustedPure,
+		ForeignABI: cloneForeignTaskABIInfo(
+			generic.ForeignABI,
+		),
 	}
 }
 
@@ -6822,6 +7108,10 @@ func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSu
 
 	case TypeTask:
 		out := *typ
+		out.ForeignABI =
+			cloneForeignTaskABIInfo(
+				typ.ForeignABI,
+			)
 		out.Params = nil
 		out.Results = nil
 
@@ -6981,6 +7271,141 @@ func (c *Checker) taskTypeFromGenericCall(scope *Scope, d *ast.TaskDecl, args []
 		IsPure:          d.IsPure,
 		IsIntrinsic:     d.IsIntrinsic,
 		IsTrustedPure:   d.IsTrustedPure,
+		ForeignABI: c.foreignTaskABIFromExpr(
+			scope,
+			d.ForeignABI,
+		),
+	}
+}
+
+func (c *Checker) foreignTaskABIFromExpr(
+	scope *Scope,
+	expr ast.Expr,
+) *ForeignTaskABIInfo {
+	if expr == nil {
+		return nil
+	}
+
+	if scope == nil {
+		scope = c.global
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+
+		if sym == nil {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"undefined foreign task ABI %q",
+					e.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		if sym.Kind != SymbolForeignTaskABI {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"%q is not a foreign task ABI",
+					e.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		decl, _ :=
+			sym.Node.(*ast.ForeignTaskDecl)
+
+		return &ForeignTaskABIInfo{
+			Name: e.Name.Name,
+			Decl: decl,
+			Span: sym.Span,
+		}
+
+	case *ast.SelectorExpr:
+		id, ok :=
+			e.Left.(*ast.IdentExpr)
+
+		if !ok {
+			c.diags.Add(
+				e.Span(),
+				"foreign task ABI must be a name or package-qualified name",
+			)
+			return nil
+		}
+
+		pkgSym := scope.Lookup(id.Name.Name)
+
+		if pkgSym == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"undefined package %q",
+					id.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		if pkgSym.Kind != SymbolPackage ||
+			pkgSym.Package == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"%q is not a package",
+					id.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		member :=
+			pkgSym.Package.Symbols[e.Name.Name]
+
+		if member == nil {
+			c.diags.Add(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"package %s has no foreign task ABI %q",
+					id.Name.Name,
+					e.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		if member.Kind != SymbolForeignTaskABI {
+			c.diags.Add(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"package symbol %s.%s is not a foreign task ABI",
+					id.Name.Name,
+					e.Name.Name,
+				),
+			)
+			return nil
+		}
+
+		decl, _ :=
+			member.Node.(*ast.ForeignTaskDecl)
+
+		return &ForeignTaskABIInfo{
+			Name:        e.Name.Name,
+			PackageName: id.Name.Name,
+			Decl:        decl,
+			Span:        member.Span,
+		}
+
+	default:
+		c.diags.Add(
+			expr.Span(),
+			"foreign task ABI must be a name or package-qualified name",
+		)
+
+		return nil
 	}
 }
 
@@ -6991,6 +7416,11 @@ func (c *Checker) taskTypeFromDecl(
 	genericScope := c.scopeWithGenericParams(
 		scope,
 		d.GenericParams,
+	)
+
+	foreignABI := c.foreignTaskABIFromExpr(
+		genericScope,
+		d.ForeignABI,
 	)
 
 	var params []*Type
@@ -7083,6 +7513,7 @@ func (c *Checker) taskTypeFromDecl(
 		IsIntrinsic:     d.IsIntrinsic,
 		IsTrustedPure:   d.IsTrustedPure,
 		GenericParams:   d.GenericParams,
+		ForeignABI:      foreignABI,
 	}
 }
 
@@ -8292,6 +8723,310 @@ func (c *Checker) checkInlineArrayExpr(
 	return result
 }
 
+func (c *Checker) taskPointerSymbol(
+	scope *Scope,
+	expr ast.Expr,
+) (*Symbol, string, bool) {
+	if scope == nil {
+		scope = c.global
+	}
+
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		sym := scope.Lookup(e.Name.Name)
+
+		if sym == nil {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"undefined task %q in @task_pointer",
+					e.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		if sym.Kind != SymbolTask {
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"@task_pointer expects a task, got %q",
+					e.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		return sym, "", true
+
+	case *ast.SelectorExpr:
+		id, ok :=
+			e.Left.(*ast.IdentExpr)
+
+		if !ok {
+			c.diags.Add(
+				e.Span(),
+				"@task_pointer expects a task name or package-qualified task name",
+			)
+			return nil, "", false
+		}
+
+		pkgSym := scope.Lookup(id.Name.Name)
+
+		if pkgSym == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"undefined package %q",
+					id.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		if pkgSym.Kind != SymbolPackage ||
+			pkgSym.Package == nil {
+			c.diags.Add(
+				id.Span(),
+				fmt.Sprintf(
+					"%q is not a package",
+					id.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		member :=
+			pkgSym.Package.Symbols[e.Name.Name]
+
+		if member == nil {
+			c.diags.Add(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"package %s has no task %q",
+					id.Name.Name,
+					e.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		if member.Kind != SymbolTask {
+			c.diags.Add(
+				e.Name.Span(),
+				fmt.Sprintf(
+					"package symbol %s.%s is not a task",
+					id.Name.Name,
+					e.Name.Name,
+				),
+			)
+			return nil, "", false
+		}
+
+		return c.importedPackageMemberSymbol(
+			id.Name.Name,
+			member,
+		), id.Name.Name, true
+
+	default:
+		c.diags.Add(
+			expr.Span(),
+			"@task_pointer expects a task name, package-qualified task, or specialized generic task",
+		)
+
+		return nil, "", false
+	}
+}
+
+func (c *Checker) resolveTaskPointerTarget(
+	scope *Scope,
+	expr ast.Expr,
+) (TaskPointerResolution, bool) {
+	if expr == nil {
+		return TaskPointerResolution{}, false
+	}
+
+	if gen, ok := expr.(*ast.GenericExpr); ok {
+		sym, packageName, resolved :=
+			c.genericBaseSymbol(
+				scope,
+				gen.Base,
+			)
+
+		if !resolved {
+			return TaskPointerResolution{}, false
+		}
+
+		if sym.Kind != SymbolTask {
+			c.diags.Add(
+				gen.Base.Span(),
+				fmt.Sprintf(
+					"@task_pointer expects a task, got %q",
+					sym.Name,
+				),
+			)
+			return TaskPointerResolution{}, false
+		}
+
+		c.ensureTaskSymbolPrepared(
+			scope,
+			sym,
+		)
+
+		if sym.Type == nil ||
+			sym.Type.Kind != TypeTask {
+			c.diags.Add(
+				gen.Base.Span(),
+				"@task_pointer target has invalid task type",
+			)
+			return TaskPointerResolution{}, false
+		}
+
+		if len(sym.Type.GenericParams) == 0 {
+			c.diags.Add(
+				gen.Span(),
+				fmt.Sprintf(
+					"task %q is not generic",
+					sym.Name,
+				),
+			)
+			return TaskPointerResolution{}, false
+		}
+
+		c.checkGenericArgsAgainstParams(
+			scope,
+			gen.Args,
+			sym.Type.GenericParams,
+			gen.Span(),
+		)
+
+		if len(gen.Args) !=
+			len(sym.Type.GenericParams) {
+			return TaskPointerResolution{}, false
+		}
+
+		var instantiated *Type
+
+		switch {
+		case packageName != "":
+			instantiated =
+				c.taskTypeFromImportedGenericSignature(
+					scope,
+					packageName,
+					sym.Type,
+					gen.Args,
+					gen.Span(),
+				)
+
+		default:
+			taskDecl, _ :=
+				sym.Node.(*ast.TaskDecl)
+
+			if taskDecl != nil {
+				instantiated =
+					c.taskTypeFromGenericCall(
+						scope,
+						taskDecl,
+						gen.Args,
+					)
+			} else {
+				instantiated =
+					c.taskTypeFromGenericSignature(
+						scope,
+						sym.Type,
+						gen.Args,
+						gen.Span(),
+					)
+			}
+		}
+
+		if instantiated == nil ||
+			instantiated.Kind != TypeTask {
+			c.diags.Add(
+				gen.Span(),
+				"@task_pointer target could not be specialized",
+			)
+			return TaskPointerResolution{}, false
+		}
+
+		return TaskPointerResolution{
+			Candidate:   sym,
+			TaskType:    instantiated,
+			PackageName: packageName,
+			GenericArguments: c.checkedGenericArguments(
+				scope,
+				sym.Type.GenericParams,
+				gen.Args,
+			),
+		}, true
+	}
+
+	sym, packageName, ok :=
+		c.taskPointerSymbol(
+			scope,
+			expr,
+		)
+
+	if !ok {
+		return TaskPointerResolution{}, false
+	}
+
+	c.ensureTaskSymbolPrepared(
+		scope,
+		sym,
+	)
+
+	if sym.Type == nil ||
+		sym.Type.Kind != TypeTask {
+		c.diags.Add(
+			expr.Span(),
+			"@task_pointer target has invalid task type",
+		)
+		return TaskPointerResolution{}, false
+	}
+
+	if len(sym.Type.GenericParams) > 0 {
+		c.diags.Add(
+			expr.Span(),
+			fmt.Sprintf(
+				"generic task %q requires full specialization in @task_pointer",
+				sym.Name,
+			),
+		)
+		return TaskPointerResolution{}, false
+	}
+
+	return TaskPointerResolution{
+		Candidate:   sym,
+		TaskType:    sym.Type,
+		PackageName: packageName,
+	}, true
+}
+
+func (c *Checker) checkTaskPointerExpr(
+	scope *Scope,
+	e *ast.TaskPointerExpr,
+) *Type {
+	if e == nil {
+		return InvalidType
+	}
+
+	resolution, ok :=
+		c.resolveTaskPointerTarget(
+			scope,
+			e.Task,
+		)
+
+	if !ok {
+		return InvalidType
+	}
+
+	c.taskPointerResolutions[e] =
+		resolution
+
+	return RawptrType
+}
+
 func (c *Checker) checkExpr(
 	scope *Scope,
 	expr ast.Expr,
@@ -8327,6 +9062,31 @@ func (c *Checker) checkExpr(
 			return InvalidType
 		}
 
+		switch sym.Kind {
+		case SymbolTask:
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"task %q cannot be used as a runtime value; use @task_pointer(%s) for an opaque C address",
+					e.Name.Name,
+					e.Name.Name,
+				),
+			)
+
+			return InvalidType
+
+		case SymbolForeignTaskABI:
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"foreign task ABI %q is compile-time metadata and cannot be used as a value",
+					e.Name.Name,
+				),
+			)
+
+			return InvalidType
+		}
+
 		return sym.Type
 
 	case *ast.DotIdentExpr:
@@ -8334,6 +9094,12 @@ func (c *Checker) checkExpr(
 			Kind: TypeEnumLiteral,
 			Name: e.Name.Name,
 		}
+
+	case *ast.TaskPointerExpr:
+		return c.checkTaskPointerExpr(
+			scope,
+			e,
+		)
 
 	case *ast.InlineArrayExpr:
 		return c.checkInlineArrayExpr(
@@ -11301,6 +12067,34 @@ func (c *Checker) checkPackageSelectorExpr(pkgSym *Symbol, e *ast.SelectorExpr) 
 		return InvalidType
 	}
 
+	switch member.Kind {
+	case SymbolTask:
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"task %s.%s cannot be used as a runtime value; use @task_pointer(%s.%s)",
+				pkgSym.Name,
+				e.Name.Name,
+				pkgSym.Name,
+				e.Name.Name,
+			),
+		)
+
+		return InvalidType
+
+	case SymbolForeignTaskABI:
+		c.diags.Add(
+			e.Span(),
+			fmt.Sprintf(
+				"foreign task ABI %s.%s is compile-time metadata and cannot be used as a value",
+				pkgSym.Name,
+				e.Name.Name,
+			),
+		)
+
+		return InvalidType
+	}
+
 	qualified := c.importedPackageMemberSymbol(pkgSym.Name, member)
 	if qualified == nil {
 		return InvalidType
@@ -12233,6 +13027,15 @@ func (c *Checker) substituteGenericExpr(expr ast.Expr, subst map[string]ast.Gene
 	}
 
 	switch e := expr.(type) {
+	case *ast.TaskPointerExpr:
+		return &ast.TaskPointerExpr{
+			Task: c.substituteGenericExpr(
+				e.Task,
+				subst,
+			),
+			Loc: e.Loc,
+		}
+
 	case *ast.IdentExpr:
 		if arg, ok := subst[e.Name.Name]; ok && arg.Kind == ast.GenericArgExpr && arg.Expr != nil {
 			return arg.Expr
@@ -12449,6 +13252,11 @@ func exprDisplay(expr ast.Expr) string {
 	}
 
 	switch e := expr.(type) {
+	case *ast.TaskPointerExpr:
+		return "@task_pointer(" +
+			exprDisplay(e.Task) +
+			")"
+
 	case *ast.IdentExpr:
 		return e.Name.Name
 
@@ -13153,21 +13961,44 @@ func (c *Checker) taskFromGenericArg(scope *Scope, arg ast.GenericArg) *Type {
 	case *ast.IdentExpr:
 		sym := scope.Lookup(e.Name.Name)
 		if sym == nil {
-			c.diags.Add(e.Span(), fmt.Sprintf("undefined task argument %q", e.Name.Name))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"undefined task argument %q",
+					e.Name.Name,
+				),
+			)
 			return InvalidType
 		}
 
 		if sym.Kind != SymbolTask {
-			c.diags.Add(e.Span(), fmt.Sprintf("expected task argument, got %q", e.Name.Name))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"expected task argument, got %q",
+					e.Name.Name,
+				),
+			)
 			return InvalidType
 		}
+
+		c.ensureTaskSymbolPrepared(
+			scope,
+			sym,
+		)
 
 		if sym.Type == nil {
 			return InvalidType
 		}
 
 		if len(sym.Type.GenericParams) > 0 {
-			c.diags.Add(e.Span(), fmt.Sprintf("generic task argument %q requires specialization", e.Name.Name))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"generic task argument %q requires specialization",
+					e.Name.Name,
+				),
+			)
 			return InvalidType
 		}
 
@@ -16088,6 +16919,7 @@ func (c *Checker) sameType(
 		return a.Name == b.Name
 
 	case TypeDistinct,
+		TypeForeign,
 		TypeEnum,
 		TypeUnion,
 		TypeTypeParam,
@@ -17485,7 +18317,8 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 		case SymbolConst,
 			SymbolType,
 			SymbolTask,
-			SymbolOverload:
+			SymbolOverload,
+			SymbolForeignTaskABI:
 			info.Symbols[symbolName] = exportSymbolSignatureOnly(sym)
 		}
 	}
@@ -17666,6 +18499,11 @@ func cloneExportType(t *Type, seen map[*Type]*Type) *Type {
 
 	out := *t
 	seen[t] = &out
+
+	out.ForeignABI =
+		cloneForeignTaskABIInfo(
+			t.ForeignABI,
+		)
 
 	out.Elem = cloneExportType(t.Elem, seen)
 	out.Underlying = cloneExportType(t.Underlying, seen)

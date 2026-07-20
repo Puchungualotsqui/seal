@@ -54,6 +54,91 @@ func runCheckerTest(
 	}
 }
 
+func checkerTaskPointerFromVarStmt(
+	t *testing.T,
+	stmt ast.Stmt,
+) *ast.TaskPointerExpr {
+	t.Helper()
+
+	decl, ok := stmt.(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf(
+			"statement type = %T, want *ast.VarDeclStmt",
+			stmt,
+		)
+	}
+
+	expr, ok := decl.Value.(*ast.TaskPointerExpr)
+	if !ok {
+		t.Fatalf(
+			"variable value type = %T, want *ast.TaskPointerExpr",
+			decl.Value,
+		)
+	}
+
+	return expr
+}
+
+func assertTaskPointerResolution(
+	t *testing.T,
+	c *Checker,
+	expr *ast.TaskPointerExpr,
+) TaskPointerResolution {
+	t.Helper()
+
+	resolution, ok :=
+		c.TaskPointerResolutionFor(expr)
+
+	if !ok {
+		t.Fatalf(
+			"task pointer expression has no checker resolution",
+		)
+	}
+
+	if resolution.Candidate == nil {
+		t.Fatalf(
+			"task pointer resolution has no candidate",
+		)
+	}
+
+	if resolution.TaskType == nil {
+		t.Fatalf(
+			"task pointer resolution has no task type",
+		)
+	}
+
+	return resolution
+}
+
+func requireCheckerDiagnosticContains(
+	t *testing.T,
+	reporter *diag.Reporter,
+	want string,
+) {
+	t.Helper()
+
+	if reporter == nil {
+		t.Fatal("reporter is nil")
+	}
+
+	if !reporter.HasErrors() {
+		t.Fatalf(
+			"expected checker diagnostic containing %q, got no errors",
+			want,
+		)
+	}
+
+	got := reporter.String()
+
+	if !strings.Contains(got, want) {
+		t.Fatalf(
+			"expected checker diagnostic containing %q, got:\n%s",
+			want,
+			got,
+		)
+	}
+}
+
 func runCheckerTestWithPackages(
 	t *testing.T,
 	input string,
@@ -12295,6 +12380,688 @@ Main :: task() {
 		t.Fatalf(
 			"unexpected diagnostics:\n%s",
 			run.Reporter.String(),
+		)
+	}
+}
+
+func TestForeignTypeAndValueChecker(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+ThreadResult :: @foreign_type(
+    "SEAL_THREAD_RESULT"
+)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    "SEAL_THREAD_SUCCESS"
+)
+
+Main :: task() {
+    result: ThreadResult = thread_success
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	typeSymbol :=
+		run.Scope.LookupLocal("ThreadResult")
+
+	if typeSymbol == nil {
+		t.Fatal(
+			"foreign type symbol ThreadResult was not declared",
+		)
+	}
+
+	if typeSymbol.Kind != SymbolType {
+		t.Fatalf(
+			"ThreadResult symbol kind = %v, want SymbolType",
+			typeSymbol.Kind,
+		)
+	}
+
+	if typeSymbol.Type == nil {
+		t.Fatal(
+			"ThreadResult has nil checker type",
+		)
+	}
+
+	if typeSymbol.Type.Kind != TypeForeign {
+		t.Fatalf(
+			"ThreadResult type kind = %v, want TypeForeign",
+			typeSymbol.Type.Kind,
+		)
+	}
+
+	if typeSymbol.Type.String() != "ThreadResult" {
+		t.Fatalf(
+			"ThreadResult type string = %q, want %q",
+			typeSymbol.Type.String(),
+			"ThreadResult",
+		)
+	}
+
+	valueSymbol :=
+		run.Scope.LookupLocal("thread_success")
+
+	if valueSymbol == nil {
+		t.Fatal(
+			"foreign value symbol thread_success was not declared",
+		)
+	}
+
+	if valueSymbol.Kind != SymbolConst {
+		t.Fatalf(
+			"thread_success symbol kind = %v, want SymbolConst",
+			valueSymbol.Kind,
+		)
+	}
+
+	if valueSymbol.Type == nil ||
+		!run.Checker.sameType(
+			valueSymbol.Type,
+			typeSymbol.Type,
+		) {
+		t.Fatalf(
+			"thread_success type = %v, want ThreadResult",
+			valueSymbol.Type,
+		)
+	}
+}
+
+func TestForeignTypesAreNominal(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+WindowsResult :: @foreign_type(
+    "DWORD"
+)
+
+PosixResult :: @foreign_type(
+    "void *"
+)
+
+windows_success :: @foreign_value(
+    WindowsResult,
+    "0"
+)
+
+Main :: task() {
+    value: PosixResult = windows_success
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		"cannot assign WindowsResult to PosixResult",
+	)
+}
+
+func TestForeignTaskABIAttachedToTaskType(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+	ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+	)
+
+	thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+	)
+
+	ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+	)
+
+	WorkerEntry :: @foreign(ThreadEntryABI) task(
+    context rawptr,
+	) ThreadResult {
+    return thread_success
+	}
+	`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	abiSymbol :=
+		run.Scope.LookupLocal("ThreadEntryABI")
+
+	if abiSymbol == nil {
+		t.Fatal(
+			"foreign task ABI symbol was not declared",
+		)
+	}
+
+	if abiSymbol.Kind != SymbolForeignTaskABI {
+		t.Fatalf(
+			"ThreadEntryABI symbol kind = %v, want SymbolForeignTaskABI",
+			abiSymbol.Kind,
+		)
+	}
+
+	taskSymbol :=
+		run.Scope.LookupLocal("WorkerEntry")
+
+	if taskSymbol == nil {
+		t.Fatal(
+			"task WorkerEntry was not declared",
+		)
+	}
+
+	if taskSymbol.Type == nil ||
+		taskSymbol.Type.Kind != TypeTask {
+		t.Fatalf(
+			"WorkerEntry type = %v, want task type",
+			taskSymbol.Type,
+		)
+	}
+
+	if taskSymbol.Type.ForeignABI == nil {
+		t.Fatal(
+			"WorkerEntry task type has no foreign ABI",
+		)
+	}
+
+	if taskSymbol.Type.ForeignABI.Name !=
+		"ThreadEntryABI" {
+		t.Fatalf(
+			"foreign ABI name = %q, want ThreadEntryABI",
+			taskSymbol.Type.ForeignABI.Name,
+		)
+	}
+}
+
+func TestTaskPointerResolution(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+	ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+	)
+
+	thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+	)
+
+	ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+	)
+
+	WorkerEntry :: @foreign(ThreadEntryABI) task(
+    context rawptr,
+	) ThreadResult {
+    return thread_success
+	}
+
+	Main :: task() {
+    pointer := @task_pointer(WorkerEntry)
+	}
+	`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	pointerExpr :=
+		checkerTaskPointerFromVarStmt(
+			t,
+			stmt,
+		)
+
+	exprType, ok :=
+		run.Checker.ExprTypeFor(
+			pointerExpr,
+		)
+
+	if !ok {
+		t.Fatal(
+			"task pointer expression has no checker expression type",
+		)
+	}
+
+	if !run.Checker.sameType(
+		exprType,
+		RawptrType,
+	) {
+		t.Fatalf(
+			"task pointer expression type = %s, want rawptr",
+			exprType.String(),
+		)
+	}
+
+	resolution :=
+		assertTaskPointerResolution(
+			t,
+			run.Checker,
+			pointerExpr,
+		)
+
+	if resolution.Candidate.Name !=
+		"WorkerEntry" {
+		t.Fatalf(
+			"task pointer candidate = %q, want WorkerEntry",
+			resolution.Candidate.Name,
+		)
+	}
+
+	if resolution.PackageName != "" {
+		t.Fatalf(
+			"task pointer package = %q, want empty",
+			resolution.PackageName,
+		)
+	}
+
+	if len(
+		resolution.GenericArguments,
+	) != 0 {
+		t.Fatalf(
+			"task pointer generic argument count = %d, want 0",
+			len(resolution.GenericArguments),
+		)
+	}
+
+	if resolution.TaskType.ForeignABI == nil {
+		t.Fatal(
+			"resolved task type lost its foreign ABI",
+		)
+	}
+
+	if resolution.TaskType.ForeignABI.Name !=
+		"ThreadEntryABI" {
+		t.Fatalf(
+			"resolved task ABI = %q, want ThreadEntryABI",
+			resolution.TaskType.ForeignABI.Name,
+		)
+	}
+}
+
+func TestGenericTaskPointerResolution(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+ThreadResult :: @foreign_type(
+SEAL_THREAD_RESULT
+)
+
+thread_success :: @foreign_value(
+ThreadResult,
+SEAL_THREAD_SUCCESS
+)
+
+ThreadEntryABI :: @foreign_task(
+declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+address SEAL_THREAD_ADDRESS({name}),
+)
+
+ProcessInt :: task(
+value int,
+) {
+}
+
+WorkerEntry :: @foreign(ThreadEntryABI) task<T type, Worker task[(T)]>(
+context rawptr,
+) ThreadResult {
+return thread_success
+}
+
+Main :: task() {
+pointer := @task_pointer(
+WorkerEntry<int, ProcessInt>
+)
+}
+`,
+	)
+
+	if run.Reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics:\n%s",
+			run.Reporter.String(),
+		)
+	}
+
+	stmt := checkerTaskStmt(
+		t,
+		run.File,
+		"Main",
+		0,
+	)
+
+	pointerExpr :=
+		checkerTaskPointerFromVarStmt(
+			t,
+			stmt,
+		)
+
+	pointerType, ok :=
+		run.Checker.ExprTypeFor(
+			pointerExpr,
+		)
+
+	if !ok {
+		t.Fatal(
+			"missing expression type for @task_pointer",
+		)
+	}
+
+	if pointerType != RawptrType {
+		t.Fatalf(
+			"@task_pointer type = %s, want rawptr",
+			pointerType.String(),
+		)
+	}
+
+	resolution :=
+		assertTaskPointerResolution(
+			t,
+			run.Checker,
+			pointerExpr,
+		)
+
+	if resolution.Candidate == nil {
+		t.Fatal(
+			"task pointer resolution has nil candidate",
+		)
+	}
+
+	if resolution.Candidate.Name !=
+		"WorkerEntry" {
+		t.Fatalf(
+			"candidate = %q, want WorkerEntry",
+			resolution.Candidate.Name,
+		)
+	}
+
+	if resolution.TaskType == nil {
+		t.Fatal(
+			"task pointer resolution has nil task type",
+		)
+	}
+
+	if resolution.TaskType.Kind != TypeTask {
+		t.Fatalf(
+			"resolved type kind = %v, want TypeTask",
+			resolution.TaskType.Kind,
+		)
+	}
+
+	if resolution.TaskType.Name !=
+		"WorkerEntry<int, ProcessInt>" {
+		t.Fatalf(
+			"resolved task type name = %q, want %q",
+			resolution.TaskType.Name,
+			"WorkerEntry<int, ProcessInt>",
+		)
+	}
+
+	if len(resolution.GenericArguments) != 2 {
+		t.Fatalf(
+			"generic argument count = %d, want 2",
+			len(resolution.GenericArguments),
+		)
+	}
+
+	typeArgument :=
+		resolution.GenericArguments[0]
+
+	if typeArgument.Category !=
+		ast.GenericParamType {
+		t.Fatalf(
+			"first generic argument category = %v, want GenericParamType",
+			typeArgument.Category,
+		)
+	}
+
+	if typeArgument.Type != IntType {
+		t.Fatalf(
+			"first generic argument type = %s, want int",
+			typeArgument.Type.String(),
+		)
+	}
+
+	taskArgument :=
+		resolution.GenericArguments[1]
+
+	if taskArgument.Category !=
+		ast.GenericParamTask {
+		t.Fatalf(
+			"second generic argument category = %v, want GenericParamTask",
+			taskArgument.Category,
+		)
+	}
+
+	if taskArgument.Type == nil {
+		t.Fatal(
+			"second generic argument has nil task type",
+		)
+	}
+
+	if taskArgument.Type.Kind != TypeTask {
+		t.Fatalf(
+			"second generic argument type kind = %v, want TypeTask",
+			taskArgument.Type.Kind,
+		)
+	}
+
+	if len(taskArgument.Type.Params) != 1 ||
+		taskArgument.Type.Params[0] != IntType {
+		t.Fatalf(
+			"second generic argument type = %s, want task(int)",
+			taskArgument.Type.String(),
+		)
+	}
+
+	if resolution.TaskType.ForeignABI == nil {
+		t.Fatal(
+			"generic task specialization lost foreign ABI metadata",
+		)
+	}
+
+	if resolution.TaskType.ForeignABI.Name !=
+		"ThreadEntryABI" {
+		t.Fatalf(
+			"foreign ABI = %q, want ThreadEntryABI",
+			resolution.TaskType.ForeignABI.Name,
+		)
+	}
+
+}
+
+func TestTaskCannotBeUsedAsRuntimeValue(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+Worker :: task(value int) {
+}
+
+Main :: task() {
+    value := Worker
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		`task "Worker" cannot be used as a runtime value`,
+	)
+}
+
+func TestForeignTaskABICannotBeUsedAsValue(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+ThreadEntryABI :: @foreign_task(
+    declaration void {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+
+Main :: task() {
+    value := ThreadEntryABI
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		`foreign task ABI "ThreadEntryABI" is compile-time metadata and cannot be used as a value`,
+	)
+}
+
+func TestTaskPointerRequiresGenericSpecialization(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+WorkerEntry :: task <T type>(
+    context rawptr,
+) {
+}
+
+Main :: task() {
+    pointer := @task_pointer(WorkerEntry)
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		`generic task "WorkerEntry" requires full specialization in @task_pointer`,
+	)
+}
+
+func TestTaskPointerRejectsNonTask(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+State :: struct {
+    value int
+}
+
+Main :: task() {
+    pointer := @task_pointer(State)
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		`@task_pointer expects a task`,
+	)
+}
+
+func TestGenericTaskPointerChecksTaskConstraint(
+	t *testing.T,
+) {
+	run := runCheckerTest(
+		t,
+		`
+WrongWorker :: task(value string) {
+}
+
+WorkerEntry :: task <
+    T type,
+    Worker task[(T)],
+>(
+    context rawptr,
+) {
+}
+
+Main :: task() {
+    pointer := @task_pointer(
+        WorkerEntry<int, WrongWorker>
+    )
+}
+`,
+	)
+
+	requireCheckerDiagnosticContains(
+		t,
+		run.Reporter,
+		`generic task parameter "Worker" parameter 1 expects int, got string`,
+	)
+}
+
+func TestForeignValueRejectsTaskNameAsType(
+	t *testing.T,
+) {
+	parsed, reporter := parseCheckerFile(
+		t,
+		"test",
+		`
+Worker :: task() {
+}
+
+invalid_value :: @foreign_value(
+    Worker,
+    SOME_NATIVE_SYMBOL
+)
+`,
+	)
+
+	r := resolver.New(reporter)
+	r.ResolveFile(parsed)
+
+	if !reporter.HasErrors() {
+		t.Fatal(
+			"expected resolver to reject task name as foreign value type",
+		)
+	}
+
+	if got := reporter.String(); !strings.Contains(
+		got,
+		`"Worker" is not a type`,
+	) {
+		t.Fatalf(
+			"expected task-as-type diagnostic, got:\n%s",
+			got,
 		)
 	}
 }

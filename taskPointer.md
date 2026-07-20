@@ -1,92 +1,80 @@
-# Native Task ABI and Task Pointers
+# Seal Update: Foreign Task Pointers and C ABI Declarations
 
-Seal supports exposing task addresses to native code without making tasks first-class runtime values.
+Seal will support passing task addresses to native C code without introducing first-class task values, callable 
+function pointers, compiler-generated trampolines, or compiler-defined calling conventions.
 
-## `@native_abi(modelDefinedByCompiler)`
+## Task pointers
+
+The new `@task_pointer` directive returns the address of a concrete task as an opaque `rawptr`.
 
 ```seal
-@native_abi(ThreadEntry)
-Entry :: task(context rawptr) rawptr {
-    // ...
-}
+entry: rawptr = @task_pointer(WorkerEntry)
 ```
 
-`@native_abi(...)` instructs the compiler to emit a task using a compiler-defined native ABI model.
-
-The model determines details such as:
-
-* parameter and return representation;
-* C calling convention;
-* generated C declaration;
-* platform-specific ABI differences.
-
-For example, `ThreadEntry` may map to the appropriate thread-entry ABI on Windows and POSIX.
-
-The checker must verify that:
-
-* the ABI model exists;
-* the task signature matches the model;
-* the model is valid for the current target;
-* the annotation is not applied to an unsupported declaration.
-
-Invalid ABI models or incompatible task signatures are compile-time errors.
-
-`@native_abi(...)` does not generate a wrapper or trampoline. It changes how the annotated task itself is emitted.
-
----
-
-## `@task_pointer(task)`
+Generic tasks must include all compile-time arguments:
 
 ```seal
-pointer :=
-    @task_pointer(Entry)
+entry := @task_pointer(WorkerEntry<int, Process>)
 ```
 
-`@task_pointer(...)` returns the native address of a statically resolved task as a `rawptr`.
+Seal code cannot invoke this pointer. It is intended only for passing task addresses to foreign C code.
 
-The operand must resolve to exactly one concrete task. For generic or overloaded tasks, all compile-time arguments and overload resolution must already be determined.
+## Foreign task declarations
 
-```seal
-pointer :=
-    @task_pointer(
-        WorkerEntry<Job, ProcessJob>
-    )
-```
-
-The compiler must ensure that the referenced task is emitted even when it has no ordinary Seal caller.
-
-The resulting `rawptr` may be:
-
-* assigned to variables;
-* stored in structs;
-* passed to tasks;
-* returned from tasks;
-* compared;
-* passed to native C code.
-
-It is still only an opaque address in Seal.
-
-Seal code cannot call it:
+Libraries can define how a task is emitted as a C function:
 
 ```seal
-pointer :=
-    @task_pointer(Entry)
-
-pointer() // Invalid: rawptr is not callable.
-```
-
-`@task_pointer(...)` does not change the task ABI. When native code intends to call the address, the task should normally be annotated with the appropriate `@native_abi(...)` model.
-
-```seal
-@native_abi(ThreadEntry)
-Entry :: task(context rawptr) rawptr {
-    return null
-}
-
-nativeStart(
-    @task_pointer(Entry),
-    context,
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address     SEAL_THREAD_ADDRESS({name}),
 )
 ```
 
-Passing a task pointer to native code using an incompatible ABI is unsafe.
+A task can then use that declaration:
+
+```seal
+@foreign(ThreadEntryABI)
+WorkerEntry :: task(context: rawptr) ThreadResult {
+    return thread_success
+}
+```
+
+The `declaration` field controls the generated C function declaration, while `address` controls how 
+`@task_pointer` produces its address.
+
+## Foreign types and values
+
+C-backed types and constants must be declared explicitly in Seal:
+
+```seal
+ThreadResult :: @foreign_type(SEAL_THREAD_RESULT)
+
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS,
+)
+```
+
+The corresponding identifiers are defined by the package's C header:
+
+```c
+#define SEAL_THREAD_RESULT unsigned
+#define SEAL_THREAD_CALL
+#define SEAL_THREAD_SUCCESS 0
+#define SEAL_THREAD_ADDRESS(name) ((void *)(name))
+```
+
+None of these values are compiler magic.
+
+## Compiler responsibility
+
+The Seal compiler only:
+
+* resolves the referenced task
+* substitutes placeholders such as `{name}` and `{arg0_name}`
+* emits the provided C token sequences
+* returns the resulting address as `rawptr`
+
+Seal does not verify whether the foreign declaration matches the target C ABI. ABI correctness remains the 
+responsibility of the library author and the C compiler.
+

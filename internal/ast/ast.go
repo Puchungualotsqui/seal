@@ -325,10 +325,19 @@ type TaskDecl struct {
 	IsTrustedPure bool
 	ExternName    string
 
+	// ForeignABI identifies a @foreign_task declaration used to emit this
+	// task with a custom C declaration and address expression.
+	//
+	//     WorkerEntry :: @foreign(ThreadEntryABI) task(context rawptr) ThreadResult
+	//
+	// A nil value means the task uses Seal's normal C task declaration.
+	ForeignABI Expr
+
 	Params  []Param
 	Results []Type
-	Body    *BlockStmt
-	Loc     source.Span
+
+	Body *BlockStmt
+	Loc  source.Span
 }
 
 func (*TaskDecl) declNode() {}
@@ -582,6 +591,69 @@ type DirectiveDecl struct {
 func (*DirectiveDecl) declNode() {}
 
 func (d *DirectiveDecl) Span() source.Span {
+	return d.Loc
+}
+
+// ForeignTypeDecl exposes a C type expression as a Seal type.
+//
+//	ThreadResult :: @foreign_type(SEAL_THREAD_RESULT)
+//
+// CType is preserved as an opaque token sequence. Seal does not validate that
+// it forms a valid C type.
+type ForeignTypeDecl struct {
+	Name  Ident
+	CType []token.Token
+	Loc   source.Span
+}
+
+func (*ForeignTypeDecl) declNode() {}
+
+func (d *ForeignTypeDecl) Span() source.Span {
+	return d.Loc
+}
+
+// ForeignValueDecl exposes a C expression as a typed Seal constant.
+//
+//	thread_success :: @foreign_value(
+//	    ThreadResult,
+//	    SEAL_THREAD_SUCCESS,
+//	)
+//
+// CValue is preserved as an opaque token sequence. Seal does not validate the
+// C expression.
+type ForeignValueDecl struct {
+	Name   Ident
+	Type   Type
+	CValue []token.Token
+	Loc    source.Span
+}
+
+func (*ForeignValueDecl) declNode() {}
+
+func (d *ForeignValueDecl) Span() source.Span {
+	return d.Loc
+}
+
+// ForeignTaskDecl describes how a Seal task is emitted as a C function and
+// how its address is obtained.
+//
+//	ThreadEntryABI :: @foreign_task(
+//	    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+//	    address     SEAL_THREAD_ADDRESS({name}),
+//	)
+//
+// Declaration and Address are opaque C token templates. Placeholder
+// interpretation is deferred to C generation.
+type ForeignTaskDecl struct {
+	Name        Ident
+	Declaration []token.Token
+	Address     []token.Token
+	Loc         source.Span
+}
+
+func (*ForeignTaskDecl) declNode() {}
+
+func (d *ForeignTaskDecl) Span() source.Span {
 	return d.Loc
 }
 
@@ -1063,6 +1135,23 @@ type GenericExpr struct {
 func (*GenericExpr) exprNode() {}
 
 func (e *GenericExpr) Span() source.Span {
+	return e.Loc
+}
+
+// TaskPointerExpr returns the address of a concrete task as rawptr.
+//
+//	entry := @task_pointer(WorkerEntry)
+//	entry := @task_pointer(WorkerEntry<int, Process>)
+//
+// The resulting pointer is opaque and cannot be invoked by Seal code.
+type TaskPointerExpr struct {
+	Task Expr
+	Loc  source.Span
+}
+
+func (*TaskPointerExpr) exprNode() {}
+
+func (e *TaskPointerExpr) Span() source.Span {
 	return e.Loc
 }
 
