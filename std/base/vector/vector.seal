@@ -25,12 +25,16 @@ ErrorString :: pure task(
     return "vector lengths do not match"
 }
 
-_FromSIMDError :: pure task(
-    error simd.Error,
+/*
+_FromSIMDSuccess deliberately accepts bool instead of simd.Error.
+
+This prevents the private SIMD error type from leaking into generated
+declarations in packages that depend on vector.
+*/
+_FromSIMDSuccess :: pure task(
+    succeeded bool,
 ) Error {
-    if simd.ErrorIsNone(
-        error,
-    ) {
+    if succeeded {
         return .None
     }
 
@@ -74,39 +78,38 @@ _ValidateSource :: pure task<
     return .None
 }
 
-_ValidateDestinationSource ::
-    pure task<
-        T type,
-    >(
-        destination *lists.Slice<T>,
-        source *lists.Slice<T>,
-    ) Error {
-        if !_SliceIsValid<T>(
-            destination,
-        ) ||
-            !_SliceIsValid<T>(
-                source,
-            ) {
-            return .InvalidArgument
-        }
-
-        destinationLength :=
-            lists.SliceLength<T>(
-                destination,
-            )
-
-        sourceLength :=
-            lists.SliceLength<T>(
-                source,
-            )
-
-        if destinationLength !=
-            sourceLength {
-            return .LengthMismatch
-        }
-
-        return .None
+_ValidateDestinationSource :: pure task<
+    T type,
+>(
+    destination *lists.Slice<T>,
+    source *lists.Slice<T>,
+) Error {
+    if !_SliceIsValid<T>(
+        destination,
+    ) ||
+        !_SliceIsValid<T>(
+            source,
+        ) {
+        return .InvalidArgument
     }
+
+    destinationLength :=
+        lists.SliceLength<T>(
+            destination,
+        )
+
+    sourceLength :=
+        lists.SliceLength<T>(
+            source,
+        )
+
+    if destinationLength !=
+        sourceLength {
+        return .LengthMismatch
+    }
+
+    return .None
+}
 
 _ValidateBinary :: pure task<
     T type,
@@ -249,7 +252,7 @@ AddF32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.AddF32(
             _DataF32(
                 &destination,
@@ -261,6 +264,11 @@ AddF32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -288,7 +296,7 @@ SubF32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.SubF32(
             _DataF32(
                 &destination,
@@ -300,6 +308,11 @@ SubF32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -327,7 +340,7 @@ MulF32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.MulF32(
             _DataF32(
                 &destination,
@@ -339,6 +352,11 @@ MulF32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -366,7 +384,7 @@ DivF32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.DivF32(
             _DataF32(
                 &destination,
@@ -378,6 +396,11 @@ DivF32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -404,7 +427,7 @@ ScaleF32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.ScaleF32(
             _DataF32(
                 &destination,
@@ -414,6 +437,11 @@ ScaleF32 :: task(
             ),
             scalar,
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -447,8 +475,10 @@ SumF32 :: task(
         )
 
     return result,
-        _FromSIMDError(
-            simdError,
+        _FromSIMDSuccess(
+            simd.ErrorIsNone(
+                simdError,
+            ),
         )
 }
 
@@ -486,8 +516,10 @@ DotF32 :: task(
         )
 
     return result,
-        _FromSIMDError(
-            simdError,
+        _FromSIMDSuccess(
+            simd.ErrorIsNone(
+                simdError,
+            ),
         )
 }
 
@@ -521,7 +553,7 @@ AddF64 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.AddF64(
             _DataF64(
                 &destination,
@@ -533,6 +565,11 @@ AddF64 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -560,7 +597,7 @@ SubF64 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.SubF64(
             _DataF64(
                 &destination,
@@ -572,6 +609,11 @@ SubF64 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -599,7 +641,7 @@ MulF64 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.MulF64(
             _DataF64(
                 &destination,
@@ -611,6 +653,11 @@ MulF64 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -638,7 +685,7 @@ DivF64 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.DivF64(
             _DataF64(
                 &destination,
@@ -650,6 +697,11 @@ DivF64 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -676,7 +728,7 @@ ScaleF64 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.ScaleF64(
             _DataF64(
                 &destination,
@@ -686,6 +738,11 @@ ScaleF64 :: task(
             ),
             scalar,
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -719,8 +776,10 @@ SumF64 :: task(
         )
 
     return result,
-        _FromSIMDError(
-            simdError,
+        _FromSIMDSuccess(
+            simd.ErrorIsNone(
+                simdError,
+            ),
         )
 }
 
@@ -758,8 +817,10 @@ DotF64 :: task(
         )
 
     return result,
-        _FromSIMDError(
-            simdError,
+        _FromSIMDSuccess(
+            simd.ErrorIsNone(
+                simdError,
+            ),
         )
 }
 
@@ -795,7 +856,7 @@ AddU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.AddU32(
             _DataU32(
                 &destination,
@@ -807,6 +868,11 @@ AddU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -834,7 +900,7 @@ SubU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.SubU32(
             _DataU32(
                 &destination,
@@ -846,6 +912,11 @@ SubU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -873,7 +944,7 @@ MulU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.MulU32(
             _DataU32(
                 &destination,
@@ -885,6 +956,11 @@ MulU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -912,7 +988,7 @@ BitAndU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.AndU32(
             _DataU32(
                 &destination,
@@ -924,6 +1000,11 @@ BitAndU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -951,7 +1032,7 @@ BitOrU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.OrU32(
             _DataU32(
                 &destination,
@@ -963,6 +1044,11 @@ BitOrU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
@@ -990,7 +1076,7 @@ BitXorU32 :: task(
             &destination,
         )
 
-    return _FromSIMDError(
+    simdError :=
         simd.XorU32(
             _DataU32(
                 &destination,
@@ -1002,6 +1088,11 @@ BitXorU32 :: task(
                 &right,
             ),
             length,
+        )
+
+    return _FromSIMDSuccess(
+        simd.ErrorIsNone(
+            simdError,
         ),
     )
 }
