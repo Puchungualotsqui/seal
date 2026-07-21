@@ -36,6 +36,58 @@ RequireSIMD :: task(
 }
 
 /*
+Runtime array helpers.
+
+The returned pointers are borrowed from the arrays. They remain valid
+until the arrays are destroyed.
+*/
+
+ArrayDataF32 :: pure task(
+    values *lists.Array<f32>,
+) *f32 {
+    slice :=
+        lists.ArraySlice<f32>(
+            values,
+        )
+
+    return cast<*f32>(
+        lists.SliceData<f32>(
+            &slice,
+        ),
+    )
+}
+
+ArrayDataF64 :: pure task(
+    values *lists.Array<f64>,
+) *f64 {
+    slice :=
+        lists.ArraySlice<f64>(
+            values,
+        )
+
+    return cast<*f64>(
+        lists.SliceData<f64>(
+            &slice,
+        ),
+    )
+}
+
+ArrayDataU32 :: pure task(
+    values *lists.Array<u32>,
+) *u32 {
+    slice :=
+        lists.ArraySlice<u32>(
+            values,
+        )
+
+    return cast<*u32>(
+        lists.SliceData<u32>(
+            &slice,
+        ),
+    )
+}
+
+/*
 Backend selection.
 */
 
@@ -92,16 +144,14 @@ TestArgumentValidation :: task() {
         "zero-length sum must return zero",
     )
 
-    value :=
-        @inline_array<f32, 1>(
-            cast<f32>(1),
-        )
+    value: f32 =
+        cast<f32>(1)
 
     invalidBinary :=
         simd.AddF32(
             nil,
-            &value[0],
-            &value[0],
+            &value,
+            &value,
             1,
         )
 
@@ -114,7 +164,7 @@ TestArgumentValidation :: task() {
     invalidScale :=
         simd.ScaleF32(
             nil,
-            &value[0],
+            &value,
             cast<f32>(2),
             1,
         )
@@ -160,53 +210,74 @@ eight-lane vector and a three-element scalar tail.
 */
 
 TestF32 :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
     left :=
-        @inline_array<f32, 11>(
-            cast<f32>(1),
-            cast<f32>(2),
-            cast<f32>(3),
-            cast<f32>(4),
-            cast<f32>(5),
-            cast<f32>(6),
-            cast<f32>(7),
-            cast<f32>(8),
-            cast<f32>(9),
-            cast<f32>(10),
-            cast<f32>(11),
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
     right :=
-        @inline_array<f32, 11>(
-            cast<f32>(11),
-            cast<f32>(10),
-            cast<f32>(9),
-            cast<f32>(8),
-            cast<f32>(7),
-            cast<f32>(6),
-            cast<f32>(5),
-            cast<f32>(4),
-            cast<f32>(3),
-            cast<f32>(2),
-            cast<f32>(1),
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
     result :=
-        @inline_array<f32, 11>(
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
-            cast<f32>(0),
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
-    length := len(left)
+    inPlace :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
     index := 0
+
+    for index < 11 {
+        left[index] =
+            cast<f32>(
+                index + 1,
+            )
+
+        right[index] =
+            cast<f32>(
+                11 - index,
+            )
+
+        inPlace[index] =
+            cast<f32>(
+                index + 1,
+            )
+
+        index += 1
+    }
+
+    length := len(left)
+
+    Require(
+        length == 11,
+        "unexpected f32 array length",
+    )
 
     /*
     Addition.
@@ -215,9 +286,15 @@ TestF32 :: task() {
     RequireSIMD(
         "f32 addition",
         simd.AddF32(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF32(
+                &result,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
+            ArrayDataF32(
+                &right,
+            ),
             length,
         ),
     )
@@ -241,9 +318,15 @@ TestF32 :: task() {
     RequireSIMD(
         "f32 subtraction",
         simd.SubF32(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF32(
+                &result,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
+            ArrayDataF32(
+                &right,
+            ),
             length,
         ),
     )
@@ -272,9 +355,15 @@ TestF32 :: task() {
     RequireSIMD(
         "f32 multiplication",
         simd.MulF32(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF32(
+                &result,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
+            ArrayDataF32(
+                &right,
+            ),
             length,
         ),
     )
@@ -306,9 +395,15 @@ TestF32 :: task() {
     RequireSIMD(
         "f32 division",
         simd.DivF32(
-            &result[0],
-            &left[0],
-            &left[0],
+            ArrayDataF32(
+                &result,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
             length,
         ),
     )
@@ -332,8 +427,12 @@ TestF32 :: task() {
     RequireSIMD(
         "f32 scaling",
         simd.ScaleF32(
-            &result[0],
-            &left[0],
+            ArrayDataF32(
+                &result,
+            ),
+            ArrayDataF32(
+                &left,
+            ),
             cast<f32>(2),
             length,
         ),
@@ -362,7 +461,9 @@ TestF32 :: task() {
 
     sum, sumError :=
         simd.SumF32(
-            &left[0],
+            ArrayDataF32(
+                &left,
+            ),
             length,
         )
 
@@ -378,8 +479,12 @@ TestF32 :: task() {
 
     dot, dotError :=
         simd.DotF32(
-            &left[0],
-            &right[0],
+            ArrayDataF32(
+                &left,
+            ),
+            ArrayDataF32(
+                &right,
+            ),
             length,
         )
 
@@ -399,27 +504,18 @@ TestF32 :: task() {
     destination may be exactly the same pointer as one source.
     */
 
-    inPlace :=
-        @inline_array<f32, 11>(
-            cast<f32>(1),
-            cast<f32>(2),
-            cast<f32>(3),
-            cast<f32>(4),
-            cast<f32>(5),
-            cast<f32>(6),
-            cast<f32>(7),
-            cast<f32>(8),
-            cast<f32>(9),
-            cast<f32>(10),
-            cast<f32>(11),
-        )
-
     RequireSIMD(
         "in-place f32 addition",
         simd.AddF32(
-            &inPlace[0],
-            &inPlace[0],
-            &right[0],
+            ArrayDataF32(
+                &inPlace,
+            ),
+            ArrayDataF32(
+                &inPlace,
+            ),
+            ArrayDataF32(
+                &right,
+            ),
             length,
         ),
     )
@@ -435,6 +531,22 @@ TestF32 :: task() {
 
         index += 1
     }
+
+    lists.DestroyArray<f32>(
+        &inPlace,
+    )
+
+    lists.DestroyArray<f32>(
+        &result,
+    )
+
+    lists.DestroyArray<f32>(
+        &right,
+    )
+
+    lists.DestroyArray<f32>(
+        &left,
+    )
 }
 
 /*
@@ -445,41 +557,62 @@ four-lane vector and a three-element scalar tail.
 */
 
 TestF64 :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
     left :=
-        @inline_array<f64, 7>(
-            cast<f64>(1),
-            cast<f64>(2),
-            cast<f64>(3),
-            cast<f64>(4),
-            cast<f64>(5),
-            cast<f64>(6),
-            cast<f64>(7),
+        lists.ArrayWithLength<f64>(
+            zeroAllocator,
+            deallocator,
+            7,
         )
 
     right :=
-        @inline_array<f64, 7>(
-            cast<f64>(7),
-            cast<f64>(6),
-            cast<f64>(5),
-            cast<f64>(4),
-            cast<f64>(3),
-            cast<f64>(2),
-            cast<f64>(1),
+        lists.ArrayWithLength<f64>(
+            zeroAllocator,
+            deallocator,
+            7,
         )
 
     result :=
-        @inline_array<f64, 7>(
-            cast<f64>(0),
-            cast<f64>(0),
-            cast<f64>(0),
-            cast<f64>(0),
-            cast<f64>(0),
-            cast<f64>(0),
-            cast<f64>(0),
+        lists.ArrayWithLength<f64>(
+            zeroAllocator,
+            deallocator,
+            7,
         )
 
-    length := len(left)
     index := 0
+
+    for index < 7 {
+        left[index] =
+            cast<f64>(
+                index + 1,
+            )
+
+        right[index] =
+            cast<f64>(
+                7 - index,
+            )
+
+        index += 1
+    }
+
+    length := len(left)
+
+    Require(
+        length == 7,
+        "unexpected f64 array length",
+    )
 
     /*
     Addition.
@@ -488,9 +621,15 @@ TestF64 :: task() {
     RequireSIMD(
         "f64 addition",
         simd.AddF64(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF64(
+                &result,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
+            ArrayDataF64(
+                &right,
+            ),
             length,
         ),
     )
@@ -514,9 +653,15 @@ TestF64 :: task() {
     RequireSIMD(
         "f64 subtraction",
         simd.SubF64(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF64(
+                &result,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
+            ArrayDataF64(
+                &right,
+            ),
             length,
         ),
     )
@@ -545,9 +690,15 @@ TestF64 :: task() {
     RequireSIMD(
         "f64 multiplication",
         simd.MulF64(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataF64(
+                &result,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
+            ArrayDataF64(
+                &right,
+            ),
             length,
         ),
     )
@@ -577,9 +728,15 @@ TestF64 :: task() {
     RequireSIMD(
         "f64 division",
         simd.DivF64(
-            &result[0],
-            &left[0],
-            &left[0],
+            ArrayDataF64(
+                &result,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
             length,
         ),
     )
@@ -603,8 +760,12 @@ TestF64 :: task() {
     RequireSIMD(
         "f64 scaling",
         simd.ScaleF64(
-            &result[0],
-            &left[0],
+            ArrayDataF64(
+                &result,
+            ),
+            ArrayDataF64(
+                &left,
+            ),
             cast<f64>(3),
             length,
         ),
@@ -633,7 +794,9 @@ TestF64 :: task() {
 
     sum, sumError :=
         simd.SumF64(
-            &left[0],
+            ArrayDataF64(
+                &left,
+            ),
             length,
         )
 
@@ -649,8 +812,12 @@ TestF64 :: task() {
 
     dot, dotError :=
         simd.DotF64(
-            &left[0],
-            &right[0],
+            ArrayDataF64(
+                &left,
+            ),
+            ArrayDataF64(
+                &right,
+            ),
             length,
         )
 
@@ -663,6 +830,18 @@ TestF64 :: task() {
         dot == cast<f64>(84),
         "f64 dot product produced an unexpected value",
     )
+
+    lists.DestroyArray<f64>(
+        &result,
+    )
+
+    lists.DestroyArray<f64>(
+        &right,
+    )
+
+    lists.DestroyArray<f64>(
+        &left,
+    )
 }
 
 /*
@@ -673,53 +852,100 @@ vector and a three-element scalar tail.
 */
 
 TestU32 :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
     left :=
-        @inline_array<u32, 11>(
-            cast<u32>(1),
-            cast<u32>(2),
-            cast<u32>(3),
-            cast<u32>(4),
-            cast<u32>(5),
-            cast<u32>(6),
-            cast<u32>(7),
-            cast<u32>(8),
-            cast<u32>(9),
-            cast<u32>(10),
-            cast<u32>(11),
+        lists.ArrayWithLength<u32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
     right :=
-        @inline_array<u32, 11>(
-            cast<u32>(11),
-            cast<u32>(10),
-            cast<u32>(9),
-            cast<u32>(8),
-            cast<u32>(7),
-            cast<u32>(6),
-            cast<u32>(5),
-            cast<u32>(4),
-            cast<u32>(3),
-            cast<u32>(2),
-            cast<u32>(1),
+        lists.ArrayWithLength<u32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
     result :=
-        @inline_array<u32, 11>(
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
+        lists.ArrayWithLength<u32>(
+            zeroAllocator,
+            deallocator,
+            11,
         )
 
-    length := len(left)
+    bitLeft :=
+        lists.ArrayWithLength<u32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
+    bitRight :=
+        lists.ArrayWithLength<u32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
     index := 0
+
+    for index < 11 {
+        left[index] =
+            cast<u32>(
+                index + 1,
+            )
+
+        right[index] =
+            cast<u32>(
+                11 - index,
+            )
+
+        index += 1
+    }
+
+    bitLeft[0] = cast<u32>(15)
+    bitLeft[1] = cast<u32>(12)
+    bitLeft[2] = cast<u32>(10)
+    bitLeft[3] = cast<u32>(9)
+    bitLeft[4] = cast<u32>(255)
+    bitLeft[5] = cast<u32>(240)
+    bitLeft[6] = cast<u32>(170)
+    bitLeft[7] = cast<u32>(85)
+    bitLeft[8] = cast<u32>(3)
+    bitLeft[9] = cast<u32>(5)
+    bitLeft[10] = cast<u32>(7)
+
+    bitRight[0] = cast<u32>(3)
+    bitRight[1] = cast<u32>(10)
+    bitRight[2] = cast<u32>(12)
+    bitRight[3] = cast<u32>(6)
+    bitRight[4] = cast<u32>(15)
+    bitRight[5] = cast<u32>(15)
+    bitRight[6] = cast<u32>(85)
+    bitRight[7] = cast<u32>(170)
+    bitRight[8] = cast<u32>(1)
+    bitRight[9] = cast<u32>(2)
+    bitRight[10] = cast<u32>(4)
+
+    length := len(left)
+
+    Require(
+        length == 11,
+        "unexpected u32 array length",
+    )
 
     /*
     Addition.
@@ -728,9 +954,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 addition",
         simd.AddU32(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &left,
+            ),
+            ArrayDataU32(
+                &right,
+            ),
             length,
         ),
     )
@@ -754,9 +986,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 subtraction",
         simd.SubU32(
-            &result[0],
-            &left[0],
-            &left[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &left,
+            ),
+            ArrayDataU32(
+                &left,
+            ),
             length,
         ),
     )
@@ -780,9 +1018,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 multiplication",
         simd.MulU32(
-            &result[0],
-            &left[0],
-            &right[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &left,
+            ),
+            ArrayDataU32(
+                &right,
+            ),
             length,
         ),
     )
@@ -805,81 +1049,6 @@ TestU32 :: task() {
         index += 1
     }
 
-    bitLeft :=
-        @inline_array<u32, 11>(
-            cast<u32>(15),
-            cast<u32>(12),
-            cast<u32>(10),
-            cast<u32>(9),
-            cast<u32>(255),
-            cast<u32>(240),
-            cast<u32>(170),
-            cast<u32>(85),
-            cast<u32>(3),
-            cast<u32>(5),
-            cast<u32>(7),
-        )
-
-    bitRight :=
-        @inline_array<u32, 11>(
-            cast<u32>(3),
-            cast<u32>(10),
-            cast<u32>(12),
-            cast<u32>(6),
-            cast<u32>(15),
-            cast<u32>(15),
-            cast<u32>(85),
-            cast<u32>(170),
-            cast<u32>(1),
-            cast<u32>(2),
-            cast<u32>(4),
-        )
-
-    expectedAnd :=
-        @inline_array<u32, 11>(
-            cast<u32>(3),
-            cast<u32>(8),
-            cast<u32>(8),
-            cast<u32>(0),
-            cast<u32>(15),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(0),
-            cast<u32>(1),
-            cast<u32>(0),
-            cast<u32>(4),
-        )
-
-    expectedOr :=
-        @inline_array<u32, 11>(
-            cast<u32>(15),
-            cast<u32>(14),
-            cast<u32>(14),
-            cast<u32>(15),
-            cast<u32>(255),
-            cast<u32>(255),
-            cast<u32>(255),
-            cast<u32>(255),
-            cast<u32>(3),
-            cast<u32>(7),
-            cast<u32>(7),
-        )
-
-    expectedXor :=
-        @inline_array<u32, 11>(
-            cast<u32>(12),
-            cast<u32>(6),
-            cast<u32>(6),
-            cast<u32>(15),
-            cast<u32>(240),
-            cast<u32>(255),
-            cast<u32>(255),
-            cast<u32>(255),
-            cast<u32>(2),
-            cast<u32>(7),
-            cast<u32>(3),
-        )
-
     /*
     Bitwise AND.
     */
@@ -887,9 +1056,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 bitwise AND",
         simd.AndU32(
-            &result[0],
-            &bitLeft[0],
-            &bitRight[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &bitLeft,
+            ),
+            ArrayDataU32(
+                &bitRight,
+            ),
             length,
         ),
     )
@@ -897,9 +1072,13 @@ TestU32 :: task() {
     index = 0
 
     for index < 11 {
+        expected :=
+            bitLeft[index] &
+            bitRight[index]
+
         Require(
             result[index] ==
-                expectedAnd[index],
+                expected,
             "u32 AND produced an unexpected value",
         )
 
@@ -913,9 +1092,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 bitwise OR",
         simd.OrU32(
-            &result[0],
-            &bitLeft[0],
-            &bitRight[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &bitLeft,
+            ),
+            ArrayDataU32(
+                &bitRight,
+            ),
             length,
         ),
     )
@@ -923,9 +1108,13 @@ TestU32 :: task() {
     index = 0
 
     for index < 11 {
+        expected :=
+            bitLeft[index] |
+            bitRight[index]
+
         Require(
             result[index] ==
-                expectedOr[index],
+                expected,
             "u32 OR produced an unexpected value",
         )
 
@@ -939,9 +1128,15 @@ TestU32 :: task() {
     RequireSIMD(
         "u32 bitwise XOR",
         simd.XorU32(
-            &result[0],
-            &bitLeft[0],
-            &bitRight[0],
+            ArrayDataU32(
+                &result,
+            ),
+            ArrayDataU32(
+                &bitLeft,
+            ),
+            ArrayDataU32(
+                &bitRight,
+            ),
             length,
         ),
     )
@@ -949,14 +1144,38 @@ TestU32 :: task() {
     index = 0
 
     for index < 11 {
+        expected :=
+            bitLeft[index] ^
+            bitRight[index]
+
         Require(
             result[index] ==
-                expectedXor[index],
+                expected,
             "u32 XOR produced an unexpected value",
         )
 
         index += 1
     }
+
+    lists.DestroyArray<u32>(
+        &bitRight,
+    )
+
+    lists.DestroyArray<u32>(
+        &bitLeft,
+    )
+
+    lists.DestroyArray<u32>(
+        &result,
+    )
+
+    lists.DestroyArray<u32>(
+        &right,
+    )
+
+    lists.DestroyArray<u32>(
+        &left,
+    )
 }
 
 Main :: task() {
