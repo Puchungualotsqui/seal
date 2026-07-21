@@ -1,0 +1,622 @@
+/*
+Error describes a synchronization operation failure.
+*/
+Error :: enum {
+    None
+    AllocationFailed
+    LockFailed
+    UnlockFailed
+    WaitFailed
+    SignalFailed
+    DestroyFailed
+    InvalidState
+    NativeFailure
+}
+
+/*
+ErrorIsNone reports whether error represents success.
+*/
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+/*
+ErrorString returns a stable description of error.
+*/
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error == .None {
+        return "no error"
+    }
+
+    if error == .AllocationFailed {
+        return "native synchronization allocation failed"
+    }
+
+    if error == .LockFailed {
+        return "mutex lock failed"
+    }
+
+    if error == .UnlockFailed {
+        return "mutex unlock failed"
+    }
+
+    if error == .WaitFailed {
+        return "condition wait failed"
+    }
+
+    if error == .SignalFailed {
+        return "condition notification failed"
+    }
+
+    if error == .DestroyFailed {
+        return "synchronization object destruction failed"
+    }
+
+    if error == .InvalidState {
+        return "invalid synchronization object state"
+    }
+
+    return "native synchronization failure"
+}
+
+/*
+Mutex owns a native non-recursive mutex.
+
+Mutex values must not be copied after creation.
+*/
+Mutex :: struct {
+    Handle rawptr
+}
+
+/*
+Condition owns a native condition variable.
+
+Condition values must not be copied after creation.
+*/
+Condition :: struct {
+    Handle rawptr
+}
+
+/*
+Once owns state used to run one compile-time-selected task exactly once.
+
+The initialization task is not stored in this structure.
+*/
+Once :: struct {
+    Handle rawptr
+}
+
+/*
+TryNewMutex creates a native mutex.
+*/
+TryNewMutex :: task() (Mutex, Error) {
+    handle :=
+        threadNative.CreateMutex()
+
+    if handle == nil {
+        return Mutex{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return Mutex{
+        Handle = handle,
+    }, .None
+}
+
+/*
+NewMutex creates a mutex and panics on failure.
+*/
+NewMutex :: task() Mutex {
+    mutex, error :=
+        TryNewMutex()
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.NewMutex: unable to create mutex",
+        )
+    }
+
+    return mutex
+}
+
+/*
+MutexIsValid reports whether mutex owns a native handle.
+*/
+MutexIsValid :: pure task(
+    mutex *Mutex,
+) bool {
+    return mutex != nil &&
+        mutex.Handle != nil
+}
+
+/*
+Lock acquires mutex.
+*/
+Lock :: task(
+    mutex *Mutex,
+) Error {
+    if !MutexIsValid(mutex) {
+        return .InvalidState
+    }
+
+    if !threadNative.LockMutex(
+        mutex.Handle,
+    ) {
+        return .LockFailed
+    }
+
+    return .None
+}
+
+/*
+LockOrPanic acquires mutex and panics on failure.
+*/
+LockOrPanic :: task(
+    mutex *Mutex,
+) {
+    error := Lock(mutex)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.LockOrPanic: unable to lock mutex",
+        )
+    }
+}
+
+/*
+TryLock attempts to acquire mutex without blocking.
+
+acquired is false without an error when another thread currently owns
+the mutex.
+*/
+TryLock :: task(
+    mutex *Mutex,
+) (bool, Error) {
+    if !MutexIsValid(mutex) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.TryLockMutex(
+            mutex.Handle,
+        )
+
+    if result > 0 {
+        return true,
+            .None
+    }
+
+    if result == 0 {
+        return false,
+            .None
+    }
+
+    return false,
+        .LockFailed
+}
+
+/*
+Unlock releases mutex.
+*/
+Unlock :: task(
+    mutex *Mutex,
+) Error {
+    if !MutexIsValid(mutex) {
+        return .InvalidState
+    }
+
+    if !threadNative.UnlockMutex(
+        mutex.Handle,
+    ) {
+        return .UnlockFailed
+    }
+
+    return .None
+}
+
+/*
+UnlockOrPanic releases mutex and panics on failure.
+*/
+UnlockOrPanic :: task(
+    mutex *Mutex,
+) {
+    error := Unlock(mutex)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.UnlockOrPanic: unable to unlock mutex",
+        )
+    }
+}
+
+/*
+DestroyMutex releases mutex.
+
+The mutex must not be locked or accessed by another thread.
+*/
+DestroyMutex :: task(
+    mutex *Mutex,
+) Error {
+    if !MutexIsValid(mutex) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyMutex(
+        mutex.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    mutex.Handle = nil
+
+    return .None
+}
+
+/*
+DestroyMutexOrPanic releases mutex and panics on failure.
+*/
+DestroyMutexOrPanic :: task(
+    mutex *Mutex,
+) {
+    error :=
+        DestroyMutex(
+            mutex,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroyMutexOrPanic: unable to destroy mutex",
+        )
+    }
+}
+
+/*
+TryNewCondition creates a native condition variable.
+*/
+TryNewCondition :: task() (Condition, Error) {
+    handle :=
+        threadNative.CreateCondition()
+
+    if handle == nil {
+        return Condition{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return Condition{
+        Handle = handle,
+    }, .None
+}
+
+/*
+NewCondition creates a condition variable and panics on failure.
+*/
+NewCondition :: task() Condition {
+    condition, error :=
+        TryNewCondition()
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.NewCondition: unable to create condition",
+        )
+    }
+
+    return condition
+}
+
+/*
+ConditionIsValid reports whether condition owns a native handle.
+*/
+ConditionIsValid :: pure task(
+    condition *Condition,
+) bool {
+    return condition != nil &&
+        condition.Handle != nil
+}
+
+/*
+Wait atomically releases mutex and waits for condition.
+
+The caller must own mutex before calling Wait. The mutex is reacquired
+before Wait returns.
+*/
+Wait :: task(
+    condition *Condition,
+    mutex *Mutex,
+) Error {
+    if !ConditionIsValid(condition) ||
+        !MutexIsValid(mutex) {
+        return .InvalidState
+    }
+
+    if !threadNative.WaitCondition(
+        condition.Handle,
+        mutex.Handle,
+    ) {
+        return .WaitFailed
+    }
+
+    return .None
+}
+
+/*
+WaitOrPanic waits and panics on failure.
+*/
+WaitOrPanic :: task(
+    condition *Condition,
+    mutex *Mutex,
+) {
+    error :=
+        Wait(
+            condition,
+            mutex,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.WaitOrPanic: condition wait failed",
+        )
+    }
+}
+
+/*
+Signal wakes one thread waiting on condition.
+*/
+Signal :: task(
+    condition *Condition,
+) Error {
+    if !ConditionIsValid(condition) {
+        return .InvalidState
+    }
+
+    if !threadNative.SignalCondition(
+        condition.Handle,
+    ) {
+        return .SignalFailed
+    }
+
+    return .None
+}
+
+/*
+SignalOrPanic wakes one waiter and panics on failure.
+*/
+SignalOrPanic :: task(
+    condition *Condition,
+) {
+    error := Signal(condition)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.SignalOrPanic: unable to signal condition",
+        )
+    }
+}
+
+/*
+Broadcast wakes every thread waiting on condition.
+*/
+Broadcast :: task(
+    condition *Condition,
+) Error {
+    if !ConditionIsValid(condition) {
+        return .InvalidState
+    }
+
+    if !threadNative.BroadcastCondition(
+        condition.Handle,
+    ) {
+        return .SignalFailed
+    }
+
+    return .None
+}
+
+/*
+BroadcastOrPanic wakes every waiter and panics on failure.
+*/
+BroadcastOrPanic :: task(
+    condition *Condition,
+) {
+    error :=
+        Broadcast(
+            condition,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.BroadcastOrPanic: unable to broadcast condition",
+        )
+    }
+}
+
+/*
+DestroyCondition releases condition.
+
+No thread may still be waiting on it.
+*/
+DestroyCondition :: task(
+    condition *Condition,
+) Error {
+    if !ConditionIsValid(condition) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyCondition(
+        condition.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    condition.Handle = nil
+
+    return .None
+}
+
+/*
+DestroyConditionOrPanic releases condition and panics on failure.
+*/
+DestroyConditionOrPanic :: task(
+    condition *Condition,
+) {
+    error :=
+        DestroyCondition(
+            condition,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroyConditionOrPanic: unable to destroy condition",
+        )
+    }
+}
+
+/*
+TryNewOnce creates native one-time initialization state.
+*/
+TryNewOnce :: task() (Once, Error) {
+    handle :=
+        threadNative.CreateOnce()
+
+    if handle == nil {
+        return Once{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return Once{
+        Handle = handle,
+    }, .None
+}
+
+/*
+NewOnce creates one-time initialization state and panics on failure.
+*/
+NewOnce :: task() Once {
+    once, error :=
+        TryNewOnce()
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.NewOnce: unable to create once state",
+        )
+    }
+
+    return once
+}
+
+/*
+OnceIsValid reports whether once owns native state.
+*/
+OnceIsValid :: pure task(
+    once *Once,
+) bool {
+    return once != nil &&
+        once.Handle != nil
+}
+
+/*
+RunOnce runs Init exactly once across all callers.
+
+Init is selected at compile time. Once stores only native state and does
+not contain a task value or function pointer.
+*/
+RunOnce :: task<
+    Init task[()],
+>(
+    once *Once,
+) Error {
+    if !OnceIsValid(once) {
+        return .InvalidState
+    }
+
+    decision :=
+        threadNative.BeginOnce(
+            once.Handle,
+        )
+
+    if decision < 0 {
+        return .NativeFailure
+    }
+
+    if decision == 0 {
+        return .None
+    }
+
+    Init()
+
+    if !threadNative.CompleteOnce(
+        once.Handle,
+    ) {
+        return .NativeFailure
+    }
+
+    return .None
+}
+
+/*
+RunOnceOrPanic runs Init once and panics on failure.
+*/
+RunOnceOrPanic :: task<
+    Init task[()],
+>(
+    once *Once,
+) {
+    error :=
+        RunOnce<Init>(
+            once,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.RunOnceOrPanic: initialization failed",
+        )
+    }
+}
+
+/*
+DestroyOnce releases one-time initialization state.
+
+No other thread may be using it.
+*/
+DestroyOnce :: task(
+    once *Once,
+) Error {
+    if !OnceIsValid(once) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyOnce(
+        once.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    once.Handle = nil
+
+    return .None
+}
+
+/*
+DestroyOnceOrPanic releases once state and panics on failure.
+*/
+DestroyOnceOrPanic :: task(
+    once *Once,
+) {
+    error :=
+        DestroyOnce(
+            once,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroyOnceOrPanic: unable to destroy once state",
+        )
+    }
+}

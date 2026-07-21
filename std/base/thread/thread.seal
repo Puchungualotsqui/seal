@@ -1,0 +1,589 @@
+/*
+Error describes a thread operation failure.
+*/
+Error :: enum {
+    None
+    AllocationFailed
+    CreationFailed
+    JoinFailed
+    DetachFailed
+    InvalidState
+}
+
+/*
+ErrorIsNone reports whether error represents success.
+*/
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+/*
+ErrorString returns a stable description of error.
+*/
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error == .None {
+        return "no error"
+    }
+
+    if error == .AllocationFailed {
+        return "thread context allocation failed"
+    }
+
+    if error == .CreationFailed {
+        return "native thread creation failed"
+    }
+
+    if error == .JoinFailed {
+        return "native thread join failed"
+    }
+
+    if error == .DetachFailed {
+        return "native thread detach failed"
+    }
+
+    return "invalid thread state"
+}
+
+/*
+Thread owns one joinable native thread handle.
+
+Thread values must not be copied after creation. A thread must be joined
+or detached exactly once.
+*/
+Thread :: struct {
+    Handle rawptr
+}
+
+/*
+JoinHandle owns a thread and result storage.
+
+JoinHandle values must not be copied after creation. Result-producing
+threads must be completed with JoinResult.
+*/
+JoinHandle :: struct<R type> {
+    Thread Thread
+    Result rawptr
+}
+
+/*
+_WorkerContext stores the runtime argument for a worker.
+
+The worker task itself is a compile-time generic parameter and is not
+stored in this structure.
+*/
+_WorkerContext :: struct<T type> {
+    Value T
+}
+
+/*
+_ResultBox stores a result until the creating thread joins the worker.
+*/
+_ResultBox :: struct<R type> {
+    Value R
+}
+
+/*
+_ResultWorkerContext stores the runtime argument and result destination.
+
+The worker task itself remains a compile-time generic parameter.
+*/
+_ResultWorkerContext :: struct<
+    T type,
+    R type,
+> {
+    Value T
+    Result *_ResultBox<R>
+}
+
+/*
+_WorkerEntry adapts a task[(T)] worker to the native thread ABI.
+*/
+_WorkerEntry :: @foreign(
+    threadNative.ThreadEntryABI
+) task<
+    T type,
+    Worker task[(T)],
+>(
+    rawContext rawptr,
+) threadNative.ThreadResult {
+    context :=
+        cast<*_WorkerContext<T>>(
+            rawContext,
+        )
+
+    Worker(
+        context.Value,
+    )
+
+    threadNative.FreeContext(
+        rawContext,
+    )
+
+    return threadNative.thread_success
+}
+
+/*
+_TaskEntry adapts a task[()] worker to the native thread ABI.
+*/
+_TaskEntry :: @foreign(
+    threadNative.ThreadEntryABI
+) task<
+    Worker task[()],
+>(
+    unusedContext rawptr,
+) threadNative.ThreadResult {
+    Worker()
+
+    return threadNative.thread_success
+}
+
+/*
+_ResultWorkerEntry adapts a task[(T) R] worker to the native thread ABI.
+*/
+_ResultWorkerEntry :: @foreign(
+    threadNative.ThreadEntryABI
+) task<
+    T type,
+    R type,
+    Worker task[(T) R],
+>(
+    rawContext rawptr,
+) threadNative.ThreadResult {
+    context :=
+        cast<*_ResultWorkerContext<T, R>>(
+            rawContext,
+        )
+
+    context.Result.Value =
+        Worker(
+            context.Value,
+        )
+
+    threadNative.FreeContext(
+        rawContext,
+    )
+
+    return threadNative.thread_success
+}
+
+/*
+Empty returns a thread without a native handle.
+*/
+Empty :: pure task() Thread {
+    return Thread{
+        Handle = nil,
+    }
+}
+
+/*
+IsJoinable reports whether thread still owns a native handle.
+*/
+IsJoinable :: pure task(
+    thread *Thread,
+) bool {
+    return thread != nil &&
+        thread.Handle != nil
+}
+
+/*
+TryStart creates a thread that calls Worker(value).
+
+Worker is selected at compile time and is never stored as runtime data.
+
+The backing storage referenced by value must remain valid until the
+worker completes.
+*/
+TryStart :: task<
+    T type,
+    Worker task[(T)],
+>(
+    value T,
+) (Thread, Error) {
+    rawContext :=
+        threadNative.AllocateContext(
+            size(_WorkerContext<T>),
+        )
+
+    if rawContext == nil {
+        return Empty(),
+            .AllocationFailed
+    }
+
+    context :=
+        cast<*_WorkerContext<T>>(
+            rawContext,
+        )
+
+    context.Value = value
+
+    entry :=
+        @task_pointer(
+            _WorkerEntry<T, Worker>
+        )
+
+    handle :=
+        threadNative.Start(
+            entry,
+            rawContext,
+        )
+
+    if handle == nil {
+        threadNative.FreeContext(
+            rawContext,
+        )
+
+        return Empty(),
+            .CreationFailed
+    }
+
+    return Thread{
+        Handle = handle,
+    }, .None
+}
+
+/*
+Start creates a thread that calls Worker(value).
+
+It panics if allocation or native thread creation fails.
+*/
+Start :: task<
+    T type,
+    Worker task[(T)],
+>(
+    value T,
+) Thread {
+    result, error :=
+        TryStart<T, Worker>(
+            value,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.Start: unable to create thread",
+        )
+    }
+
+    return result
+}
+
+/*
+TryStartTask creates a thread that calls a worker without arguments.
+*/
+TryStartTask :: task<
+    Worker task[()],
+>() (Thread, Error) {
+    entry :=
+        @task_pointer(
+            _TaskEntry<Worker>
+        )
+
+    handle :=
+        threadNative.Start(
+            entry,
+            nil,
+        )
+
+    if handle == nil {
+        return Empty(),
+            .CreationFailed
+    }
+
+    return Thread{
+        Handle = handle,
+    }, .None
+}
+
+/*
+StartTask creates a thread that calls a worker without arguments.
+
+It panics if native thread creation fails.
+*/
+StartTask :: task<
+    Worker task[()],
+>() Thread {
+    result, error :=
+        TryStartTask<Worker>()
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.StartTask: unable to create thread",
+        )
+    }
+
+    return result
+}
+
+/*
+TryStartWithResult creates a thread that evaluates Worker(value).
+
+The result remains owned by the returned JoinHandle until JoinResult is
+called.
+*/
+TryStartWithResult :: task<
+    T type,
+    R type,
+    Worker task[(T) R],
+>(
+    value T,
+) (JoinHandle<R>, Error) {
+    rawResult :=
+        threadNative.AllocateContext(
+            size(_ResultBox<R>),
+        )
+
+    if rawResult == nil {
+        return JoinHandle<R>{
+            Thread = Empty(),
+            Result = nil,
+        }, .AllocationFailed
+    }
+
+    rawContext :=
+        threadNative.AllocateContext(
+            size(
+                _ResultWorkerContext<T, R>
+            ),
+        )
+
+    if rawContext == nil {
+        threadNative.FreeContext(
+            rawResult,
+        )
+
+        return JoinHandle<R>{
+            Thread = Empty(),
+            Result = nil,
+        }, .AllocationFailed
+    }
+
+    result :=
+        cast<*_ResultBox<R>>(
+            rawResult,
+        )
+
+    context :=
+        cast<
+            *_ResultWorkerContext<T, R>
+        >(
+            rawContext,
+        )
+
+    context.Value = value
+    context.Result = result
+
+    entry :=
+        @task_pointer(
+            _ResultWorkerEntry<
+                T,
+                R,
+                Worker
+            >
+        )
+
+    handle :=
+        threadNative.Start(
+            entry,
+            rawContext,
+        )
+
+    if handle == nil {
+        threadNative.FreeContext(
+            rawContext,
+        )
+
+        threadNative.FreeContext(
+            rawResult,
+        )
+
+        return JoinHandle<R>{
+            Thread = Empty(),
+            Result = nil,
+        }, .CreationFailed
+    }
+
+    return JoinHandle<R>{
+        Thread = Thread{
+            Handle = handle,
+        },
+        Result = rawResult,
+    }, .None
+}
+
+/*
+StartWithResult creates a result-producing worker.
+
+It panics if allocation or native thread creation fails.
+*/
+StartWithResult :: task<
+    T type,
+    R type,
+    Worker task[(T) R],
+>(
+    value T,
+) JoinHandle<R> {
+    result, error :=
+        TryStartWithResult<
+            T,
+            R,
+            Worker
+        >(
+            value,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.StartWithResult: unable to create thread",
+        )
+    }
+
+    return result
+}
+
+/*
+Join waits for thread and releases its native handle.
+*/
+Join :: task(
+    thread *Thread,
+) Error {
+    if thread == nil ||
+        thread.Handle == nil {
+        return .InvalidState
+    }
+
+    if !threadNative.Join(
+        thread.Handle,
+    ) {
+        return .JoinFailed
+    }
+
+    thread.Handle = nil
+
+    return .None
+}
+
+/*
+JoinOrPanic waits for thread and panics if joining fails.
+*/
+JoinOrPanic :: task(
+    thread *Thread,
+) {
+    error := Join(thread)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.JoinOrPanic: unable to join thread",
+        )
+    }
+}
+
+/*
+Detach releases ownership without waiting for thread.
+
+Detached workers must own or borrow runtime data that remains valid for
+their complete execution.
+*/
+Detach :: task(
+    thread *Thread,
+) Error {
+    if thread == nil ||
+        thread.Handle == nil {
+        return .InvalidState
+    }
+
+    if !threadNative.Detach(
+        thread.Handle,
+    ) {
+        return .DetachFailed
+    }
+
+    thread.Handle = nil
+
+    return .None
+}
+
+/*
+DetachOrPanic detaches thread and panics if detaching fails.
+*/
+DetachOrPanic :: task(
+    thread *Thread,
+) {
+    error := Detach(thread)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.DetachOrPanic: unable to detach thread",
+        )
+    }
+}
+
+/*
+JoinResult waits for a result-producing worker and returns its result.
+
+The handle is consumed by this operation.
+*/
+JoinResult :: task<R type>(
+    handle *JoinHandle<R>,
+) R {
+    if handle == nil ||
+        handle.Result == nil {
+        panic(
+            "thread.JoinResult: invalid join handle",
+        )
+    }
+
+    error :=
+        Join(
+            &handle.Thread,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "thread.JoinResult: unable to join thread",
+        )
+    }
+
+    resultBox :=
+        cast<*_ResultBox<R>>(
+            handle.Result,
+        )
+
+    result := resultBox.Value
+
+    threadNative.FreeContext(
+        handle.Result,
+    )
+
+    handle.Result = nil
+
+    return result
+}
+
+/*
+Yield allows another runnable thread to execute.
+*/
+Yield :: task() {
+    threadNative.Yield()
+}
+
+/*
+Sleep suspends the current thread for approximately milliseconds.
+*/
+Sleep :: task(
+    milliseconds uint,
+) {
+    threadNative.Sleep(
+        milliseconds,
+    )
+}
+
+/*
+HardwareThreadCount returns the number of logical processors visible to
+the process.
+*/
+HardwareThreadCount :: pure task() uint {
+    return threadNative.HardwareThreadCount()
+}

@@ -1,0 +1,173 @@
+/*
+This example verifies:
+
+- concurrent workers with structured arguments;
+- mutex-protected shared state;
+- result-producing workers;
+- native thread joining.
+*/
+
+SharedCounter :: struct {
+    Mutex sync.Mutex
+    Value int
+}
+
+IncrementArguments :: struct {
+    Counter *SharedCounter
+    Count int
+}
+
+/*
+Increment adds Count to the shared counter while holding its mutex.
+*/
+Increment :: task(
+    arguments IncrementArguments,
+) {
+    sync.LockOrPanic(
+        &arguments.Counter.Mutex,
+    )
+
+    index := 0
+
+    for index < arguments.Count {
+        arguments.Counter.Value += 1
+        index += 1
+    }
+
+    sync.UnlockOrPanic(
+        &arguments.Counter.Mutex,
+    )
+}
+
+/*
+Square returns the square of value.
+*/
+Square :: task(
+    value int,
+) int {
+    return value * value
+}
+
+/*
+RequireThreadSuccess panics when a thread operation fails.
+*/
+RequireThreadSuccess :: task(
+    context string,
+    error thread.Error,
+) {
+    if thread.ErrorIsNone(error) {
+        return
+    }
+
+    fmt.Println(
+        "%v: %v",
+        context,
+        thread.ErrorString(error),
+    )
+
+    panic(
+        "thread integration test failed",
+    )
+}
+
+/*
+Main runs the thread integration test.
+*/
+Main :: task() {
+    counter := SharedCounter{
+        Mutex = sync.NewMutex(),
+        Value = 0,
+    }
+
+    first, firstError :=
+        thread.TryStart<
+            IncrementArguments,
+            Increment
+        >(
+            IncrementArguments{
+                Counter = &counter,
+                Count = 100000,
+            },
+        )
+
+    RequireThreadSuccess(
+        "start first worker",
+        firstError,
+    )
+
+    second, secondError :=
+        thread.TryStart<
+            IncrementArguments,
+            Increment
+        >(
+            IncrementArguments{
+                Counter = &counter,
+                Count = 100000,
+            },
+        )
+
+    RequireThreadSuccess(
+        "start second worker",
+        secondError,
+    )
+
+    RequireThreadSuccess(
+        "join first worker",
+        thread.Join(
+            &first,
+        ),
+    )
+
+    RequireThreadSuccess(
+        "join second worker",
+        thread.Join(
+            &second,
+        ),
+    )
+
+    assert(
+        counter.Value == 200000,
+    )
+
+    resultWorker, resultError :=
+        thread.TryStartWithResult<
+            int,
+            int,
+            Square
+        >(12)
+
+    RequireThreadSuccess(
+        "start result worker",
+        resultError,
+    )
+
+    result :=
+        thread.JoinResult<int>(
+            &resultWorker,
+        )
+
+    assert(result == 144)
+
+    sync.DestroyMutexOrPanic(
+        &counter.Mutex,
+    )
+
+    fmt.Println(
+        "shared counter: %v",
+        counter.Value,
+    )
+
+    fmt.Println(
+        "worker result: %v",
+        result,
+    )
+
+    fmt.Println(
+        "hardware threads: %v",
+        thread.HardwareThreadCount(),
+    )
+
+    fmt.Println(
+        "thread integration tests passed",
+    )
+}

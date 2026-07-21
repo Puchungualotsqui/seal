@@ -1,0 +1,59 @@
+[package]
+name = "threadExample"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    "thread",
+    "sync",
+    "fmt",
+]
+
+[build]
+compiler = "cc"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-pthread",
+]
+
+link_flags = [
+    "-pthread",
+]
+
+[compiler.tcc]
+path = "tcc"
+c_flags = []
+link_flags = [
+    "-lpthread",
+]
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-pthread",
+]
+
+link_flags = [
+    "-pthread",
+]
+
+[compiler.clang]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+    "-pthread",
+]
+
+link_flags = [
+    "-pthread",
+]
+
+[compiler.msvc]
+c_flags = []
+
+link_flags = []
