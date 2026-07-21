@@ -43,11 +43,12 @@
 35. [Compile-time constraint evaluation](#35-compile-time-constraint-evaluation)
 36. [Built-in and intrinsic tasks](#36-built-in-and-intrinsic-tasks)
 37. [C interoperability](#37-c-interoperability)
-38. [Build output and C compilation](#38-build-output-and-c-compilation)
-39. [Cross-package generic specialization](#39-cross-package-generic-specialization)
-40. [Current limitations and evolving areas](#40-current-limitations-and-evolving-areas)
-41. [Complete multi-package example](#41-complete-multi-package-example)
-42. [Syntax cheat sheet](#42-syntax-cheat-sheet)
+38. [Foreign ABI directives](#38-foreign-abi-directives)
+39. [Build output and C compilation](#38-build-output-and-c-compilation)
+40. [Cross-package generic specialization](#39-cross-package-generic-specialization)
+41. [Current limitations and evolving areas](#40-current-limitations-and-evolving-areas)
+42. [Complete multi-package example](#41-complete-multi-package-example)
+43. [Syntax cheat sheet](#42-syntax-cheat-sheet)
 
 ---
 
@@ -3770,7 +3771,121 @@ These generated names are backend details and are not a stable external C ABI un
 
 ---
 
-## 39. Cross-package generic specialization
+## 38. Foreign ABI directives
+
+Foreign ABI directives describe C types, constants, callback signatures, and task addresses that cannot be represented accurately by ordinary Seal declarations.
+
+They are primarily intended for platform APIs such as threads, window systems, and operating-system callbacks.
+
+### 38.1 `@foreign_type`
+
+`@foreign_type` declares a nominal Seal type backed directly by a C type:
+
+```seal
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+```
+
+`ThreadResult` is a distinct type in Seal, while generated C uses `SEAL_THREAD_RESULT` directly.
+
+The compiler does not emit a wrapper structure or typedef.
+
+### 38.2 `@foreign_value`
+
+`@foreign_value` declares a typed Seal value backed by a C expression:
+
+```seal
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+```
+
+Use it like an ordinary value:
+
+```seal
+return thread_success
+```
+
+Generated C substitutes the configured expression directly.
+
+### 38.3 `@foreign_task`
+
+`@foreign_task` defines a reusable foreign task ABI:
+
+```seal
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+```
+
+The declaration template controls the generated C task declaration and definition.
+
+The address template controls the expression produced by `@task_pointer`.
+
+Supported placeholders include:
+
+```text
+{name}
+{arg0_name}
+{arg1_name}
+...
+```
+
+Argument-name placeholders use the parameter names from the Seal task declaration.
+
+### 38.4 `@foreign`
+
+Apply a foreign ABI to a task with `@foreign`:
+
+```seal
+WorkerEntry :: @foreign(ThreadEntryABI) task(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+```
+
+The task remains a normal statically checked Seal task, but its generated C signature follows the selected foreign ABI template.
+
+Foreign tasks may also be generic:
+
+```seal
+WorkerEntry :: @foreign(ThreadEntryABI) task<
+    T type,
+    Worker task[(T)],
+>(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+```
+
+### 38.5 `@task_pointer`
+
+`@task_pointer` returns the foreign address of a task as `rawptr`:
+
+```seal
+pointer := @task_pointer(WorkerEntry)
+```
+
+Generic tasks must be fully specialized:
+
+```seal
+pointer := @task_pointer(
+    WorkerEntry<int, ProcessInt>
+)
+```
+
+The referenced task must have a foreign ABI with an address template.
+
+Seal does not currently provide general runtime task values or indirect task calls. `@task_pointer` exists specifically for passing statically selected task entry points to foreign APIs.
+
+---
+
+## 40. Cross-package generic specialization
 
 Seal uses a fixed-point process to generate imported generic instances.
 
@@ -3819,11 +3934,11 @@ This mechanism supports nested cases where one generic specialization discovers 
 
 ---
 
-## 40. Current limitations and evolving areas
+## 41. Current limitations and evolving areas
 
 The following points are important when using the language today.
 
-### 40.1 Standard library is still being built
+### 41.1 Standard library is still being built
 
 Core packages such as:
 
@@ -3840,7 +3955,7 @@ testing
 
 are still under development.
 
-### 40.2 No array primitive
+### 41.2 No array primitive
 
 These old array forms remain removed:
 
@@ -3856,7 +3971,7 @@ It is not a general-purpose array primitive and deliberately lacks features such
 
 Higher-level array and collection abstractions should wrap this storage or use allocator-backed representations as appropriate.
 
-### 40.3 Text operations are scalar-based but not grapheme-aware
+### 41.3 Text operations are scalar-based but not grapheme-aware
 
 `string` and `cstring` currently provide built-in:
 
@@ -3880,7 +3995,7 @@ Operations such as `len` and indexing decode UTF-8 linearly and may be relativel
 
 Higher-level Unicode operations belong in the standard library.
 
-### 40.4 Generic inference is not stable
+### 41.4 Generic inference is not stable
 
 Write:
 
@@ -3894,11 +4009,11 @@ rather than relying on:
 Identity(10)
 ```
 
-### 40.5 Generic unions are not yet complete
+### 41.5 Generic unions are not yet complete
 
 `Option<T>` and `Result<T, E>` remain planned foundational types.
 
-### 40.6 Ownership remains explicit and low-level
+### 41.6 Ownership remains explicit and low-level
 
 Plain `string` and `cstring` are borrowed immutable views.
 
@@ -3920,11 +4035,11 @@ The standard library still needs explicit owned text and mutable buffer abstract
 * mutable UTF-8 editing;
 * allocator-backed text storage.
 
-### 40.7 Some `seal.toml` policy flags are only partially enforced
+### 41.7 Some `seal.toml` policy flags are only partially enforced
 
 The configuration parser accepts several safety and style policies, but the compiler does not yet apply every policy consistently in every phase.
 
-### 40.8 Overloaded index compound assignment is incomplete
+### 41.8 Overloaded index compound assignment is incomplete
 
 This works:
 
@@ -3938,11 +4053,11 @@ This is not yet guaranteed for an overloaded setter:
 values[index] += 1
 ```
 
-### 40.9 Test-task tooling is evolving
+### 41.9 Test-task tooling is evolving
 
 `test task` syntax exists, while discovery, execution, reporting, and package-level test commands still need a polished public workflow.
 
-### 40.10 LSP and editor support are future work
+### 41.10 LSP and editor support are future work
 
 The compiler retains semantic information that can support:
 
@@ -3956,7 +4071,7 @@ A dedicated `seal-lsp` and Zed extension are logical next projects after the ini
 
 ---
 
-## 41. Complete multi-package example
+## 42. Complete multi-package example
 
 Project layout:
 
@@ -3971,14 +4086,14 @@ example/
     └── main.seal
 ```
 
-### 41.1 Workspace marker
+### 42.1 Workspace marker
 
 `seal.workspace`:
 
 ```text
 ```
 
-### 41.2 Library package
+### 42.2 Library package
 
 `types/seal.toml`:
 
@@ -4017,7 +4132,7 @@ ReadableHealth :: impl Player {
 }
 ```
 
-### 41.3 Executable package
+### 42.3 Executable package
 
 `app/seal.toml`:
 
@@ -4095,7 +4210,7 @@ This example demonstrates:
 
 ---
 
-## 42. Syntax cheat sheet
+## 43. Syntax cheat sheet
 
 ### Constants
 
@@ -4454,6 +4569,56 @@ c :: @c_import {
 
 ```seal
 malloc :: extern("malloc") task(size uint) rawptr
+```
+
+### Foreign C type
+
+```seal
+ThreadResult :: @foreign_type(
+    SEAL_THREAD_RESULT
+)
+```
+
+### Foreign C value
+
+```seal
+thread_success :: @foreign_value(
+    ThreadResult,
+    SEAL_THREAD_SUCCESS
+)
+```
+
+### Foreign task ABI
+
+```seal
+ThreadEntryABI :: @foreign_task(
+    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
+    address SEAL_THREAD_ADDRESS({name}),
+)
+```
+
+### Task using a foreign ABI
+
+```seal
+WorkerEntry :: @foreign(ThreadEntryABI) task(
+    context rawptr,
+) ThreadResult {
+    return thread_success
+}
+```
+
+### Foreign task pointer
+
+```seal
+pointer := @task_pointer(WorkerEntry)
+```
+
+### Specialized foreign task pointer
+
+```seal
+pointer := @task_pointer(
+    WorkerEntry<int, ProcessInt>
+)
 ```
 
 ### Package dependency
