@@ -4223,6 +4223,77 @@ func (g *Generator) qualifyTypeArgForCrossPackageRequest(
 	}
 }
 
+func (g *Generator) genericTaskParamsForCrossPackageRequest(
+	base ast.Expr,
+) ([]ast.GenericParam, bool) {
+	switch b := base.(type) {
+	case *ast.IdentExpr:
+		/*
+			When lowering code originating in another package, an
+			unqualified generic task name belongs to the active type
+			context first.
+		*/
+		if _, _, info, ok :=
+			g.importedGenericTaskInfoFromTypeContext(
+				b.Name.Name,
+			); ok {
+			return info.GenericParams, true
+		}
+
+		info, ok := g.tasks[b.Name.Name]
+		if !ok ||
+			len(info.GenericParams) == 0 {
+			return nil, false
+		}
+
+		return info.GenericParams, true
+
+	case *ast.SelectorExpr:
+		id, ok := b.Left.(*ast.IdentExpr)
+		if !ok {
+			return nil, false
+		}
+
+		packageName := id.Name.Name
+		taskName := b.Name.Name
+
+		/*
+			A cross-package specialization request may qualify a task
+			with the package currently being generated:
+
+			    currentPackage.Task<...>
+
+			In that situation, resolve it through the local task table.
+		*/
+		if packageName == g.packageName {
+			info, ok := g.tasks[taskName]
+			if !ok ||
+				len(info.GenericParams) == 0 {
+				return nil, false
+			}
+
+			return info.GenericParams, true
+		}
+
+		pkg := g.typePackageInfo(
+			packageName,
+		)
+		if pkg == nil {
+			return nil, false
+		}
+
+		info, ok := pkg.Tasks[taskName]
+		if !ok ||
+			len(info.GenericParams) == 0 {
+			return nil, false
+		}
+
+		return info.GenericParams, true
+	}
+
+	return nil, false
+}
+
 func (g *Generator) qualifyTaskExprForCrossPackageRequest(
 	expr ast.Expr,
 ) ast.Expr {
@@ -4232,9 +4303,11 @@ func (g *Generator) qualifyTaskExprForCrossPackageRequest(
 
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
-		// A generic task parameter may already have been substituted by
-		// another task-valued argument. Follow that substitution before
-		// deciding which package owns the task.
+		/*
+			A generic task parameter may already have been substituted by
+			another task-valued argument. Follow that substitution before
+			deciding which package owns the task.
+		*/
 		if g.genericSubst != nil {
 			if arg, ok :=
 				g.genericSubst[e.Name.Name]; ok &&
@@ -4258,7 +4331,8 @@ func (g *Generator) qualifyTaskExprForCrossPackageRequest(
 				e.Name.Name,
 			); found {
 			packageName = importedPackage
-		} else if _, found := g.tasks[e.Name.Name]; found {
+		} else if _, found :=
+			g.tasks[e.Name.Name]; found {
 			packageName = g.packageName
 		}
 
@@ -4278,37 +4352,61 @@ func (g *Generator) qualifyTaskExprForCrossPackageRequest(
 		}
 
 	case *ast.SelectorExpr:
-		// The expression already preserves its owning package.
+		/*
+			The expression already preserves the task's owning package.
+		*/
 		return expr
 
 	case *ast.GenericExpr:
+		params, resolved :=
+			g.genericTaskParamsForCrossPackageRequest(
+				e.Base,
+			)
+
 		args := make(
 			[]ast.GenericArg,
 			0,
 			len(e.Args),
 		)
 
-		for _, arg := range e.Args {
-			if typeAstFromGenericArgForCGen(arg) != nil {
+		if resolved {
+			/*
+				Qualify every argument according to the generic task's
+				declared parameter category.
+
+				This distinction is essential because both type names and
+				task names are represented by identifier-like expressions:
+
+				    WrappedWorker<int, ConsumeInt>
+
+				The first argument is a type, while the second is a task.
+				Syntax alone cannot distinguish them reliably.
+			*/
+			args = g.crossPackageRequestGenericArgs(
+				params,
+				e.Args,
+			)
+		} else {
+			/*
+				Do not guess that identifier expressions are types when the
+				generic task metadata is unavailable. Preserve expression
+				arguments exactly as they are.
+
+				Explicit GenericArgType values are still safe to qualify.
+			*/
+			for _, arg := range e.Args {
+				if arg.Kind == ast.GenericArgType {
+					arg =
+						g.qualifyTypeArgForCrossPackageRequest(
+							arg,
+						)
+				}
+
 				args = append(
 					args,
-					g.qualifyTypeArgForCrossPackageRequest(
-						arg,
-					),
+					arg,
 				)
-
-				continue
 			}
-
-			if arg.Kind == ast.GenericArgExpr &&
-				arg.Expr != nil {
-				arg.Expr =
-					g.qualifyTaskExprForCrossPackageRequest(
-						arg.Expr,
-					)
-			}
-
-			args = append(args, arg)
 		}
 
 		return &ast.GenericExpr{

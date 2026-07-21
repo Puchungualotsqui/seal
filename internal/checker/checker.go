@@ -2152,13 +2152,26 @@ func overloadGenericArgumentInfos(
 			Key:      resolved[i].Key,
 		}
 
-		if isValueGenericCategory(
-			params[i].Category,
-		) {
+		/*
+			Task arguments need their original expression preserved because
+			the expression may be a structured generic specialization:
+
+			    WrappedWorker<int, ConsumeInt>
+
+			A display key cannot reconstruct that AST reliably.
+		*/
+		if params[i].Category ==
+			ast.GenericParamTask ||
+			isValueGenericCategory(
+				params[i].Category,
+			) {
 			info.Expr = args[i].Expr
 		}
 
-		out = append(out, info)
+		out = append(
+			out,
+			info,
+		)
 	}
 
 	return out
@@ -13387,30 +13400,61 @@ func (c *Checker) checkedGenericArguments(
 		}
 
 		if i < len(params) {
-			info.Category = params[i].Category
+			info.Category =
+				params[i].Category
 		}
 
 		switch info.Category {
 		case ast.GenericParamType,
 			ast.GenericParamEnum,
 			ast.GenericParamUnion:
-			info.Type = c.typeFromGenericArg(scope, arg)
+			info.Type =
+				c.typeFromGenericArg(
+					scope,
+					arg,
+				)
 
 		case ast.GenericParamTask:
-			info.Type = c.taskFromGenericArg(scope, arg)
+			info.Type =
+				c.taskFromGenericArg(
+					scope,
+					arg,
+				)
+
+			/*
+				Preserve the original task expression.
+
+				This is required for structured task arguments such as:
+
+				    Worker<int, Callback>
+				    package.Worker<int, Callback>
+			*/
+			info.Expr = arg.Expr
 
 		case ast.GenericParamInt,
 			ast.GenericParamBool,
 			ast.GenericParamString,
 			ast.GenericParamValue:
-			info.Type = c.valueFromGenericArg(scope, arg)
+			info.Type =
+				c.valueFromGenericArg(
+					scope,
+					arg,
+				)
+
 			info.Expr = arg.Expr
 
 		default:
-			info.Type = c.typeFromGenericArg(scope, arg)
+			info.Type =
+				c.typeFromGenericArg(
+					scope,
+					arg,
+				)
 		}
 
-		out = append(out, info)
+		out = append(
+			out,
+			info,
+		)
 	}
 
 	return out
