@@ -553,20 +553,28 @@ JoinResult :: task<R type>(
 }
 
 /*
-TryJoinResultFor writes the result only after the worker completes.
+TryJoinResultFor waits at most milliseconds for a result-producing
+worker.
 
-completed is false without an error when the timeout expires.
+The returned values are:
+
+    result, true,  .None  worker completed
+    zero,   false, .None  timeout expired
+    zero,   false, error  operation failed
+
+The handle retains ownership after a timeout or native failure.
 */
 TryJoinResultFor :: task<R type>(
     value *JoinHandle<R>,
     milliseconds uint,
-    output *R,
-) (bool, Error) {
-    if output == nil ||
-        !JoinHandleIsJoinable<R>(
-            value,
-        ) {
-        return false,
+) (R, bool, Error) {
+    empty: R
+
+    if !JoinHandleIsJoinable<R>(
+        value,
+    ) {
+        return empty,
+            false,
             .InvalidState
     }
 
@@ -576,10 +584,16 @@ TryJoinResultFor :: task<R type>(
             milliseconds,
         )
 
-    if !ErrorIsNone(error) ||
-        !completed {
-        return completed,
+    if !ErrorIsNone(error) {
+        return empty,
+            false,
             error
+    }
+
+    if !completed {
+        return empty,
+            false,
+            .None
     }
 
     resultBox :=
@@ -587,7 +601,7 @@ TryJoinResultFor :: task<R type>(
             value.Result,
         )
 
-    output[0] = resultBox.Value
+    result := resultBox.Value
 
     threadNative.FreeContext(
         value.Result,
@@ -596,7 +610,8 @@ TryJoinResultFor :: task<R type>(
     value.Result = nil
     value.State = .Consumed
 
-    return true,
+    return result,
+        true,
         .None
 }
 

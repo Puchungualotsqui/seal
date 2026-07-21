@@ -151,15 +151,18 @@ TestThreadLifecycle :: task() {
             SlowSquare
         >(12)
 
-    earlyResult: int
-
-    completed,
+    earlyResult,
+        completed,
         earlyError :=
         thread.TryJoinResultFor<int>(
             &resultWorker,
             1,
-            &earlyResult,
         )
+
+    Require(
+        earlyResult == 0,
+        "timed-out result must contain the zero value",
+    )
 
     RequireThread(
         "timed result join",
@@ -833,13 +836,10 @@ QueueConsumerArguments :: struct {
 QueueConsumer :: task(
     arguments QueueConsumerArguments,
 ) {
-    value: int
-
     for true {
-        error :=
+        value, error :=
             concurrent.Pop<int>(
                 arguments.Queue,
-                &value,
             )
 
         if error == .Closed {
