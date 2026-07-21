@@ -36,32 +36,99 @@ typedef struct SealMutex {
     CRITICAL_SECTION value;
 } SealMutex;
 
+/*
+Each Windows condition waiter receives its own auto-reset event.
+
+This avoids depending on CONDITION_VARIABLE and prevents a notification
+from being consumed by a waiter that arrived after Signal was called.
+*/
+typedef struct SealConditionWaiter
+    SealConditionWaiter;
+
+struct SealConditionWaiter {
+    HANDLE event;
+    SealConditionWaiter *next;
+};
+
 typedef struct SealCondition {
-    CONDITION_VARIABLE value;
+    CRITICAL_SECTION guard;
+    SealConditionWaiter *head;
+    SealConditionWaiter *tail;
 } SealCondition;
 
+/*
+state values:
+
+0: initialization has not started
+1: initialization is running
+2: initialization completed
+*/
 typedef struct SealOnce {
-    CRITICAL_SECTION mutex;
-    CONDITION_VARIABLE condition;
+    CRITICAL_SECTION guard;
+    HANDLE completed;
     int state;
 } SealOnce;
+
+/*
+seal_condition_remove_waiter removes target from condition.
+
+The caller must own condition->guard.
+*/
+static bool seal_condition_remove_waiter(
+    SealCondition *condition,
+    SealConditionWaiter *target
+) {
+    SealConditionWaiter *previous;
+    SealConditionWaiter *current;
+
+    previous = NULL;
+    current = condition->head;
+
+    while (current != NULL) {
+        if (current == target) {
+            if (previous == NULL) {
+                condition->head =
+                    current->next;
+            } else {
+                previous->next =
+                    current->next;
+            }
+
+            if (condition->tail ==
+                current) {
+                condition->tail =
+                    previous;
+            }
+
+            current->next = NULL;
+
+            return true;
+        }
+
+        previous = current;
+        current = current->next;
+    }
+
+    return false;
+}
 
 static DWORD WINAPI seal_thread_trampoline(
     LPVOID opaque
 ) {
-    SealThreadStart *start =
+    SealThreadStart *start;
+    SealThreadEntry entry;
+    void *context;
+    uintptr_t result;
+
+    start =
         (SealThreadStart *)opaque;
 
-    SealThreadEntry entry =
-        start->entry;
-
-    void *context =
-        start->context;
+    entry = start->entry;
+    context = start->context;
 
     free(start);
 
-    uintptr_t result =
-        entry(context);
+    result = entry(context);
 
     return (DWORD)result;
 }
@@ -89,19 +156,20 @@ typedef struct SealOnce {
 static void *seal_thread_trampoline(
     void *opaque
 ) {
-    SealThreadStart *start =
+    SealThreadStart *start;
+    SealThreadEntry entry;
+    void *context;
+    uintptr_t result;
+
+    start =
         (SealThreadStart *)opaque;
 
-    SealThreadEntry entry =
-        start->entry;
-
-    void *context =
-        start->context;
+    entry = start->entry;
+    context = start->context;
 
     free(start);
 
-    uintptr_t result =
-        entry(context);
+    result = entry(context);
 
     return (void *)result;
 }
@@ -112,14 +180,18 @@ void *seal_thread_start(
     void *entry,
     void *context
 ) {
+    SealThreadEntry callback;
+    SealThreadStart *start;
+    SealThreadHandle *thread;
+
     if (entry == NULL) {
         return NULL;
     }
 
-    SealThreadEntry callback =
+    callback =
         (SealThreadEntry)(uintptr_t)entry;
 
-    SealThreadStart *start =
+    start =
         (SealThreadStart *)malloc(
             sizeof(SealThreadStart)
         );
@@ -128,13 +200,14 @@ void *seal_thread_start(
         return NULL;
     }
 
-    SealThreadHandle *thread =
+    thread =
         (SealThreadHandle *)malloc(
             sizeof(SealThreadHandle)
         );
 
     if (thread == NULL) {
         free(start);
+
         return NULL;
     }
 
@@ -155,21 +228,21 @@ void *seal_thread_start(
     if (thread->handle == NULL) {
         free(start);
         free(thread);
+
         return NULL;
     }
 
 #else
 
-    int status = pthread_create(
+    if (pthread_create(
         &thread->handle,
         NULL,
         seal_thread_trampoline,
         start
-    );
-
-    if (status != 0) {
+    ) != 0) {
         free(start);
         free(thread);
+
         return NULL;
     }
 
@@ -181,37 +254,36 @@ void *seal_thread_start(
 bool seal_thread_join(
     void *opaque
 ) {
+    SealThreadHandle *thread;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealThreadHandle *thread =
+    thread =
         (SealThreadHandle *)opaque;
 
 #if defined(_WIN32)
 
-    DWORD waitStatus =
-        WaitForSingleObject(
-            thread->handle,
-            INFINITE
-        );
-
-    if (waitStatus != WAIT_OBJECT_0) {
+    if (WaitForSingleObject(
+        thread->handle,
+        INFINITE
+    ) != WAIT_OBJECT_0) {
         return false;
     }
 
-    if (!CloseHandle(thread->handle)) {
+    if (!CloseHandle(
+        thread->handle
+    )) {
         return false;
     }
 
 #else
 
-    int status = pthread_join(
+    if (pthread_join(
         thread->handle,
         NULL
-    );
-
-    if (status != 0) {
+    ) != 0) {
         return false;
     }
 
@@ -225,26 +297,28 @@ bool seal_thread_join(
 bool seal_thread_detach(
     void *opaque
 ) {
+    SealThreadHandle *thread;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealThreadHandle *thread =
+    thread =
         (SealThreadHandle *)opaque;
 
 #if defined(_WIN32)
 
-    if (!CloseHandle(thread->handle)) {
+    if (!CloseHandle(
+        thread->handle
+    )) {
         return false;
     }
 
 #else
 
-    int status = pthread_detach(
+    if (pthread_detach(
         thread->handle
-    );
-
-    if (status != 0) {
+    ) != 0) {
         return false;
     }
 
@@ -258,7 +332,9 @@ bool seal_thread_detach(
 void *seal_thread_allocate_context(
     uintptr_t size
 ) {
-    size_t allocationSize =
+    size_t allocationSize;
+
+    allocationSize =
         size == 0
             ? 1
             : (size_t)size;
@@ -278,7 +354,11 @@ void seal_thread_free_context(
 void seal_thread_yield(void) {
 #if defined(_WIN32)
 
-    (void)SwitchToThread();
+    /*
+    Sleep(0) yields the remainder of the current time slice to another
+    ready thread.
+    */
+    Sleep(0);
 
 #else
 
@@ -295,11 +375,14 @@ void seal_thread_sleep(
     while (milliseconds >
         (uintptr_t)UINT32_MAX) {
         Sleep(UINT32_MAX);
+
         milliseconds -=
             (uintptr_t)UINT32_MAX;
     }
 
-    Sleep((DWORD)milliseconds);
+    Sleep(
+        (DWORD)milliseconds
+    );
 
 #else
 
@@ -335,9 +418,12 @@ uintptr_t seal_thread_hardware_thread_count(
 
     SYSTEM_INFO information;
 
-    GetSystemInfo(&information);
+    GetSystemInfo(
+        &information
+    );
 
-    if (information.dwNumberOfProcessors == 0) {
+    if (information.dwNumberOfProcessors ==
+        0) {
         return 1;
     }
 
@@ -346,7 +432,9 @@ uintptr_t seal_thread_hardware_thread_count(
 
 #else
 
-    long count =
+    long count;
+
+    count =
         sysconf(
             _SC_NPROCESSORS_ONLN
         );
@@ -361,7 +449,9 @@ uintptr_t seal_thread_hardware_thread_count(
 }
 
 void *seal_mutex_create(void) {
-    SealMutex *mutex =
+    SealMutex *mutex;
+
+    mutex =
         (SealMutex *)malloc(
             sizeof(SealMutex)
         );
@@ -383,6 +473,7 @@ void *seal_mutex_create(void) {
         NULL
     ) != 0) {
         free(mutex);
+
         return NULL;
     }
 
@@ -394,11 +485,13 @@ void *seal_mutex_create(void) {
 bool seal_mutex_destroy(
     void *opaque
 ) {
+    SealMutex *mutex;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealMutex *mutex =
+    mutex =
         (SealMutex *)opaque;
 
 #if defined(_WIN32)
@@ -425,11 +518,13 @@ bool seal_mutex_destroy(
 bool seal_mutex_lock(
     void *opaque
 ) {
+    SealMutex *mutex;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealMutex *mutex =
+    mutex =
         (SealMutex *)opaque;
 
 #if defined(_WIN32)
@@ -452,24 +547,30 @@ bool seal_mutex_lock(
 int seal_mutex_try_lock(
     void *opaque
 ) {
+    SealMutex *mutex;
+
     if (opaque == NULL) {
         return -1;
     }
 
-    SealMutex *mutex =
+    mutex =
         (SealMutex *)opaque;
 
 #if defined(_WIN32)
 
-    return TryEnterCriticalSection(
+    if (TryEnterCriticalSection(
         &mutex->value
-    )
-        ? 1
-        : 0;
+    )) {
+        return 1;
+    }
+
+    return 0;
 
 #else
 
-    int status =
+    int status;
+
+    status =
         pthread_mutex_trylock(
             &mutex->value
         );
@@ -490,11 +591,13 @@ int seal_mutex_try_lock(
 bool seal_mutex_unlock(
     void *opaque
 ) {
+    SealMutex *mutex;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealMutex *mutex =
+    mutex =
         (SealMutex *)opaque;
 
 #if defined(_WIN32)
@@ -515,7 +618,9 @@ bool seal_mutex_unlock(
 }
 
 void *seal_condition_create(void) {
-    SealCondition *condition =
+    SealCondition *condition;
+
+    condition =
         (SealCondition *)malloc(
             sizeof(SealCondition)
         );
@@ -526,9 +631,12 @@ void *seal_condition_create(void) {
 
 #if defined(_WIN32)
 
-    InitializeConditionVariable(
-        &condition->value
+    InitializeCriticalSection(
+        &condition->guard
     );
+
+    condition->head = NULL;
+    condition->tail = NULL;
 
 #else
 
@@ -537,6 +645,7 @@ void *seal_condition_create(void) {
         NULL
     ) != 0) {
         free(condition);
+
         return NULL;
     }
 
@@ -548,14 +657,38 @@ void *seal_condition_create(void) {
 bool seal_condition_destroy(
     void *opaque
 ) {
+    SealCondition *condition;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealCondition *condition =
+    condition =
         (SealCondition *)opaque;
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+
+    EnterCriticalSection(
+        &condition->guard
+    );
+
+    if (condition->head != NULL) {
+        LeaveCriticalSection(
+            &condition->guard
+        );
+
+        return false;
+    }
+
+    LeaveCriticalSection(
+        &condition->guard
+    );
+
+    DeleteCriticalSection(
+        &condition->guard
+    );
+
+#else
 
     if (pthread_cond_destroy(
         &condition->value
@@ -574,25 +707,123 @@ bool seal_condition_wait(
     void *conditionOpaque,
     void *mutexOpaque
 ) {
+    SealCondition *condition;
+    SealMutex *mutex;
+
     if (conditionOpaque == NULL ||
         mutexOpaque == NULL) {
         return false;
     }
 
-    SealCondition *condition =
+    condition =
         (SealCondition *)
             conditionOpaque;
 
-    SealMutex *mutex =
-        (SealMutex *)mutexOpaque;
+    mutex =
+        (SealMutex *)
+            mutexOpaque;
 
 #if defined(_WIN32)
 
-    return SleepConditionVariableCS(
-        &condition->value,
-        &mutex->value,
-        INFINITE
-    ) != 0;
+    SealConditionWaiter waiter;
+    DWORD waitStatus;
+
+    /*
+    An auto-reset event represents exactly one waiter notification.
+    */
+    waiter.event = CreateEventA(
+        NULL,
+        FALSE,
+        FALSE,
+        NULL
+    );
+
+    if (waiter.event == NULL) {
+        return false;
+    }
+
+    waiter.next = NULL;
+
+    /*
+    Publish the waiter while the caller still owns the external mutex.
+
+    A signal that occurs after publication cannot be lost because the
+    event remains signaled until this waiter consumes it.
+    */
+    EnterCriticalSection(
+        &condition->guard
+    );
+
+    if (condition->tail == NULL) {
+        condition->head =
+            &waiter;
+
+        condition->tail =
+            &waiter;
+    } else {
+        condition->tail->next =
+            &waiter;
+
+        condition->tail =
+            &waiter;
+    }
+
+    LeaveCriticalSection(
+        &condition->guard
+    );
+
+    /*
+    Release the caller's mutex only after registration.
+    */
+    LeaveCriticalSection(
+        &mutex->value
+    );
+
+    waitStatus =
+        WaitForSingleObject(
+            waiter.event,
+            INFINITE
+        );
+
+    /*
+    Condition waits always return with the caller's mutex reacquired.
+    */
+    EnterCriticalSection(
+        &mutex->value
+    );
+
+    if (waitStatus !=
+        WAIT_OBJECT_0) {
+        /*
+        The waiter might still be queued if the wait operation itself
+        failed. Remove it before destroying its event.
+        */
+        EnterCriticalSection(
+            &condition->guard
+        );
+
+        (void)
+            seal_condition_remove_waiter(
+                condition,
+                &waiter
+            );
+
+        LeaveCriticalSection(
+            &condition->guard
+        );
+
+        CloseHandle(
+            waiter.event
+        );
+
+        return false;
+    }
+
+    CloseHandle(
+        waiter.event
+    );
+
+    return true;
 
 #else
 
@@ -607,17 +838,58 @@ bool seal_condition_wait(
 bool seal_condition_signal(
     void *opaque
 ) {
+    SealCondition *condition;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealCondition *condition =
+    condition =
         (SealCondition *)opaque;
 
 #if defined(_WIN32)
 
-    WakeConditionVariable(
-        &condition->value
+    SealConditionWaiter *waiter;
+
+    EnterCriticalSection(
+        &condition->guard
+    );
+
+    waiter =
+        condition->head;
+
+    if (waiter == NULL) {
+        LeaveCriticalSection(
+            &condition->guard
+        );
+
+        return true;
+    }
+
+    /*
+    Do not remove the waiter unless its event was successfully signaled.
+    */
+    if (!SetEvent(
+        waiter->event
+    )) {
+        LeaveCriticalSection(
+            &condition->guard
+        );
+
+        return false;
+    }
+
+    condition->head =
+        waiter->next;
+
+    if (condition->head == NULL) {
+        condition->tail = NULL;
+    }
+
+    waiter->next = NULL;
+
+    LeaveCriticalSection(
+        &condition->guard
     );
 
     return true;
@@ -634,17 +906,51 @@ bool seal_condition_signal(
 bool seal_condition_broadcast(
     void *opaque
 ) {
+    SealCondition *condition;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealCondition *condition =
+    condition =
         (SealCondition *)opaque;
 
 #if defined(_WIN32)
 
-    WakeAllConditionVariable(
-        &condition->value
+    SealConditionWaiter *waiter;
+
+    EnterCriticalSection(
+        &condition->guard
+    );
+
+    while (condition->head != NULL) {
+        waiter =
+            condition->head;
+
+        /*
+        Keep this waiter and all later waiters queued if signaling fails.
+        Successfully signaled waiters have already been removed.
+        */
+        if (!SetEvent(
+            waiter->event
+        )) {
+            LeaveCriticalSection(
+                &condition->guard
+            );
+
+            return false;
+        }
+
+        condition->head =
+            waiter->next;
+
+        waiter->next = NULL;
+    }
+
+    condition->tail = NULL;
+
+    LeaveCriticalSection(
+        &condition->guard
     );
 
     return true;
@@ -659,7 +965,9 @@ bool seal_condition_broadcast(
 }
 
 void *seal_once_create(void) {
-    SealOnce *once =
+    SealOnce *once;
+
+    once =
         (SealOnce *)malloc(
             sizeof(SealOnce)
         );
@@ -673,12 +981,29 @@ void *seal_once_create(void) {
 #if defined(_WIN32)
 
     InitializeCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
-    InitializeConditionVariable(
-        &once->condition
+    /*
+    A manual-reset event wakes all current waiters and remains signaled
+    for callers that arrive after initialization completes.
+    */
+    once->completed = CreateEventA(
+        NULL,
+        TRUE,
+        FALSE,
+        NULL
     );
+
+    if (once->completed == NULL) {
+        DeleteCriticalSection(
+            &once->guard
+        );
+
+        free(once);
+
+        return NULL;
+    }
 
 #else
 
@@ -687,6 +1012,7 @@ void *seal_once_create(void) {
         NULL
     ) != 0) {
         free(once);
+
         return NULL;
     }
 
@@ -711,17 +1037,45 @@ void *seal_once_create(void) {
 bool seal_once_destroy(
     void *opaque
 ) {
+    SealOnce *once;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealOnce *once =
+    once =
         (SealOnce *)opaque;
 
 #if defined(_WIN32)
 
+    EnterCriticalSection(
+        &once->guard
+    );
+
+    /*
+    Destroying while initialization is running could invalidate the event
+    while another thread is waiting on it.
+    */
+    if (once->state == 1) {
+        LeaveCriticalSection(
+            &once->guard
+        );
+
+        return false;
+    }
+
+    LeaveCriticalSection(
+        &once->guard
+    );
+
+    if (!CloseHandle(
+        once->completed
+    )) {
+        return false;
+    }
+
     DeleteCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
 #else
@@ -748,48 +1102,60 @@ bool seal_once_destroy(
 int seal_once_begin(
     void *opaque
 ) {
+    SealOnce *once;
+
     if (opaque == NULL) {
         return -1;
     }
 
-    SealOnce *once =
+    once =
         (SealOnce *)opaque;
 
 #if defined(_WIN32)
 
+    int state;
+    DWORD waitStatus;
+
     EnterCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
-    while (once->state == 1) {
-        if (!SleepConditionVariableCS(
-            &once->condition,
-            &once->mutex,
-            INFINITE
-        )) {
-            LeaveCriticalSection(
-                &once->mutex
-            );
+    state = once->state;
 
-            return -1;
-        }
+    if (state == 0) {
+        once->state = 1;
+
+        LeaveCriticalSection(
+            &once->guard
+        );
+
+        return 1;
     }
 
-    if (once->state == 2) {
+    if (state == 2) {
         LeaveCriticalSection(
-            &once->mutex
+            &once->guard
         );
 
         return 0;
     }
 
-    once->state = 1;
-
     LeaveCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
-    return 1;
+    waitStatus =
+        WaitForSingleObject(
+            once->completed,
+            INFINITE
+        );
+
+    if (waitStatus !=
+        WAIT_OBJECT_0) {
+        return -1;
+    }
+
+    return 0;
 
 #else
 
@@ -834,22 +1200,38 @@ int seal_once_begin(
 bool seal_once_complete(
     void *opaque
 ) {
+    SealOnce *once;
+
     if (opaque == NULL) {
         return false;
     }
 
-    SealOnce *once =
+    once =
         (SealOnce *)opaque;
 
 #if defined(_WIN32)
 
     EnterCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
     if (once->state != 1) {
         LeaveCriticalSection(
-            &once->mutex
+            &once->guard
+        );
+
+        return false;
+    }
+
+    /*
+    Signal the event before publishing state 2. A caller observing state 2
+    can therefore rely on the event already being signaled.
+    */
+    if (!SetEvent(
+        once->completed
+    )) {
+        LeaveCriticalSection(
+            &once->guard
         );
 
         return false;
@@ -857,17 +1239,16 @@ bool seal_once_complete(
 
     once->state = 2;
 
-    WakeAllConditionVariable(
-        &once->condition
-    );
-
     LeaveCriticalSection(
-        &once->mutex
+        &once->guard
     );
 
     return true;
 
 #else
+
+    int broadcastStatus;
+    int unlockStatus;
 
     if (pthread_mutex_lock(
         &once->mutex
@@ -885,12 +1266,12 @@ bool seal_once_complete(
 
     once->state = 2;
 
-    int broadcastStatus =
+    broadcastStatus =
         pthread_cond_broadcast(
             &once->condition
         );
 
-    int unlockStatus =
+    unlockStatus =
         pthread_mutex_unlock(
             &once->mutex
         );

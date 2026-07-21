@@ -16,44 +16,30 @@ standard = "c11"
 c_flags = [
     "-Wall",
     "-Wextra",
-    "-pthread",
-]
-
-link_flags = [
-    "-pthread",
 ]
 
 [compiler.tcc]
 path = "tcc"
 c_flags = []
-link_flags = [
-    "-lpthread",
-]
+link_flags = []
 
 [compiler.gcc]
 c_flags = [
     "-Wall",
     "-Wextra",
     "-Wpedantic",
-    "-pthread",
 ]
 
-link_flags = [
-    "-pthread",
-]
+link_flags = []
 
 [compiler.clang]
 c_flags = [
     "-Wall",
     "-Wextra",
-    "-pthread",
 ]
 
-link_flags = [
-    "-pthread",
-]
+link_flags = []
 
 [compiler.msvc]
 c_flags = []
-
 link_flags = []
