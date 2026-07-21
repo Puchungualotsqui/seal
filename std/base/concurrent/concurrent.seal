@@ -1,0 +1,1088 @@
+Error :: enum {
+    None
+    AllocationFailed
+    Closed
+    Empty
+    Full
+    InvalidState
+    SyncFailure
+    ThreadFailure
+    NotDrained
+}
+
+PoolState :: enum {
+    Empty
+    Running
+    Closing
+    Joined
+}
+
+/*
+BlockingQueue is a bounded FIFO queue.
+
+It must not be copied after it begins being used.
+*/
+BlockingQueue :: struct<T type> {
+    Buffer *T
+    Capacity uint
+    Head uint
+    Tail uint
+    Count uint
+    Closed bool
+    Initialized bool
+
+    Mutex sync.Mutex
+    NotEmpty sync.Condition
+    NotFull sync.Condition
+}
+
+/*
+WorkerPool stores only queue data and thread handles.
+
+Worker is a generic parameter to InitWorkerPool and is never stored.
+The pool must remain at the same address after initialization.
+*/
+WorkerPool :: struct<T type> {
+    Queue BlockingQueue<T>
+    Threads *thread.Thread
+    ThreadCount uint
+    StartedThreadCount uint
+    State PoolState
+}
+
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error == .None {
+        return "no error"
+    }
+
+    if error == .AllocationFailed {
+        return "concurrent allocation failed"
+    }
+
+    if error == .Closed {
+        return "queue is closed"
+    }
+
+    if error == .Empty {
+        return "queue is empty"
+    }
+
+    if error == .Full {
+        return "queue is full"
+    }
+
+    if error == .InvalidState {
+        return "invalid concurrent state"
+    }
+
+    if error == .SyncFailure {
+        return "synchronization failure"
+    }
+
+    if error == .ThreadFailure {
+        return "worker thread failure"
+    }
+
+    return "queue still contains values"
+}
+
+_EmptyQueue :: pure task<
+    T type,
+>() BlockingQueue<T> {
+    return BlockingQueue<T>{
+        Buffer = nil,
+        Capacity = 0,
+        Head = 0,
+        Tail = 0,
+        Count = 0,
+        Closed = false,
+        Initialized = false,
+
+        Mutex = sync.Mutex{
+            Handle = nil,
+        },
+
+        NotEmpty = sync.Condition{
+            Handle = nil,
+        },
+
+        NotFull = sync.Condition{
+            Handle = nil,
+        },
+    }
+}
+
+QueueIsValid :: pure task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+) bool {
+    return queue != nil &&
+        queue.Initialized &&
+        queue.Buffer != nil &&
+        queue.Capacity > 0 &&
+        sync.MutexIsValid(
+            &queue.Mutex,
+        ) &&
+        sync.ConditionIsValid(
+            &queue.NotEmpty,
+        ) &&
+        sync.ConditionIsValid(
+            &queue.NotFull,
+        )
+}
+
+_CheckedAllocationSize :: pure task(
+    count uint,
+    elementSize uint,
+) (uint, bool) {
+    if count == 0 ||
+        elementSize == 0 {
+        return 0, false
+    }
+
+    maximum := ~cast<uint>(0)
+
+    if count >
+        maximum / elementSize {
+        return 0, false
+    }
+
+    return count * elementSize,
+        true
+}
+
+TryNewBlockingQueue :: task<
+    T type,
+>(
+    capacity uint,
+) (BlockingQueue<T>, Error) {
+    allocationSize, valid :=
+        _CheckedAllocationSize(
+            capacity,
+            size(T),
+        )
+
+    if !valid {
+        return _EmptyQueue<T>(),
+            .AllocationFailed
+    }
+
+    rawBuffer :=
+        threadNative.AllocateContext(
+            allocationSize,
+        )
+
+    if rawBuffer == nil {
+        return _EmptyQueue<T>(),
+            .AllocationFailed
+    }
+
+    mutex, mutexError :=
+        sync.TryNewMutex()
+
+    if !sync.ErrorIsNone(
+        mutexError,
+    ) {
+        threadNative.FreeContext(
+            rawBuffer,
+        )
+
+        return _EmptyQueue<T>(),
+            .AllocationFailed
+    }
+
+    notEmpty, emptyError :=
+        sync.TryNewCondition()
+
+    if !sync.ErrorIsNone(
+        emptyError,
+    ) {
+        sync.DestroyMutex(
+            &mutex,
+        )
+
+        threadNative.FreeContext(
+            rawBuffer,
+        )
+
+        return _EmptyQueue<T>(),
+            .AllocationFailed
+    }
+
+    notFull, fullError :=
+        sync.TryNewCondition()
+
+    if !sync.ErrorIsNone(
+        fullError,
+    ) {
+        sync.DestroyCondition(
+            &notEmpty,
+        )
+
+        sync.DestroyMutex(
+            &mutex,
+        )
+
+        threadNative.FreeContext(
+            rawBuffer,
+        )
+
+        return _EmptyQueue<T>(),
+            .AllocationFailed
+    }
+
+    return BlockingQueue<T>{
+        Buffer = cast<*T>(
+            rawBuffer,
+        ),
+        Capacity = capacity,
+        Head = 0,
+        Tail = 0,
+        Count = 0,
+        Closed = false,
+        Initialized = true,
+        Mutex = mutex,
+        NotEmpty = notEmpty,
+        NotFull = notFull,
+    }, .None
+}
+
+NewBlockingQueue :: task<
+    T type,
+>(
+    capacity uint,
+) BlockingQueue<T> {
+    queue, error :=
+        TryNewBlockingQueue<T>(
+            capacity,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "concurrent.NewBlockingQueue: allocation failed",
+        )
+    }
+
+    return queue
+}
+
+Push :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+    value T,
+) Error {
+    if !QueueIsValid<T>(queue) {
+        return .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return .SyncFailure
+    }
+
+    for queue.Count ==
+        queue.Capacity &&
+        !queue.Closed {
+        waitError :=
+            sync.Wait(
+                &queue.NotFull,
+                &queue.Mutex,
+            )
+
+        if !sync.ErrorIsNone(
+            waitError,
+        ) {
+            sync.Unlock(
+                &queue.Mutex,
+            )
+
+            return .SyncFailure
+        }
+    }
+
+    if queue.Closed {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return .Closed
+    }
+
+    queue.Buffer[
+        cast<int>(queue.Tail)
+    ] = value
+
+    queue.Tail =
+        (queue.Tail + 1) %
+        queue.Capacity
+
+    queue.Count += 1
+
+    signalError :=
+        sync.Signal(
+            &queue.NotEmpty,
+        )
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        signalError,
+    ) ||
+        !sync.ErrorIsNone(
+            unlockError,
+        ) {
+        return .SyncFailure
+    }
+
+    return .None
+}
+
+TryPush :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+    value T,
+) (bool, Error) {
+    if !QueueIsValid<T>(queue) {
+        return false,
+            .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return false,
+            .SyncFailure
+    }
+
+    if queue.Closed {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return false,
+            .Closed
+    }
+
+    if queue.Count ==
+        queue.Capacity {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return false,
+            .Full
+    }
+
+    queue.Buffer[
+        cast<int>(queue.Tail)
+    ] = value
+
+    queue.Tail =
+        (queue.Tail + 1) %
+        queue.Capacity
+
+    queue.Count += 1
+
+    signalError :=
+        sync.Signal(
+            &queue.NotEmpty,
+        )
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        signalError,
+    ) ||
+        !sync.ErrorIsNone(
+            unlockError,
+        ) {
+        return false,
+            .SyncFailure
+    }
+
+    return true,
+        .None
+}
+
+/*
+Pop writes one queue value to output.
+
+Closed means the queue is closed and completely drained.
+*/
+Pop :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+    output *T,
+) Error {
+    if output == nil ||
+        !QueueIsValid<T>(queue) {
+        return .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return .SyncFailure
+    }
+
+    for queue.Count == 0 &&
+        !queue.Closed {
+        waitError :=
+            sync.Wait(
+                &queue.NotEmpty,
+                &queue.Mutex,
+            )
+
+        if !sync.ErrorIsNone(
+            waitError,
+        ) {
+            sync.Unlock(
+                &queue.Mutex,
+            )
+
+            return .SyncFailure
+        }
+    }
+
+    if queue.Count == 0 &&
+        queue.Closed {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return .Closed
+    }
+
+    output[0] =
+        queue.Buffer[
+            cast<int>(queue.Head)
+        ]
+
+    queue.Head =
+        (queue.Head + 1) %
+        queue.Capacity
+
+    queue.Count -= 1
+
+    signalError :=
+        sync.Signal(
+            &queue.NotFull,
+        )
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        signalError,
+    ) ||
+        !sync.ErrorIsNone(
+            unlockError,
+        ) {
+        return .SyncFailure
+    }
+
+    return .None
+}
+
+TryPop :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+    output *T,
+) (bool, Error) {
+    if output == nil ||
+        !QueueIsValid<T>(queue) {
+        return false,
+            .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return false,
+            .SyncFailure
+    }
+
+    if queue.Count == 0 {
+        isClosed := queue.Closed
+
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        if isClosed {
+            return false,
+                .Closed
+        }
+
+        return false,
+            .Empty
+    }
+
+    output[0] =
+        queue.Buffer[
+            cast<int>(queue.Head)
+        ]
+
+    queue.Head =
+        (queue.Head + 1) %
+        queue.Capacity
+
+    queue.Count -= 1
+
+    signalError :=
+        sync.Signal(
+            &queue.NotFull,
+        )
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        signalError,
+    ) ||
+        !sync.ErrorIsNone(
+            unlockError,
+        ) {
+        return false,
+            .SyncFailure
+    }
+
+    return true,
+        .None
+}
+
+CloseQueue :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+) Error {
+    if !QueueIsValid<T>(queue) {
+        return .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return .SyncFailure
+    }
+
+    if queue.Closed {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return .None
+    }
+
+    queue.Closed = true
+
+    emptyError :=
+        sync.Broadcast(
+            &queue.NotEmpty,
+        )
+
+    fullError :=
+        sync.Broadcast(
+            &queue.NotFull,
+        )
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        emptyError,
+    ) ||
+        !sync.ErrorIsNone(
+            fullError,
+        ) ||
+        !sync.ErrorIsNone(
+            unlockError,
+        ) {
+        return .SyncFailure
+    }
+
+    return .None
+}
+
+QueueLength :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+) (uint, Error) {
+    if !QueueIsValid<T>(queue) {
+        return 0,
+            .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return 0,
+            .SyncFailure
+    }
+
+    length := queue.Count
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        unlockError,
+    ) {
+        return 0,
+            .SyncFailure
+    }
+
+    return length,
+        .None
+}
+
+DestroyQueue :: task<
+    T type,
+>(
+    queue *BlockingQueue<T>,
+) Error {
+    if !QueueIsValid<T>(queue) {
+        return .InvalidState
+    }
+
+    lockError :=
+        sync.Lock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        lockError,
+    ) {
+        return .SyncFailure
+    }
+
+    if !queue.Closed ||
+        queue.Count != 0 {
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+        return .NotDrained
+    }
+
+    unlockError :=
+        sync.Unlock(
+            &queue.Mutex,
+        )
+
+    if !sync.ErrorIsNone(
+        unlockError,
+    ) {
+        return .SyncFailure
+    }
+
+    if !sync.ErrorIsNone(
+        sync.DestroyCondition(
+            &queue.NotFull,
+        ),
+    ) {
+        return .SyncFailure
+    }
+
+    if !sync.ErrorIsNone(
+        sync.DestroyCondition(
+            &queue.NotEmpty,
+        ),
+    ) {
+        return .SyncFailure
+    }
+
+    if !sync.ErrorIsNone(
+        sync.DestroyMutex(
+            &queue.Mutex,
+        ),
+    ) {
+        return .SyncFailure
+    }
+
+    threadNative.FreeContext(
+        cast<rawptr>(
+            queue.Buffer,
+        ),
+    )
+
+    queue.Buffer = nil
+    queue.Capacity = 0
+    queue.Head = 0
+    queue.Tail = 0
+    queue.Count = 0
+    queue.Closed = true
+    queue.Initialized = false
+
+    return .None
+}
+
+/*
+Worker pool.
+*/
+
+_PoolWorker :: task<
+    T type,
+    Worker task[(T)],
+>(
+    queue *BlockingQueue<T>,
+) {
+    value: T
+
+    for true {
+        error :=
+            Pop<T>(
+                queue,
+                &value,
+            )
+
+        if error == .Closed {
+            return
+        }
+
+        if !ErrorIsNone(error) {
+            panic(
+                "concurrent worker: queue failure",
+            )
+        }
+
+        Worker(value)
+    }
+}
+
+_EmptyPool :: pure task<
+    T type,
+>() WorkerPool<T> {
+    return WorkerPool<T>{
+        Queue = _EmptyQueue<T>(),
+        Threads = nil,
+        ThreadCount = 0,
+        StartedThreadCount = 0,
+        State = .Empty,
+    }
+}
+
+/*
+InitWorkerPool initializes pool in its final memory location.
+
+Do not move or copy pool after this call because worker threads borrow
+&pool.Queue.
+*/
+InitWorkerPool :: task<
+    T type,
+    Worker task[(T)],
+>(
+    pool *WorkerPool<T>,
+    threadCount uint,
+    queueCapacity uint,
+) Error {
+    if pool == nil ||
+        threadCount == 0 ||
+        queueCapacity == 0 {
+        return .InvalidState
+    }
+
+    pool[0] = _EmptyPool<T>()
+
+    queue, queueError :=
+        TryNewBlockingQueue<T>(
+            queueCapacity,
+        )
+
+    if !ErrorIsNone(queueError) {
+        return queueError
+    }
+
+    allocationSize, valid :=
+        _CheckedAllocationSize(
+            threadCount,
+            size(thread.Thread),
+        )
+
+    if !valid {
+        CloseQueue<T>(
+            &queue,
+        )
+
+        DestroyQueue<T>(
+            &queue,
+        )
+
+        return .AllocationFailed
+    }
+
+    rawThreads :=
+        threadNative.AllocateContext(
+            allocationSize,
+        )
+
+    if rawThreads == nil {
+        CloseQueue<T>(
+            &queue,
+        )
+
+        DestroyQueue<T>(
+            &queue,
+        )
+
+        return .AllocationFailed
+    }
+
+    pool.Queue = queue
+
+    pool.Threads =
+        cast<*thread.Thread>(
+            rawThreads,
+        )
+
+    pool.ThreadCount =
+        threadCount
+
+    pool.StartedThreadCount = 0
+    pool.State = .Running
+
+    index: uint = 0
+
+    for index < threadCount {
+        workerThread, threadError :=
+            thread.TryStart<
+                *BlockingQueue<T>,
+                _PoolWorker<T, Worker>
+            >(
+                &pool.Queue,
+            )
+
+        if !thread.ErrorIsNone(
+            threadError,
+        ) {
+            CloseQueue<T>(
+                &pool.Queue,
+            )
+
+            joinIndex: uint = 0
+
+            for joinIndex <
+                pool.StartedThreadCount {
+                thread.Join(
+                    &pool.Threads[
+                        cast<int>(joinIndex)
+                    ],
+                )
+
+                joinIndex += 1
+            }
+
+            threadNative.FreeContext(
+                cast<rawptr>(
+                    pool.Threads,
+                ),
+            )
+
+            pool.Threads = nil
+
+            DestroyQueue<T>(
+                &pool.Queue,
+            )
+
+            pool.State = .Empty
+
+            return .ThreadFailure
+        }
+
+        pool.Threads[
+            cast<int>(index)
+        ] = workerThread
+
+        pool.StartedThreadCount += 1
+        index += 1
+    }
+
+    return .None
+}
+
+Submit :: task<
+    T type,
+>(
+    pool *WorkerPool<T>,
+    value T,
+) Error {
+    if pool == nil ||
+        pool.State != .Running {
+        return .InvalidState
+    }
+
+    return Push<T>(
+        &pool.Queue,
+        value,
+    )
+}
+
+CloseWorkerPool :: task<
+    T type,
+>(
+    pool *WorkerPool<T>,
+) Error {
+    if pool == nil {
+        return .InvalidState
+    }
+
+    if pool.State == .Closing ||
+        pool.State == .Joined {
+        return .None
+    }
+
+    if pool.State != .Running {
+        return .InvalidState
+    }
+
+    error :=
+        CloseQueue<T>(
+            &pool.Queue,
+        )
+
+    if !ErrorIsNone(error) {
+        return error
+    }
+
+    pool.State = .Closing
+
+    return .None
+}
+
+/*
+JoinWorkerPool closes the queue, drains submitted jobs, joins every
+worker, and releases all pool resources.
+*/
+JoinWorkerPool :: task<
+    T type,
+>(
+    pool *WorkerPool<T>,
+) Error {
+    if pool == nil ||
+        pool.State == .Empty ||
+        pool.State == .Joined {
+        return .InvalidState
+    }
+
+    if pool.State == .Running {
+        closeError :=
+            CloseWorkerPool<T>(
+                pool,
+            )
+
+        if !ErrorIsNone(
+            closeError,
+        ) {
+            return closeError
+        }
+    }
+
+    failed := false
+    index: uint = 0
+
+    for index <
+        pool.StartedThreadCount {
+        joinError :=
+            thread.Join(
+                &pool.Threads[
+                    cast<int>(index)
+                ],
+            )
+
+        if !thread.ErrorIsNone(
+            joinError,
+        ) {
+            failed = true
+        }
+
+        index += 1
+    }
+
+    if failed {
+        return .ThreadFailure
+    }
+
+    threadNative.FreeContext(
+        cast<rawptr>(
+            pool.Threads,
+        ),
+    )
+
+    pool.Threads = nil
+    pool.ThreadCount = 0
+    pool.StartedThreadCount = 0
+
+    destroyError :=
+        DestroyQueue<T>(
+            &pool.Queue,
+        )
+
+    if !ErrorIsNone(
+        destroyError,
+    ) {
+        return destroyError
+    }
+
+    pool.State = .Joined
+
+    return .None
+}

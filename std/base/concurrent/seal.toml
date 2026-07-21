@@ -1,0 +1,9 @@
+[package]
+name = "concurrent"
+version = "0.1.0"
+kind = "library"
+dependencies = [
+    "thread",
+    "threadNative",
+    "sync",
+]

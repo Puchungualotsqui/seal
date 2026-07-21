@@ -1,10 +1,13 @@
 [package]
 name = "threadExample"
-version = "0.1.0"
+version = "0.2.0"
 kind = "executable"
 dependencies = [
     "thread",
+    "threadNative",
     "sync",
+    "atomic",
+    "concurrent",
     "fmt",
 ]
 
@@ -29,7 +32,6 @@ c_flags = [
     "-Wextra",
     "-Wpedantic",
 ]
-
 link_flags = []
 
 [compiler.clang]
@@ -37,7 +39,6 @@ c_flags = [
     "-Wall",
     "-Wextra",
 ]
-
 link_flags = []
 
 [compiler.msvc]

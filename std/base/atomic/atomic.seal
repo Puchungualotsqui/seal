@@ -1,0 +1,565 @@
+Error :: enum {
+    None
+    AllocationFailed
+    InvalidState
+    DestroyFailed
+    NativeFailure
+}
+
+AtomicInt :: struct {
+    Handle rawptr
+}
+
+AtomicUint :: struct {
+    Handle rawptr
+}
+
+AtomicBool :: struct {
+    Handle rawptr
+}
+
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+TryNewInt :: task(
+    initialValue int,
+) (AtomicInt, Error) {
+    handle :=
+        threadNative.CreateAtomic(
+            cast<uint>(
+                initialValue,
+            ),
+        )
+
+    if handle == nil {
+        return AtomicInt{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return AtomicInt{
+        Handle = handle,
+    }, .None
+}
+
+NewInt :: task(
+    initialValue int,
+) AtomicInt {
+    value, error :=
+        TryNewInt(initialValue)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "atomic.NewInt: allocation failed",
+        )
+    }
+
+    return value
+}
+
+IntIsValid :: pure task(
+    value *AtomicInt,
+) bool {
+    return value != nil &&
+        value.Handle != nil
+}
+
+IntLoad :: task(
+    value *AtomicInt,
+) int {
+    if !IntIsValid(value) {
+        panic(
+            "atomic.IntLoad: invalid atomic",
+        )
+    }
+
+    return cast<int>(
+        threadNative.LoadAtomic(
+            value.Handle,
+        ),
+    )
+}
+
+IntStore :: task(
+    value *AtomicInt,
+    next int,
+) Error {
+    if !IntIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.StoreAtomic(
+        value.Handle,
+        cast<uint>(next),
+    ) {
+        return .NativeFailure
+    }
+
+    return .None
+}
+
+IntExchange :: task(
+    value *AtomicInt,
+    next int,
+) int {
+    if !IntIsValid(value) {
+        panic(
+            "atomic.IntExchange: invalid atomic",
+        )
+    }
+
+    return cast<int>(
+        threadNative.ExchangeAtomic(
+            value.Handle,
+            cast<uint>(next),
+        ),
+    )
+}
+
+IntCompareExchange :: task(
+    value *AtomicInt,
+    expected int,
+    desired int,
+) bool {
+    if !IntIsValid(value) {
+        return false
+    }
+
+    return
+        threadNative.CompareExchangeAtomic(
+            value.Handle,
+            cast<uint>(expected),
+            cast<uint>(desired),
+        )
+}
+
+IntFetchAdd :: task(
+    value *AtomicInt,
+    amount int,
+) int {
+    if !IntIsValid(value) {
+        panic(
+            "atomic.IntFetchAdd: invalid atomic",
+        )
+    }
+
+    return cast<int>(
+        threadNative.FetchAddAtomic(
+            value.Handle,
+            cast<uint>(amount),
+        ),
+    )
+}
+
+IntFetchSub :: task(
+    value *AtomicInt,
+    amount int,
+) int {
+    if !IntIsValid(value) {
+        panic(
+            "atomic.IntFetchSub: invalid atomic",
+        )
+    }
+
+    return cast<int>(
+        threadNative.FetchSubAtomic(
+            value.Handle,
+            cast<uint>(amount),
+        ),
+    )
+}
+
+DestroyInt :: task(
+    value *AtomicInt,
+) Error {
+    if !IntIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyAtomic(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}
+
+/*
+Unsigned atomic.
+*/
+
+TryNewUint :: task(
+    initialValue uint,
+) (AtomicUint, Error) {
+    handle :=
+        threadNative.CreateAtomic(
+            initialValue,
+        )
+
+    if handle == nil {
+        return AtomicUint{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return AtomicUint{
+        Handle = handle,
+    }, .None
+}
+
+NewUint :: task(
+    initialValue uint,
+) AtomicUint {
+    value, error :=
+        TryNewUint(initialValue)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "atomic.NewUint: allocation failed",
+        )
+    }
+
+    return value
+}
+
+UintIsValid :: pure task(
+    value *AtomicUint,
+) bool {
+    return value != nil &&
+        value.Handle != nil
+}
+
+UintLoad :: task(
+    value *AtomicUint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintLoad: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.LoadAtomic(
+            value.Handle,
+        )
+}
+
+UintStore :: task(
+    value *AtomicUint,
+    next uint,
+) Error {
+    if !UintIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.StoreAtomic(
+        value.Handle,
+        next,
+    ) {
+        return .NativeFailure
+    }
+
+    return .None
+}
+
+UintExchange :: task(
+    value *AtomicUint,
+    next uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintExchange: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.ExchangeAtomic(
+            value.Handle,
+            next,
+        )
+}
+
+UintCompareExchange :: task(
+    value *AtomicUint,
+    expected uint,
+    desired uint,
+) bool {
+    if !UintIsValid(value) {
+        return false
+    }
+
+    return
+        threadNative.CompareExchangeAtomic(
+            value.Handle,
+            expected,
+            desired,
+        )
+}
+
+UintFetchAdd :: task(
+    value *AtomicUint,
+    amount uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintFetchAdd: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.FetchAddAtomic(
+            value.Handle,
+            amount,
+        )
+}
+
+UintFetchSub :: task(
+    value *AtomicUint,
+    amount uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintFetchSub: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.FetchSubAtomic(
+            value.Handle,
+            amount,
+        )
+}
+
+UintFetchAnd :: task(
+    value *AtomicUint,
+    mask uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintFetchAnd: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.FetchAndAtomic(
+            value.Handle,
+            mask,
+        )
+}
+
+UintFetchOr :: task(
+    value *AtomicUint,
+    mask uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintFetchOr: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.FetchOrAtomic(
+            value.Handle,
+            mask,
+        )
+}
+
+UintFetchXor :: task(
+    value *AtomicUint,
+    mask uint,
+) uint {
+    if !UintIsValid(value) {
+        panic(
+            "atomic.UintFetchXor: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.FetchXorAtomic(
+            value.Handle,
+            mask,
+        )
+}
+
+DestroyUint :: task(
+    value *AtomicUint,
+) Error {
+    if !UintIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyAtomic(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}
+
+/*
+Boolean atomic.
+*/
+
+TryNewBool :: task(
+    initialValue bool,
+) (AtomicBool, Error) {
+    bits: uint = 0
+
+    if initialValue {
+        bits = 1
+    }
+
+    handle :=
+        threadNative.CreateAtomic(
+            bits,
+        )
+
+    if handle == nil {
+        return AtomicBool{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return AtomicBool{
+        Handle = handle,
+    }, .None
+}
+
+NewBool :: task(
+    initialValue bool,
+) AtomicBool {
+    value, error :=
+        TryNewBool(initialValue)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "atomic.NewBool: allocation failed",
+        )
+    }
+
+    return value
+}
+
+BoolIsValid :: pure task(
+    value *AtomicBool,
+) bool {
+    return value != nil &&
+        value.Handle != nil
+}
+
+BoolLoad :: task(
+    value *AtomicBool,
+) bool {
+    if !BoolIsValid(value) {
+        panic(
+            "atomic.BoolLoad: invalid atomic",
+        )
+    }
+
+    return
+        threadNative.LoadAtomic(
+            value.Handle,
+        ) != 0
+}
+
+BoolStore :: task(
+    value *AtomicBool,
+    next bool,
+) Error {
+    if !BoolIsValid(value) {
+        return .InvalidState
+    }
+
+    bits: uint = 0
+
+    if next {
+        bits = 1
+    }
+
+    if !threadNative.StoreAtomic(
+        value.Handle,
+        bits,
+    ) {
+        return .NativeFailure
+    }
+
+    return .None
+}
+
+BoolExchange :: task(
+    value *AtomicBool,
+    next bool,
+) bool {
+    if !BoolIsValid(value) {
+        panic(
+            "atomic.BoolExchange: invalid atomic",
+        )
+    }
+
+    bits: uint = 0
+
+    if next {
+        bits = 1
+    }
+
+    return
+        threadNative.ExchangeAtomic(
+            value.Handle,
+            bits,
+        ) != 0
+}
+
+BoolCompareExchange :: task(
+    value *AtomicBool,
+    expected bool,
+    desired bool,
+) bool {
+    if !BoolIsValid(value) {
+        return false
+    }
+
+    expectedBits: uint = 0
+    desiredBits: uint = 0
+
+    if expected {
+        expectedBits = 1
+    }
+
+    if desired {
+        desiredBits = 1
+    }
+
+    return
+        threadNative.CompareExchangeAtomic(
+            value.Handle,
+            expectedBits,
+            desiredBits,
+        )
+}
+
+DestroyBool :: task(
+    value *AtomicBool,
+) Error {
+    if !BoolIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyAtomic(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}

@@ -1,6 +1,3 @@
-/*
-Error describes a synchronization operation failure.
-*/
 Error :: enum {
     None
     AllocationFailed
@@ -8,23 +5,38 @@ Error :: enum {
     UnlockFailed
     WaitFailed
     SignalFailed
+    ReleaseFailed
     DestroyFailed
     InvalidState
     NativeFailure
 }
 
-/*
-ErrorIsNone reports whether error represents success.
-*/
+Mutex :: struct {
+    Handle rawptr
+}
+
+Condition :: struct {
+    Handle rawptr
+}
+
+Once :: struct {
+    Handle rawptr
+}
+
+Semaphore :: struct {
+    Handle rawptr
+}
+
+RWMutex :: struct {
+    Handle rawptr
+}
+
 ErrorIsNone :: pure task(
     error Error,
 ) bool {
     return error == .None
 }
 
-/*
-ErrorString returns a stable description of error.
-*/
 ErrorString :: pure task(
     error Error,
 ) string {
@@ -33,66 +45,44 @@ ErrorString :: pure task(
     }
 
     if error == .AllocationFailed {
-        return "native synchronization allocation failed"
+        return "synchronization allocation failed"
     }
 
     if error == .LockFailed {
-        return "mutex lock failed"
+        return "lock operation failed"
     }
 
     if error == .UnlockFailed {
-        return "mutex unlock failed"
+        return "unlock operation failed"
     }
 
     if error == .WaitFailed {
-        return "condition wait failed"
+        return "wait operation failed"
     }
 
     if error == .SignalFailed {
-        return "condition notification failed"
+        return "notification operation failed"
+    }
+
+    if error == .ReleaseFailed {
+        return "release operation failed"
     }
 
     if error == .DestroyFailed {
-        return "synchronization object destruction failed"
+        return "destruction failed"
     }
 
     if error == .InvalidState {
-        return "invalid synchronization object state"
+        return "invalid synchronization state"
     }
 
     return "native synchronization failure"
 }
 
 /*
-Mutex owns a native non-recursive mutex.
-
-Mutex values must not be copied after creation.
+Mutex.
 */
-Mutex :: struct {
-    Handle rawptr
-}
 
-/*
-Condition owns a native condition variable.
-
-Condition values must not be copied after creation.
-*/
-Condition :: struct {
-    Handle rawptr
-}
-
-/*
-Once owns state used to run one compile-time-selected task exactly once.
-
-The initialization task is not stored in this structure.
-*/
-Once :: struct {
-    Handle rawptr
-}
-
-/*
-TryNewMutex creates a native mutex.
-*/
 TryNewMutex :: task() (Mutex, Error) {
     handle :=
         threadNative.CreateMutex()
@@ -108,44 +98,35 @@ TryNewMutex :: task() (Mutex, Error) {
     }, .None
 }
 
-/*
-NewMutex creates a mutex and panics on failure.
-*/
 NewMutex :: task() Mutex {
-    mutex, error :=
+    value, error :=
         TryNewMutex()
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.NewMutex: unable to create mutex",
+            "sync.NewMutex: allocation failed",
         )
     }
 
-    return mutex
+    return value
 }
 
-/*
-MutexIsValid reports whether mutex owns a native handle.
-*/
 MutexIsValid :: pure task(
-    mutex *Mutex,
+    value *Mutex,
 ) bool {
-    return mutex != nil &&
-        mutex.Handle != nil
+    return value != nil &&
+        value.Handle != nil
 }
 
-/*
-Lock acquires mutex.
-*/
 Lock :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) Error {
-    if !MutexIsValid(mutex) {
+    if !MutexIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.LockMutex(
-        mutex.Handle,
+        value.Handle,
     ) {
         return .LockFailed
     }
@@ -153,66 +134,49 @@ Lock :: task(
     return .None
 }
 
-/*
-LockOrPanic acquires mutex and panics on failure.
-*/
 LockOrPanic :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) {
-    error := Lock(mutex)
+    error := Lock(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.LockOrPanic: unable to lock mutex",
+            "sync.LockOrPanic: lock failed",
         )
     }
 }
 
-/*
-TryLock attempts to acquire mutex without blocking.
-
-acquired is false without an error when another thread currently owns
-the mutex.
-*/
 TryLock :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) (bool, Error) {
-    if !MutexIsValid(mutex) {
+    if !MutexIsValid(value) {
         return false,
             .InvalidState
     }
 
     result :=
         threadNative.TryLockMutex(
-            mutex.Handle,
+            value.Handle,
         )
 
-    if result > 0 {
-        return true,
-            .None
-    }
-
-    if result == 0 {
+    if result < 0 {
         return false,
-            .None
+            .LockFailed
     }
 
-    return false,
-        .LockFailed
+    return result > 0,
+        .None
 }
 
-/*
-Unlock releases mutex.
-*/
 Unlock :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) Error {
-    if !MutexIsValid(mutex) {
+    if !MutexIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.UnlockMutex(
-        mutex.Handle,
+        value.Handle,
     ) {
         return .UnlockFailed
     }
@@ -220,66 +184,57 @@ Unlock :: task(
     return .None
 }
 
-/*
-UnlockOrPanic releases mutex and panics on failure.
-*/
 UnlockOrPanic :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) {
-    error := Unlock(mutex)
+    error := Unlock(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.UnlockOrPanic: unable to unlock mutex",
+            "sync.UnlockOrPanic: unlock failed",
         )
     }
 }
 
-/*
-DestroyMutex releases mutex.
-
-The mutex must not be locked or accessed by another thread.
-*/
 DestroyMutex :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) Error {
-    if !MutexIsValid(mutex) {
+    if !MutexIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.DestroyMutex(
-        mutex.Handle,
+        value.Handle,
     ) {
         return .DestroyFailed
     }
 
-    mutex.Handle = nil
+    value.Handle = nil
 
     return .None
 }
 
-/*
-DestroyMutexOrPanic releases mutex and panics on failure.
-*/
 DestroyMutexOrPanic :: task(
-    mutex *Mutex,
+    value *Mutex,
 ) {
     error :=
-        DestroyMutex(
-            mutex,
-        )
+        DestroyMutex(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.DestroyMutexOrPanic: unable to destroy mutex",
+            "sync.DestroyMutexOrPanic: destruction failed",
         )
     }
 }
 
 /*
-TryNewCondition creates a native condition variable.
+Condition variable.
 */
-TryNewCondition :: task() (Condition, Error) {
+
+TryNewCondition :: task() (
+    Condition,
+    Error,
+) {
     handle :=
         threadNative.CreateCondition()
 
@@ -294,38 +249,26 @@ TryNewCondition :: task() (Condition, Error) {
     }, .None
 }
 
-/*
-NewCondition creates a condition variable and panics on failure.
-*/
 NewCondition :: task() Condition {
-    condition, error :=
+    value, error :=
         TryNewCondition()
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.NewCondition: unable to create condition",
+            "sync.NewCondition: allocation failed",
         )
     }
 
-    return condition
+    return value
 }
 
-/*
-ConditionIsValid reports whether condition owns a native handle.
-*/
 ConditionIsValid :: pure task(
-    condition *Condition,
+    value *Condition,
 ) bool {
-    return condition != nil &&
-        condition.Handle != nil
+    return value != nil &&
+        value.Handle != nil
 }
 
-/*
-Wait atomically releases mutex and waits for condition.
-
-The caller must own mutex before calling Wait. The mutex is reacquired
-before Wait returns.
-*/
 Wait :: task(
     condition *Condition,
     mutex *Mutex,
@@ -346,8 +289,37 @@ Wait :: task(
 }
 
 /*
-WaitOrPanic waits and panics on failure.
+WaitFor returns completed=false on timeout.
+
+The mutex is reacquired before the task returns.
 */
+WaitFor :: task(
+    condition *Condition,
+    mutex *Mutex,
+    milliseconds uint,
+) (bool, Error) {
+    if !ConditionIsValid(condition) ||
+        !MutexIsValid(mutex) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.WaitConditionFor(
+            condition.Handle,
+            mutex.Handle,
+            milliseconds,
+        )
+
+    if result < 0 {
+        return false,
+            .WaitFailed
+    }
+
+    return result > 0,
+        .None
+}
+
 WaitOrPanic :: task(
     condition *Condition,
     mutex *Mutex,
@@ -360,23 +332,20 @@ WaitOrPanic :: task(
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.WaitOrPanic: condition wait failed",
+            "sync.WaitOrPanic: wait failed",
         )
     }
 }
 
-/*
-Signal wakes one thread waiting on condition.
-*/
 Signal :: task(
-    condition *Condition,
+    value *Condition,
 ) Error {
-    if !ConditionIsValid(condition) {
+    if !ConditionIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.SignalCondition(
-        condition.Handle,
+        value.Handle,
     ) {
         return .SignalFailed
     }
@@ -384,33 +353,27 @@ Signal :: task(
     return .None
 }
 
-/*
-SignalOrPanic wakes one waiter and panics on failure.
-*/
 SignalOrPanic :: task(
-    condition *Condition,
+    value *Condition,
 ) {
-    error := Signal(condition)
+    error := Signal(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.SignalOrPanic: unable to signal condition",
+            "sync.SignalOrPanic: signal failed",
         )
     }
 }
 
-/*
-Broadcast wakes every thread waiting on condition.
-*/
 Broadcast :: task(
-    condition *Condition,
+    value *Condition,
 ) Error {
-    if !ConditionIsValid(condition) {
+    if !ConditionIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.BroadcastCondition(
-        condition.Handle,
+        value.Handle,
     ) {
         return .SignalFailed
     }
@@ -418,68 +381,53 @@ Broadcast :: task(
     return .None
 }
 
-/*
-BroadcastOrPanic wakes every waiter and panics on failure.
-*/
 BroadcastOrPanic :: task(
-    condition *Condition,
+    value *Condition,
 ) {
-    error :=
-        Broadcast(
-            condition,
-        )
+    error := Broadcast(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.BroadcastOrPanic: unable to broadcast condition",
+            "sync.BroadcastOrPanic: broadcast failed",
         )
     }
 }
 
-/*
-DestroyCondition releases condition.
-
-No thread may still be waiting on it.
-*/
 DestroyCondition :: task(
-    condition *Condition,
+    value *Condition,
 ) Error {
-    if !ConditionIsValid(condition) {
+    if !ConditionIsValid(value) {
         return .InvalidState
     }
 
     if !threadNative.DestroyCondition(
-        condition.Handle,
+        value.Handle,
     ) {
         return .DestroyFailed
     }
 
-    condition.Handle = nil
+    value.Handle = nil
 
     return .None
 }
 
-/*
-DestroyConditionOrPanic releases condition and panics on failure.
-*/
 DestroyConditionOrPanic :: task(
-    condition *Condition,
+    value *Condition,
 ) {
     error :=
-        DestroyCondition(
-            condition,
-        )
+        DestroyCondition(value)
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.DestroyConditionOrPanic: unable to destroy condition",
+            "sync.DestroyConditionOrPanic: destruction failed",
         )
     }
 }
 
 /*
-TryNewOnce creates native one-time initialization state.
+Once.
 */
+
 TryNewOnce :: task() (Once, Error) {
     handle :=
         threadNative.CreateOnce()
@@ -495,50 +443,38 @@ TryNewOnce :: task() (Once, Error) {
     }, .None
 }
 
-/*
-NewOnce creates one-time initialization state and panics on failure.
-*/
 NewOnce :: task() Once {
-    once, error :=
+    value, error :=
         TryNewOnce()
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.NewOnce: unable to create once state",
+            "sync.NewOnce: allocation failed",
         )
     }
 
-    return once
+    return value
 }
 
-/*
-OnceIsValid reports whether once owns native state.
-*/
 OnceIsValid :: pure task(
-    once *Once,
+    value *Once,
 ) bool {
-    return once != nil &&
-        once.Handle != nil
+    return value != nil &&
+        value.Handle != nil
 }
 
-/*
-RunOnce runs Init exactly once across all callers.
-
-Init is selected at compile time. Once stores only native state and does
-not contain a task value or function pointer.
-*/
 RunOnce :: task<
     Init task[()],
 >(
-    once *Once,
+    value *Once,
 ) Error {
-    if !OnceIsValid(once) {
+    if !OnceIsValid(value) {
         return .InvalidState
     }
 
     decision :=
         threadNative.BeginOnce(
-            once.Handle,
+            value.Handle,
         )
 
     if decision < 0 {
@@ -552,7 +488,7 @@ RunOnce :: task<
     Init()
 
     if !threadNative.CompleteOnce(
-        once.Handle,
+        value.Handle,
     ) {
         return .NativeFailure
     }
@@ -561,62 +497,496 @@ RunOnce :: task<
 }
 
 /*
-RunOnceOrPanic runs Init once and panics on failure.
+RunOnceWith passes context only to the caller selected to initialize.
 */
-RunOnceOrPanic :: task<
-    Init task[()],
+RunOnceWith :: task<
+    T type,
+    Init task[(*T)],
 >(
-    once *Once,
-) {
-    error :=
-        RunOnce<Init>(
-            once,
-        )
-
-    if !ErrorIsNone(error) {
-        panic(
-            "sync.RunOnceOrPanic: initialization failed",
-        )
-    }
-}
-
-/*
-DestroyOnce releases one-time initialization state.
-
-No other thread may be using it.
-*/
-DestroyOnce :: task(
-    once *Once,
+    value *Once,
+    context *T,
 ) Error {
-    if !OnceIsValid(once) {
+    if !OnceIsValid(value) ||
+        context == nil {
         return .InvalidState
     }
 
-    if !threadNative.DestroyOnce(
-        once.Handle,
-    ) {
-        return .DestroyFailed
+    decision :=
+        threadNative.BeginOnce(
+            value.Handle,
+        )
+
+    if decision < 0 {
+        return .NativeFailure
     }
 
-    once.Handle = nil
+    if decision == 0 {
+        return .None
+    }
+
+    Init(context)
+
+    if !threadNative.CompleteOnce(
+        value.Handle,
+    ) {
+        return .NativeFailure
+    }
 
     return .None
 }
 
-/*
-DestroyOnceOrPanic releases once state and panics on failure.
-*/
+DestroyOnce :: task(
+    value *Once,
+) Error {
+    if !OnceIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyOnce(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}
+
 DestroyOnceOrPanic :: task(
-    once *Once,
+    value *Once,
 ) {
-    error :=
-        DestroyOnce(
-            once,
+    error := DestroyOnce(value)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroyOnceOrPanic: destruction failed",
+        )
+    }
+}
+
+/*
+Semaphore.
+*/
+
+TryNewSemaphore :: task(
+    initialCount uint,
+) (Semaphore, Error) {
+    handle :=
+        threadNative.CreateSemaphore(
+            initialCount,
+        )
+
+    if handle == nil {
+        return Semaphore{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return Semaphore{
+        Handle = handle,
+    }, .None
+}
+
+NewSemaphore :: task(
+    initialCount uint,
+) Semaphore {
+    value, error :=
+        TryNewSemaphore(
+            initialCount,
         )
 
     if !ErrorIsNone(error) {
         panic(
-            "sync.DestroyOnceOrPanic: unable to destroy once state",
+            "sync.NewSemaphore: allocation failed",
+        )
+    }
+
+    return value
+}
+
+SemaphoreIsValid :: pure task(
+    value *Semaphore,
+) bool {
+    return value != nil &&
+        value.Handle != nil
+}
+
+Acquire :: task(
+    value *Semaphore,
+) Error {
+    if !SemaphoreIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.AcquireSemaphore(
+        value.Handle,
+    ) {
+        return .WaitFailed
+    }
+
+    return .None
+}
+
+AcquireOrPanic :: task(
+    value *Semaphore,
+) {
+    error := Acquire(value)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.AcquireOrPanic: acquire failed",
+        )
+    }
+}
+
+TryAcquire :: task(
+    value *Semaphore,
+) (bool, Error) {
+    if !SemaphoreIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.TryAcquireSemaphore(
+            value.Handle,
+        )
+
+    if result < 0 {
+        return false,
+            .WaitFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+AcquireFor :: task(
+    value *Semaphore,
+    milliseconds uint,
+) (bool, Error) {
+    if !SemaphoreIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.AcquireSemaphoreFor(
+            value.Handle,
+            milliseconds,
+        )
+
+    if result < 0 {
+        return false,
+            .WaitFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+Release :: task(
+    value *Semaphore,
+    count uint,
+) Error {
+    if !SemaphoreIsValid(value) ||
+        count == 0 {
+        return .InvalidState
+    }
+
+    if !threadNative.ReleaseSemaphore(
+        value.Handle,
+        count,
+    ) {
+        return .ReleaseFailed
+    }
+
+    return .None
+}
+
+ReleaseOne :: task(
+    value *Semaphore,
+) Error {
+    return Release(
+        value,
+        1,
+    )
+}
+
+ReleaseOrPanic :: task(
+    value *Semaphore,
+    count uint,
+) {
+    error :=
+        Release(
+            value,
+            count,
+        )
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.ReleaseOrPanic: release failed",
+        )
+    }
+}
+
+DestroySemaphore :: task(
+    value *Semaphore,
+) Error {
+    if !SemaphoreIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroySemaphore(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}
+
+DestroySemaphoreOrPanic :: task(
+    value *Semaphore,
+) {
+    error :=
+        DestroySemaphore(value)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroySemaphoreOrPanic: destruction failed",
+        )
+    }
+}
+
+/*
+Read-write mutex.
+*/
+
+TryNewRWMutex :: task() (
+    RWMutex,
+    Error,
+) {
+    handle :=
+        threadNative.CreateRWMutex()
+
+    if handle == nil {
+        return RWMutex{
+            Handle = nil,
+        }, .AllocationFailed
+    }
+
+    return RWMutex{
+        Handle = handle,
+    }, .None
+}
+
+NewRWMutex :: task() RWMutex {
+    value, error :=
+        TryNewRWMutex()
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.NewRWMutex: allocation failed",
+        )
+    }
+
+    return value
+}
+
+RWMutexIsValid :: pure task(
+    value *RWMutex,
+) bool {
+    return value != nil &&
+        value.Handle != nil
+}
+
+ReadLock :: task(
+    value *RWMutex,
+) Error {
+    if !RWMutexIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.ReadLockRWMutex(
+        value.Handle,
+    ) {
+        return .LockFailed
+    }
+
+    return .None
+}
+
+TryReadLock :: task(
+    value *RWMutex,
+) (bool, Error) {
+    if !RWMutexIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.TryReadLockRWMutex(
+            value.Handle,
+        )
+
+    if result < 0 {
+        return false,
+            .LockFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+ReadLockFor :: task(
+    value *RWMutex,
+    milliseconds uint,
+) (bool, Error) {
+    if !RWMutexIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.ReadLockRWMutexFor(
+            value.Handle,
+            milliseconds,
+        )
+
+    if result < 0 {
+        return false,
+            .LockFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+ReadUnlock :: task(
+    value *RWMutex,
+) Error {
+    if !RWMutexIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.ReadUnlockRWMutex(
+        value.Handle,
+    ) {
+        return .UnlockFailed
+    }
+
+    return .None
+}
+
+WriteLock :: task(
+    value *RWMutex,
+) Error {
+    if !RWMutexIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.WriteLockRWMutex(
+        value.Handle,
+    ) {
+        return .LockFailed
+    }
+
+    return .None
+}
+
+TryWriteLock :: task(
+    value *RWMutex,
+) (bool, Error) {
+    if !RWMutexIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.TryWriteLockRWMutex(
+            value.Handle,
+        )
+
+    if result < 0 {
+        return false,
+            .LockFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+WriteLockFor :: task(
+    value *RWMutex,
+    milliseconds uint,
+) (bool, Error) {
+    if !RWMutexIsValid(value) {
+        return false,
+            .InvalidState
+    }
+
+    result :=
+        threadNative.WriteLockRWMutexFor(
+            value.Handle,
+            milliseconds,
+        )
+
+    if result < 0 {
+        return false,
+            .LockFailed
+    }
+
+    return result > 0,
+        .None
+}
+
+WriteUnlock :: task(
+    value *RWMutex,
+) Error {
+    if !RWMutexIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.WriteUnlockRWMutex(
+        value.Handle,
+    ) {
+        return .UnlockFailed
+    }
+
+    return .None
+}
+
+DestroyRWMutex :: task(
+    value *RWMutex,
+) Error {
+    if !RWMutexIsValid(value) {
+        return .InvalidState
+    }
+
+    if !threadNative.DestroyRWMutex(
+        value.Handle,
+    ) {
+        return .DestroyFailed
+    }
+
+    value.Handle = nil
+
+    return .None
+}
+
+DestroyRWMutexOrPanic :: task(
+    value *RWMutex,
+) {
+    error :=
+        DestroyRWMutex(value)
+
+    if !ErrorIsNone(error) {
+        panic(
+            "sync.DestroyRWMutexOrPanic: destruction failed",
         )
     }
 }

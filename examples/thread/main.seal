@@ -1,57 +1,22 @@
-/*
-This example verifies:
-
-- concurrent workers with structured arguments;
-- mutex-protected shared state;
-- result-producing workers;
-- native thread joining.
-*/
-
-SharedCounter :: struct {
-    Mutex sync.Mutex
-    Value int
-}
-
-IncrementArguments :: struct {
-    Counter *SharedCounter
-    Count int
-}
-
-/*
-Increment adds Count to the shared counter while holding its mutex.
-*/
-Increment :: task(
-    arguments IncrementArguments,
+Require :: task(
+    condition bool,
+    message string,
 ) {
-    sync.LockOrPanic(
-        &arguments.Counter.Mutex,
-    )
-
-    index := 0
-
-    for index < arguments.Count {
-        arguments.Counter.Value += 1
-        index += 1
+    if condition {
+        return
     }
 
-    sync.UnlockOrPanic(
-        &arguments.Counter.Mutex,
+    fmt.Println(
+        "test failed: %v",
+        message,
+    )
+
+    panic(
+        "thread integration test failed",
     )
 }
 
-/*
-Square returns the square of value.
-*/
-Square :: task(
-    value int,
-) int {
-    return value * value
-}
-
-/*
-RequireThreadSuccess panics when a thread operation fails.
-*/
-RequireThreadSuccess :: task(
+RequireThread :: task(
     context string,
     error thread.Error,
 ) {
@@ -70,75 +35,140 @@ RequireThreadSuccess :: task(
     )
 }
 
-/*
-Main runs the thread integration test.
-*/
-Main :: task() {
-    counter := SharedCounter{
-        Mutex = sync.NewMutex(),
-        Value = 0,
+RequireSync :: task(
+    context string,
+    error sync.Error,
+) {
+    if sync.ErrorIsNone(error) {
+        return
     }
 
-    first, firstError :=
-        thread.TryStart<
-            IncrementArguments,
-            Increment
-        >(
-            IncrementArguments{
-                Counter = &counter,
-                Count = 100000,
-            },
-        )
-
-    RequireThreadSuccess(
-        "start first worker",
-        firstError,
+    fmt.Println(
+        "%v: %v",
+        context,
+        sync.ErrorString(error),
     )
 
-    second, secondError :=
-        thread.TryStart<
-            IncrementArguments,
-            Increment
-        >(
-            IncrementArguments{
-                Counter = &counter,
-                Count = 100000,
-            },
-        )
+    panic(
+        "thread integration test failed",
+    )
+}
 
-    RequireThreadSuccess(
-        "start second worker",
-        secondError,
+RequireConcurrent :: task(
+    context string,
+    error concurrent.Error,
+) {
+    if concurrent.ErrorIsNone(error) {
+        return
+    }
+
+    fmt.Println(
+        "%v: %v",
+        context,
+        concurrent.ErrorString(error),
     )
 
-    RequireThreadSuccess(
-        "join first worker",
+    panic(
+        "thread integration test failed",
+    )
+}
+
+/*
+Thread lifecycle.
+*/
+
+NoArgumentWorker :: task() {
+    thread.Yield()
+}
+
+SlowSquare :: task(
+    value int,
+) int {
+    thread.Sleep(30)
+
+    return value * value
+}
+
+DetachedArguments :: struct {
+    Completed *sync.Semaphore
+}
+
+DetachedWorker :: task(
+    arguments DetachedArguments,
+) {
+    thread.Sleep(5)
+
+    RequireSync(
+        "release detached completion",
+        sync.ReleaseOne(
+            arguments.Completed,
+        ),
+    )
+}
+
+TestThreadLifecycle :: task() {
+    basic :=
+        thread.StartTask<
+            NoArgumentWorker,
+        >()
+
+    Require(
+        thread.IsJoinable(
+            &basic,
+        ),
+        "new thread must be joinable",
+    )
+
+    RequireThread(
+        "join basic worker",
         thread.Join(
-            &first,
+            &basic,
         ),
     )
 
-    RequireThreadSuccess(
-        "join second worker",
-        thread.Join(
-            &second,
+    Require(
+        !thread.IsJoinable(
+            &basic,
         ),
+        "joined thread must not remain joinable",
     )
 
-    assert(
-        counter.Value == 200000,
+    repeatedJoin :=
+        thread.Join(
+            &basic,
+        )
+
+    Require(
+        repeatedJoin ==
+            .InvalidState,
+        "joining twice must fail",
     )
 
-    resultWorker, resultError :=
-        thread.TryStartWithResult<
+    resultWorker :=
+        thread.StartWithResult<
             int,
             int,
-            Square
+            SlowSquare
         >(12)
 
-    RequireThreadSuccess(
-        "start result worker",
-        resultError,
+    earlyResult: int
+
+    completed,
+        earlyError :=
+        thread.TryJoinResultFor<int>(
+            &resultWorker,
+            1,
+            &earlyResult,
+        )
+
+    RequireThread(
+        "timed result join",
+        earlyError,
+    )
+
+    Require(
+        !completed,
+        "short timed join must time out",
     )
 
     result :=
@@ -146,20 +176,905 @@ Main :: task() {
             &resultWorker,
         )
 
-    assert(result == 144)
+    Require(
+        result == 144,
+        "result worker returned an unexpected value",
+    )
+
+    semaphore :=
+        sync.NewSemaphore(0)
+
+    detached :=
+        thread.Start<
+            DetachedArguments,
+            DetachedWorker
+        >(
+            DetachedArguments{
+                Completed = &semaphore,
+            },
+        )
+
+    RequireThread(
+        "detach worker",
+        thread.Detach(
+            &detached,
+        ),
+    )
+
+    Require(
+        !thread.IsJoinable(
+            &detached,
+        ),
+        "detached thread must be consumed",
+    )
+
+    acquired, acquireError :=
+        sync.AcquireFor(
+            &semaphore,
+            1000,
+        )
+
+    RequireSync(
+        "wait for detached worker",
+        acquireError,
+    )
+
+    Require(
+        acquired,
+        "detached worker did not complete",
+    )
+
+    sync.DestroySemaphoreOrPanic(
+        &semaphore,
+    )
+}
+
+/*
+Mutex stress.
+*/
+
+SharedCounter :: struct {
+    Mutex sync.Mutex
+    Value int
+}
+
+IncrementArguments :: struct {
+    Counter *SharedCounter
+    Count int
+}
+
+Increment :: task(
+    arguments IncrementArguments,
+) {
+    index := 0
+
+    for index < arguments.Count {
+        sync.LockOrPanic(
+            &arguments.Counter.Mutex,
+        )
+
+        arguments.Counter.Value += 1
+
+        sync.UnlockOrPanic(
+            &arguments.Counter.Mutex,
+        )
+
+        index += 1
+    }
+}
+
+TestMutexStress :: task() {
+    counter := SharedCounter{
+        Mutex = sync.NewMutex(),
+        Value = 0,
+    }
+
+    arguments := IncrementArguments{
+        Counter = &counter,
+        Count = 25000,
+    }
+
+    first :=
+        thread.Start<
+            IncrementArguments,
+            Increment
+        >(arguments)
+
+    second :=
+        thread.Start<
+            IncrementArguments,
+            Increment
+        >(arguments)
+
+    third :=
+        thread.Start<
+            IncrementArguments,
+            Increment
+        >(arguments)
+
+    fourth :=
+        thread.Start<
+            IncrementArguments,
+            Increment
+        >(arguments)
+
+    thread.JoinOrPanic(&first)
+    thread.JoinOrPanic(&second)
+    thread.JoinOrPanic(&third)
+    thread.JoinOrPanic(&fourth)
+
+    Require(
+        counter.Value == 100000,
+        "mutex stress count is incorrect",
+    )
 
     sync.DestroyMutexOrPanic(
         &counter.Mutex,
     )
+}
 
-    fmt.Println(
-        "shared counter: %v",
-        counter.Value,
+/*
+Condition-variable stress.
+*/
+
+Gate :: struct {
+    Mutex sync.Mutex
+    Condition sync.Condition
+    Ready bool
+    Passed int
+}
+
+GateWaiter :: task(
+    gate *Gate,
+) {
+    sync.LockOrPanic(
+        &gate.Mutex,
     )
 
+    for !gate.Ready {
+        sync.WaitOrPanic(
+            &gate.Condition,
+            &gate.Mutex,
+        )
+    }
+
+    gate.Passed += 1
+
+    sync.UnlockOrPanic(
+        &gate.Mutex,
+    )
+}
+
+TestConditionStress :: task() {
+    gate := Gate{
+        Mutex = sync.NewMutex(),
+        Condition =
+            sync.NewCondition(),
+        Ready = false,
+        Passed = 0,
+    }
+
+    first :=
+        thread.Start<
+            *Gate,
+            GateWaiter
+        >(&gate)
+
+    second :=
+        thread.Start<
+            *Gate,
+            GateWaiter
+        >(&gate)
+
+    third :=
+        thread.Start<
+            *Gate,
+            GateWaiter
+        >(&gate)
+
+    fourth :=
+        thread.Start<
+            *Gate,
+            GateWaiter
+        >(&gate)
+
+    thread.Sleep(10)
+
+    sync.LockOrPanic(
+        &gate.Mutex,
+    )
+
+    gate.Ready = true
+
+    sync.BroadcastOrPanic(
+        &gate.Condition,
+    )
+
+    sync.UnlockOrPanic(
+        &gate.Mutex,
+    )
+
+    thread.JoinOrPanic(&first)
+    thread.JoinOrPanic(&second)
+    thread.JoinOrPanic(&third)
+    thread.JoinOrPanic(&fourth)
+
+    Require(
+        gate.Passed == 4,
+        "broadcast did not release every waiter",
+    )
+
+    sync.LockOrPanic(
+        &gate.Mutex,
+    )
+
+    timedOut, waitError :=
+        sync.WaitFor(
+            &gate.Condition,
+            &gate.Mutex,
+            5,
+        )
+
+    RequireSync(
+        "condition timed wait",
+        waitError,
+    )
+
+    Require(
+        !timedOut,
+        "condition timed wait must time out",
+    )
+
+    sync.UnlockOrPanic(
+        &gate.Mutex,
+    )
+
+    sync.DestroyConditionOrPanic(
+        &gate.Condition,
+    )
+
+    sync.DestroyMutexOrPanic(
+        &gate.Mutex,
+    )
+}
+
+/*
+Once stress.
+*/
+
+OnceState :: struct {
+    Once sync.Once
+    Count int
+}
+
+InitializeOnce :: task(
+    state *OnceState,
+) {
+    state.Count += 1
+}
+
+OnceCaller :: task(
+    state *OnceState,
+) {
+    error :=
+        sync.RunOnceWith<
+            OnceState,
+            InitializeOnce
+        >(
+            &state.Once,
+            state,
+        )
+
+    RequireSync(
+        "RunOnceWith",
+        error,
+    )
+}
+
+TestOnceStress :: task() {
+    state := OnceState{
+        Once = sync.NewOnce(),
+        Count = 0,
+    }
+
+    first :=
+        thread.Start<
+            *OnceState,
+            OnceCaller
+        >(&state)
+
+    second :=
+        thread.Start<
+            *OnceState,
+            OnceCaller
+        >(&state)
+
+    third :=
+        thread.Start<
+            *OnceState,
+            OnceCaller
+        >(&state)
+
+    fourth :=
+        thread.Start<
+            *OnceState,
+            OnceCaller
+        >(&state)
+
+    thread.JoinOrPanic(&first)
+    thread.JoinOrPanic(&second)
+    thread.JoinOrPanic(&third)
+    thread.JoinOrPanic(&fourth)
+
+    Require(
+        state.Count == 1,
+        "once initializer ran more than once",
+    )
+
+    sync.DestroyOnceOrPanic(
+        &state.Once,
+    )
+}
+
+/*
+Semaphore.
+*/
+
+TestSemaphore :: task() {
+    semaphore :=
+        sync.NewSemaphore(0)
+
+    acquired, acquireError :=
+        sync.TryAcquire(
+            &semaphore,
+        )
+
+    RequireSync(
+        "initial semaphore try-acquire",
+        acquireError,
+    )
+
+    Require(
+        !acquired,
+        "zero-count semaphore must be unavailable",
+    )
+
+    timedAcquire,
+        timedError :=
+        sync.AcquireFor(
+            &semaphore,
+            5,
+        )
+
+    RequireSync(
+        "semaphore timed wait",
+        timedError,
+    )
+
+    Require(
+        !timedAcquire,
+        "semaphore timed wait must time out",
+    )
+
+    RequireSync(
+        "release semaphore",
+        sync.Release(
+            &semaphore,
+            2,
+        ),
+    )
+
+    first, firstError :=
+        sync.TryAcquire(
+            &semaphore,
+        )
+
+    second, secondError :=
+        sync.TryAcquire(
+            &semaphore,
+        )
+
+    RequireSync(
+        "first semaphore acquire",
+        firstError,
+    )
+
+    RequireSync(
+        "second semaphore acquire",
+        secondError,
+    )
+
+    Require(
+        first && second,
+        "released semaphore permits were unavailable",
+    )
+
+    sync.DestroySemaphoreOrPanic(
+        &semaphore,
+    )
+}
+
+/*
+Read-write mutex.
+*/
+
+RWState :: struct {
+    Mutex sync.RWMutex
+    Value int
+}
+
+RWWriterArguments :: struct {
+    State *RWState
+    Count int
+}
+
+RWWriter :: task(
+    arguments RWWriterArguments,
+) {
+    index := 0
+
+    for index < arguments.Count {
+        RequireSync(
+            "write lock",
+            sync.WriteLock(
+                &arguments.State.Mutex,
+            ),
+        )
+
+        arguments.State.Value += 1
+
+        RequireSync(
+            "write unlock",
+            sync.WriteUnlock(
+                &arguments.State.Mutex,
+            ),
+        )
+
+        index += 1
+    }
+}
+
+RWReader :: task(
+    state *RWState,
+) {
+    index := 0
+
+    for index < 10000 {
+        RequireSync(
+            "read lock",
+            sync.ReadLock(
+                &state.Mutex,
+            ),
+        )
+
+        value := state.Value
+
+        Require(
+            value >= 0,
+            "reader observed invalid value",
+        )
+
+        RequireSync(
+            "read unlock",
+            sync.ReadUnlock(
+                &state.Mutex,
+            ),
+        )
+
+        index += 1
+    }
+}
+
+TestRWMutex :: task() {
+    state := RWState{
+        Mutex = sync.NewRWMutex(),
+        Value = 0,
+    }
+
+    writerArguments :=
+        RWWriterArguments{
+            State = &state,
+            Count = 25000,
+        }
+
+    firstWriter :=
+        thread.Start<
+            RWWriterArguments,
+            RWWriter
+        >(writerArguments)
+
+    secondWriter :=
+        thread.Start<
+            RWWriterArguments,
+            RWWriter
+        >(writerArguments)
+
+    reader :=
+        thread.Start<
+            *RWState,
+            RWReader
+        >(&state)
+
+    thread.JoinOrPanic(
+        &firstWriter,
+    )
+
+    thread.JoinOrPanic(
+        &secondWriter,
+    )
+
+    thread.JoinOrPanic(
+        &reader,
+    )
+
+    Require(
+        state.Value == 50000,
+        "read-write mutex count is incorrect",
+    )
+
+    sync.DestroyRWMutexOrPanic(
+        &state.Mutex,
+    )
+}
+
+/*
+Atomics.
+*/
+
+AtomicIncrementArguments :: struct {
+    Counter *atomic.AtomicInt
+    Count int
+}
+
+AtomicIncrement :: task(
+    arguments AtomicIncrementArguments,
+) {
+    index := 0
+
+    for index < arguments.Count {
+        atomic.IntFetchAdd(
+            arguments.Counter,
+            1,
+        )
+
+        index += 1
+    }
+}
+
+TestAtomic :: task() {
+    counter := atomic.NewInt(0)
+
+    arguments :=
+        AtomicIncrementArguments{
+            Counter = &counter,
+            Count = 25000,
+        }
+
+    first :=
+        thread.Start<
+            AtomicIncrementArguments,
+            AtomicIncrement
+        >(arguments)
+
+    second :=
+        thread.Start<
+            AtomicIncrementArguments,
+            AtomicIncrement
+        >(arguments)
+
+    third :=
+        thread.Start<
+            AtomicIncrementArguments,
+            AtomicIncrement
+        >(arguments)
+
+    fourth :=
+        thread.Start<
+            AtomicIncrementArguments,
+            AtomicIncrement
+        >(arguments)
+
+    thread.JoinOrPanic(&first)
+    thread.JoinOrPanic(&second)
+    thread.JoinOrPanic(&third)
+    thread.JoinOrPanic(&fourth)
+
+    Require(
+        atomic.IntLoad(
+            &counter,
+        ) == 100000,
+        "atomic count is incorrect",
+    )
+
+    Require(
+        atomic.ErrorIsNone(
+            atomic.DestroyInt(
+                &counter,
+            ),
+        ),
+        "atomic destruction failed",
+    )
+}
+
+/*
+Blocking queue.
+*/
+
+QueueProducerArguments :: struct {
+    Queue *concurrent.BlockingQueue<int>
+    Start int
+    Count int
+}
+
+QueueProducer :: task(
+    arguments QueueProducerArguments,
+) {
+    index := 0
+
+    for index < arguments.Count {
+        RequireConcurrent(
+            "queue push",
+            concurrent.Push<int>(
+                arguments.Queue,
+                arguments.Start +
+                    index,
+            ),
+        )
+
+        index += 1
+    }
+}
+
+QueueConsumerArguments :: struct {
+    Queue *concurrent.BlockingQueue<int>
+    Sum *atomic.AtomicInt
+}
+
+QueueConsumer :: task(
+    arguments QueueConsumerArguments,
+) {
+    value: int
+
+    for true {
+        error :=
+            concurrent.Pop<int>(
+                arguments.Queue,
+                &value,
+            )
+
+        if error == .Closed {
+            return
+        }
+
+        RequireConcurrent(
+            "queue pop",
+            error,
+        )
+
+        atomic.IntFetchAdd(
+            arguments.Sum,
+            value,
+        )
+    }
+}
+
+TestBlockingQueue :: task() {
+    queue :=
+        concurrent.NewBlockingQueue<
+            int
+        >(8)
+
+    sum := atomic.NewInt(0)
+
+    consumer :=
+        thread.Start<
+            QueueConsumerArguments,
+            QueueConsumer
+        >(
+            QueueConsumerArguments{
+                Queue = &queue,
+                Sum = &sum,
+            },
+        )
+
+    firstProducer :=
+        thread.Start<
+            QueueProducerArguments,
+            QueueProducer
+        >(
+            QueueProducerArguments{
+                Queue = &queue,
+                Start = 1,
+                Count = 50,
+            },
+        )
+
+    secondProducer :=
+        thread.Start<
+            QueueProducerArguments,
+            QueueProducer
+        >(
+            QueueProducerArguments{
+                Queue = &queue,
+                Start = 51,
+                Count = 50,
+            },
+        )
+
+    thread.JoinOrPanic(
+        &firstProducer,
+    )
+
+    thread.JoinOrPanic(
+        &secondProducer,
+    )
+
+    RequireConcurrent(
+        "close queue",
+        concurrent.CloseQueue<int>(
+            &queue,
+        ),
+    )
+
+    thread.JoinOrPanic(
+        &consumer,
+    )
+
+    Require(
+        atomic.IntLoad(
+            &sum,
+        ) == 5050,
+        "blocking queue sum is incorrect",
+    )
+
+    RequireConcurrent(
+        "destroy queue",
+        concurrent.DestroyQueue<int>(
+            &queue,
+        ),
+    )
+
+    Require(
+        atomic.ErrorIsNone(
+            atomic.DestroyInt(
+                &sum,
+            ),
+        ),
+        "queue atomic destruction failed",
+    )
+}
+
+/*
+Worker pool.
+*/
+
+PoolJob :: struct {
+    Counter *atomic.AtomicInt
+    Amount int
+}
+
+ProcessPoolJob :: task(
+    job PoolJob,
+) {
+    atomic.IntFetchAdd(
+        job.Counter,
+        job.Amount,
+    )
+}
+
+TestWorkerPool :: task() {
+    counter := atomic.NewInt(0)
+
+    pool:
+        concurrent.WorkerPool<
+            PoolJob
+        >
+
+    RequireConcurrent(
+        "initialize worker pool",
+        concurrent.InitWorkerPool<
+            PoolJob,
+            ProcessPoolJob
+        >(
+            &pool,
+            4,
+            32,
+        ),
+    )
+
+    index := 0
+
+    for index < 1000 {
+        RequireConcurrent(
+            "submit worker-pool job",
+            concurrent.Submit<
+                PoolJob
+            >(
+                &pool,
+                PoolJob{
+                    Counter = &counter,
+                    Amount = 1,
+                },
+            ),
+        )
+
+        index += 1
+    }
+
+    RequireConcurrent(
+        "join worker pool",
+        concurrent.JoinWorkerPool<
+            PoolJob
+        >(
+            &pool,
+        ),
+    )
+
+    Require(
+        atomic.IntLoad(
+            &counter,
+        ) == 1000,
+        "worker pool did not process every job",
+    )
+
+    Require(
+        atomic.ErrorIsNone(
+            atomic.DestroyInt(
+                &counter,
+            ),
+        ),
+        "worker-pool atomic destruction failed",
+    )
+}
+
+Main :: task() {
     fmt.Println(
-        "worker result: %v",
-        result,
+        "starting multithreading tests",
+    )
+
+    TestThreadLifecycle()
+    fmt.Println(
+        "thread lifecycle: ok",
+    )
+
+    TestMutexStress()
+    fmt.Println(
+        "mutex stress: ok",
+    )
+
+    TestConditionStress()
+    fmt.Println(
+        "condition stress: ok",
+    )
+
+    TestOnceStress()
+    fmt.Println(
+        "once stress: ok",
+    )
+
+    TestSemaphore()
+    fmt.Println(
+        "semaphore: ok",
+    )
+
+    TestRWMutex()
+    fmt.Println(
+        "read-write mutex: ok",
+    )
+
+    TestAtomic()
+    fmt.Println(
+        "atomic stress: ok",
+    )
+
+    TestBlockingQueue()
+    fmt.Println(
+        "blocking queue: ok",
+    )
+
+    TestWorkerPool()
+    fmt.Println(
+        "worker pool: ok",
     )
 
     fmt.Println(
@@ -168,6 +1083,11 @@ Main :: task() {
     )
 
     fmt.Println(
-        "thread integration tests passed",
+        "current thread ID: %v",
+        thread.CurrentThreadID(),
+    )
+
+    fmt.Println(
+        "all multithreading tests passed",
     )
 }

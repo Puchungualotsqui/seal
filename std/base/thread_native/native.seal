@@ -1,27 +1,20 @@
 /*
-ThreadResult is the physical result type used by Seal-generated thread
-entry tasks.
-
-The native bridge invokes these tasks from a platform-specific trampoline.
+ThreadResult is the physical result type used by native thread entry
+tasks.
 */
 ThreadResult :: @foreign_type(
     uintptr_t
 )
 
-/*
-thread_success is returned when a worker task finishes normally.
-*/
 thread_success :: @foreign_value(
     ThreadResult,
     0
 )
 
 /*
-ThreadEntryABI describes the C signature used between generated Seal
-entry tasks and the native thread trampoline.
+ThreadEntryABI describes the native callback signature.
 
-The platform-native calling convention is handled by native.c. Seal
-entry tasks therefore use an ordinary C calling convention.
+Task addresses are consumed only by the native thread bridge.
 */
 ThreadEntryABI :: @foreign_task(
     declaration uintptr_t {name}(void *{arg0_name}),
@@ -29,144 +22,117 @@ ThreadEntryABI :: @foreign_task(
 )
 
 /*
-Start creates a native thread.
-
-entry must be an address produced by @task_pointer for a task using
-ThreadEntryABI.
-
-A nil result indicates failure.
+Thread operations.
 */
+
 Start :: extern("seal_thread_start") task(
     entry rawptr,
     context rawptr,
 ) rawptr
 
-/*
-Join waits for a native thread and releases its native handle.
-
-The handle is consumed only when the operation succeeds.
-*/
 Join :: extern("seal_thread_join") task(
     handle rawptr,
 ) bool
 
 /*
-Detach releases ownership of a native thread without waiting for it.
+JoinFor returns:
 
-The handle is consumed only when the operation succeeds.
+    1  joined
+    0  timeout
+   -1  native failure
 */
+JoinFor :: extern("seal_thread_join_for") task(
+    handle rawptr,
+    milliseconds uint,
+) int
+
 Detach :: extern("seal_thread_detach") task(
     handle rawptr,
 ) bool
 
-/*
-AllocateContext reserves zero-initialized memory used by thread contexts.
-
-A nil result indicates allocation failure.
-*/
-AllocateContext :: extern("seal_thread_allocate_context") task(
-    size uint,
+AllocateContext :: extern(
+    "seal_thread_allocate_context"
+) task(
+    byteSize uint,
 ) rawptr
 
-/*
-FreeContext releases memory previously returned by AllocateContext.
-
-Passing nil is valid.
-*/
-FreeContext :: extern("seal_thread_free_context") task(
+FreeContext :: extern(
+    "seal_thread_free_context"
+) task(
     context rawptr,
 )
 
-/*
-Yield allows another runnable thread to execute.
-*/
-Yield :: extern("seal_thread_yield") task()
+Yield :: extern(
+    "seal_thread_yield"
+) task()
 
-/*
-Sleep suspends the current thread for approximately milliseconds.
-*/
-Sleep :: extern("seal_thread_sleep") task(
+Sleep :: extern(
+    "seal_thread_sleep"
+) task(
     milliseconds uint,
 )
 
-/*
-HardwareThreadCount returns the number of logical processors visible to
-the process.
-
-The native bridge returns at least one.
-*/
 HardwareThreadCount :: extern(
     "seal_thread_hardware_thread_count"
 ) task() uint
 
-/*
-CreateMutex creates a native non-recursive mutex.
-
-A nil result indicates failure.
-*/
-CreateMutex :: extern("seal_mutex_create") task() rawptr
+CurrentThreadID :: extern(
+    "seal_thread_current_id"
+) task() uint
 
 /*
-DestroyMutex releases a mutex.
-
-The mutex must not be locked or used by another thread.
+Mutex operations.
 */
-DestroyMutex :: extern("seal_mutex_destroy") task(
+
+CreateMutex :: extern(
+    "seal_mutex_create"
+) task() rawptr
+
+DestroyMutex :: extern(
+    "seal_mutex_destroy"
+) task(
+    handle rawptr,
+) bool
+
+LockMutex :: extern(
+    "seal_mutex_lock"
+) task(
     handle rawptr,
 ) bool
 
 /*
-LockMutex blocks until the mutex is acquired.
-*/
-LockMutex :: extern("seal_mutex_lock") task(
-    handle rawptr,
-) bool
-
-/*
-TryLockMutex attempts to acquire the mutex without blocking.
-
-The result is:
+TryLockMutex returns:
 
     1  acquired
-    0  currently unavailable
-   -1  invalid handle or native failure
+    0  unavailable
+   -1  native failure
 */
-TryLockMutex :: extern("seal_mutex_try_lock") task(
+TryLockMutex :: extern(
+    "seal_mutex_try_lock"
+) task(
     handle rawptr,
 ) int
 
-/*
-UnlockMutex releases a mutex owned by the current thread.
-*/
-UnlockMutex :: extern("seal_mutex_unlock") task(
+UnlockMutex :: extern(
+    "seal_mutex_unlock"
+) task(
     handle rawptr,
 ) bool
 
 /*
-CreateCondition creates a native condition variable.
-
-A nil result indicates failure.
+Condition-variable operations.
 */
+
 CreateCondition :: extern(
     "seal_condition_create"
 ) task() rawptr
 
-/*
-DestroyCondition releases a condition variable.
-
-No thread may still be waiting on it.
-*/
 DestroyCondition :: extern(
     "seal_condition_destroy"
 ) task(
     handle rawptr,
 ) bool
 
-/*
-WaitCondition atomically releases mutex and waits for condition.
-
-The mutex is reacquired before the task returns.
-*/
 WaitCondition :: extern(
     "seal_condition_wait"
 ) task(
@@ -175,17 +141,26 @@ WaitCondition :: extern(
 ) bool
 
 /*
-SignalCondition wakes one waiting thread.
+WaitConditionFor returns:
+
+    1  signaled
+    0  timeout
+   -1  native failure
 */
+WaitConditionFor :: extern(
+    "seal_condition_wait_for"
+) task(
+    condition rawptr,
+    mutex rawptr,
+    milliseconds uint,
+) int
+
 SignalCondition :: extern(
     "seal_condition_signal"
 ) task(
     condition rawptr,
 ) bool
 
-/*
-BroadcastCondition wakes every waiting thread.
-*/
 BroadcastCondition :: extern(
     "seal_condition_broadcast"
 ) task(
@@ -193,36 +168,236 @@ BroadcastCondition :: extern(
 ) bool
 
 /*
-CreateOnce creates native state for a one-time initialization operation.
+Once operations.
 */
-CreateOnce :: extern("seal_once_create") task() rawptr
 
-/*
-DestroyOnce releases one-time initialization state.
-*/
-DestroyOnce :: extern("seal_once_destroy") task(
+CreateOnce :: extern(
+    "seal_once_create"
+) task() rawptr
+
+DestroyOnce :: extern(
+    "seal_once_destroy"
+) task(
     handle rawptr,
 ) bool
 
 /*
-BeginOnce determines whether the caller must run the initializer.
+BeginOnce returns:
 
-The result is:
-
-    1  this caller must run the initializer
-    0  initialization has already completed
-   -1  invalid handle or native failure
-
-If another thread is currently initializing, BeginOnce waits for it.
+    1  this caller must initialize
+    0  initialization is complete
+   -1  native failure
 */
-BeginOnce :: extern("seal_once_begin") task(
+BeginOnce :: extern(
+    "seal_once_begin"
+) task(
+    handle rawptr,
+) int
+
+CompleteOnce :: extern(
+    "seal_once_complete"
+) task(
+    handle rawptr,
+) bool
+
+/*
+Semaphore operations.
+*/
+
+CreateSemaphore :: extern(
+    "seal_semaphore_create"
+) task(
+    initialCount uint,
+) rawptr
+
+DestroySemaphore :: extern(
+    "seal_semaphore_destroy"
+) task(
+    handle rawptr,
+) bool
+
+AcquireSemaphore :: extern(
+    "seal_semaphore_acquire"
+) task(
+    handle rawptr,
+) bool
+
+/*
+TryAcquireSemaphore returns:
+
+    1  acquired
+    0  unavailable
+   -1  native failure
+*/
+TryAcquireSemaphore :: extern(
+    "seal_semaphore_try_acquire"
+) task(
     handle rawptr,
 ) int
 
 /*
-CompleteOnce marks one-time initialization as complete and wakes waiting
-threads.
+AcquireSemaphoreFor returns:
+
+    1  acquired
+    0  timeout
+   -1  native failure
 */
-CompleteOnce :: extern("seal_once_complete") task(
+AcquireSemaphoreFor :: extern(
+    "seal_semaphore_acquire_for"
+) task(
+    handle rawptr,
+    milliseconds uint,
+) int
+
+ReleaseSemaphore :: extern(
+    "seal_semaphore_release"
+) task(
+    handle rawptr,
+    count uint,
+) bool
+
+/*
+Read-write mutex operations.
+*/
+
+CreateRWMutex :: extern(
+    "seal_rw_mutex_create"
+) task() rawptr
+
+DestroyRWMutex :: extern(
+    "seal_rw_mutex_destroy"
+) task(
     handle rawptr,
 ) bool
+
+ReadLockRWMutex :: extern(
+    "seal_rw_mutex_read_lock"
+) task(
+    handle rawptr,
+) bool
+
+TryReadLockRWMutex :: extern(
+    "seal_rw_mutex_try_read_lock"
+) task(
+    handle rawptr,
+) int
+
+ReadLockRWMutexFor :: extern(
+    "seal_rw_mutex_read_lock_for"
+) task(
+    handle rawptr,
+    milliseconds uint,
+) int
+
+ReadUnlockRWMutex :: extern(
+    "seal_rw_mutex_read_unlock"
+) task(
+    handle rawptr,
+) bool
+
+WriteLockRWMutex :: extern(
+    "seal_rw_mutex_write_lock"
+) task(
+    handle rawptr,
+) bool
+
+TryWriteLockRWMutex :: extern(
+    "seal_rw_mutex_try_write_lock"
+) task(
+    handle rawptr,
+) int
+
+WriteLockRWMutexFor :: extern(
+    "seal_rw_mutex_write_lock_for"
+) task(
+    handle rawptr,
+    milliseconds uint,
+) int
+
+WriteUnlockRWMutex :: extern(
+    "seal_rw_mutex_write_unlock"
+) task(
+    handle rawptr,
+) bool
+
+/*
+Atomic operations.
+
+The native representation stores uintptr_t bits. Signed integer and
+boolean wrappers are implemented in the atomic Seal package.
+*/
+
+CreateAtomic :: extern(
+    "seal_atomic_create"
+) task(
+    initialValue uint,
+) rawptr
+
+DestroyAtomic :: extern(
+    "seal_atomic_destroy"
+) task(
+    handle rawptr,
+) bool
+
+LoadAtomic :: extern(
+    "seal_atomic_load"
+) task(
+    handle rawptr,
+) uint
+
+StoreAtomic :: extern(
+    "seal_atomic_store"
+) task(
+    handle rawptr,
+    value uint,
+) bool
+
+ExchangeAtomic :: extern(
+    "seal_atomic_exchange"
+) task(
+    handle rawptr,
+    value uint,
+) uint
+
+CompareExchangeAtomic :: extern(
+    "seal_atomic_compare_exchange"
+) task(
+    handle rawptr,
+    expected uint,
+    desired uint,
+) bool
+
+FetchAddAtomic :: extern(
+    "seal_atomic_fetch_add"
+) task(
+    handle rawptr,
+    amount uint,
+) uint
+
+FetchSubAtomic :: extern(
+    "seal_atomic_fetch_sub"
+) task(
+    handle rawptr,
+    amount uint,
+) uint
+
+FetchAndAtomic :: extern(
+    "seal_atomic_fetch_and"
+) task(
+    handle rawptr,
+    value uint,
+) uint
+
+FetchOrAtomic :: extern(
+    "seal_atomic_fetch_or"
+) task(
+    handle rawptr,
+    value uint,
+) uint
+
+FetchXorAtomic :: extern(
+    "seal_atomic_fetch_xor"
+) task(
+    handle rawptr,
+    value uint,
+) uint
