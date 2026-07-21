@@ -6713,14 +6713,60 @@ func (c *Checker) taskTypeFromImportedGenericSignature(scope *Scope, packageName
 	}
 }
 
-func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageName string, typ *Type, typeSubst map[string]*Type, argSubst map[string]ast.GenericArg) *Type {
+func (c *Checker) substituteImportedGenericSignatureType(
+	scope *Scope,
+	packageName string,
+	typ *Type,
+	typeSubst map[string]*Type,
+	argSubst map[string]ast.GenericArg,
+) *Type {
+	return c.substituteImportedGenericSignatureTypeSeen(
+		scope,
+		packageName,
+		typ,
+		typeSubst,
+		argSubst,
+		map[*Type]*Type{},
+	)
+}
+
+func (c *Checker) substituteImportedGenericSignatureTypeSeen(
+	scope *Scope,
+	packageName string,
+	typ *Type,
+	typeSubst map[string]*Type,
+	argSubst map[string]ast.GenericArg,
+	seen map[*Type]*Type,
+) *Type {
 	if typ == nil {
 		return InvalidType
+	}
+
+	/*
+		Do this before consulting or populating seen.
+
+		A replacement belongs to the importing package and must be returned
+		directly. It must not be qualified with packageName or cloned as though
+		it belonged to the imported package.
+	*/
+	if typ.Kind == TypeTypeParam {
+		if replacement := typeSubst[typ.Name]; replacement != nil {
+			return replacement
+		}
+
+		return typ
+	}
+
+	if cached := seen[typ]; cached != nil {
+		return cached
 	}
 
 	switch typ.Kind {
 	case TypeForeign:
 		out := *typ
+		result := &out
+
+		seen[typ] = result
 
 		if out.Name != "" &&
 			packageName != "" &&
@@ -6729,82 +6775,146 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 				packageName + "." + out.Name
 		}
 
-		return &out
-
-	case TypeTypeParam:
-		// Important: substituted caller-provided type arguments must NOT be
-		// qualified with the imported package name.
-		if replacement := typeSubst[typ.Name]; replacement != nil {
-			return replacement
-		}
-
-		return typ
+		return result
 
 	case TypeInlineArray:
-		return c.substituteInlineArrayType(
+		/*
+			Register a placeholder before substituting the element.
+
+			Ordinary valid inline arrays should not directly contain themselves
+			by value, but registering first keeps this traversal graph-safe and
+			consistent with the other aggregate cases.
+		*/
+		result := &Type{
+			Kind: TypeInlineArray,
+		}
+
+		seen[typ] = result
+
+		substituted := c.substituteInlineArrayType(
 			scope,
 			typ,
 			argSubst,
 			func(elem *Type) *Type {
-				return c.substituteImportedGenericSignatureType(
+				return c.substituteImportedGenericSignatureTypeSeen(
 					scope,
 					packageName,
 					elem,
 					typeSubst,
 					argSubst,
+					seen,
 				)
 			},
 		)
 
+		*result = *substituted
+		return result
+
 	case TypePointer:
-		return &Type{
+		result := &Type{
 			Kind: TypePointer,
-			Elem: c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
 		}
+
+		seen[typ] = result
+
+		result.Elem =
+			c.substituteImportedGenericSignatureTypeSeen(
+				scope,
+				packageName,
+				typ.Elem,
+				typeSubst,
+				argSubst,
+				seen,
+			)
+
+		return result
 
 	case TypeInterfaceSelf:
 		return typ
 
 	case TypeVariadic:
-		return &Type{
+		result := &Type{
 			Kind: TypeVariadic,
 			Name: typ.Name,
-			Elem: c.substituteImportedGenericSignatureType(scope, packageName, typ.Elem, typeSubst, argSubst),
 		}
+
+		seen[typ] = result
+
+		result.Elem =
+			c.substituteImportedGenericSignatureTypeSeen(
+				scope,
+				packageName,
+				typ.Elem,
+				typeSubst,
+				argSubst,
+				seen,
+			)
+
+		return result
 
 	case TypeStruct:
 		out := *typ
+
 		out.ForeignABI =
 			qualifyForeignTaskABIInfo(
 				packageName,
 				typ.ForeignABI,
 			)
+
+		/*
+			Clear recursive collections before exposing the placeholder through
+			seen. Otherwise a recursive lookup could observe the original,
+			unsubstituted slices copied by the shallow assignment above.
+		*/
 		out.Fields = nil
 		out.GenericParams = nil
 		out.GenericArguments = nil
 
+		result := &out
+
+		/*
+			This is the important assignment.
+
+			For:
+
+			    _QueueNode<T>
+			        Next -> *_QueueNode<T>
+
+			the recursive occurrence now returns result instead of expanding the
+			struct again.
+		*/
+		seen[typ] = result
+
 		if typ.Name != "" {
-			out.Name = c.substitutedGenericDisplayName(
-				typ.Name,
-				typeSubst,
-			)
+			result.Name =
+				c.substitutedGenericDisplayName(
+					typ.Name,
+					typeSubst,
+				)
 
 			if packageName != "" &&
-				!strings.Contains(out.Name, ".") {
-				out.Name = packageName + "." + out.Name
+				!strings.Contains(result.Name, ".") {
+				result.Name =
+					packageName + "." + result.Name
 			}
 		}
 
 		if typ.GenericBaseName != "" {
-			out.GenericBaseName = c.substitutedGenericDisplayName(
-				typ.GenericBaseName,
-				typeSubst,
-			)
+			result.GenericBaseName =
+				c.substitutedGenericDisplayName(
+					typ.GenericBaseName,
+					typeSubst,
+				)
 
 			if packageName != "" &&
-				!strings.Contains(out.GenericBaseName, ".") {
-				out.GenericBaseName =
-					packageName + "." + out.GenericBaseName
+				!strings.Contains(
+					result.GenericBaseName,
+					".",
+				) {
+				result.GenericBaseName =
+					packageName +
+						"." +
+						result.GenericBaseName
 			}
 		}
 
@@ -6813,106 +6923,188 @@ func (c *Checker) substituteImportedGenericSignatureType(scope *Scope, packageNa
 
 			if cloned.Type != nil {
 				cloned.Type =
-					c.substituteImportedGenericSignatureType(
+					c.substituteImportedGenericSignatureTypeSeen(
 						scope,
 						packageName,
 						cloned.Type,
 						typeSubst,
 						argSubst,
+						seen,
 					)
 			}
 
 			if cloned.Expr != nil {
-				cloned.Expr = c.substituteGenericExpr(
-					cloned.Expr,
-					argSubst,
-				)
-				cloned.Key = exprDisplay(cloned.Expr)
+				cloned.Expr =
+					c.substituteGenericExpr(
+						cloned.Expr,
+						argSubst,
+					)
+
+				cloned.Key =
+					exprDisplay(
+						cloned.Expr,
+					)
 			} else if cloned.Type != nil {
-				cloned.Key = cloned.Type.String()
+				cloned.Key =
+					cloned.Type.String()
 			}
 
-			out.GenericArguments = append(
-				out.GenericArguments,
+			result.GenericArguments = append(
+				result.GenericArguments,
 				cloned,
 			)
 		}
 
 		for _, field := range typ.Fields {
-			out.Fields = append(out.Fields, FieldInfo{
-				Name: field.Name,
-				Type: c.substituteImportedGenericSignatureType(
-					scope,
-					packageName,
-					field.Type,
-					typeSubst,
-					argSubst,
-				),
-				TypeAst: field.TypeAst,
-				Span:    field.Span,
-			})
+			result.Fields = append(
+				result.Fields,
+				FieldInfo{
+					Name: field.Name,
+					Type: c.substituteImportedGenericSignatureTypeSeen(
+						scope,
+						packageName,
+						field.Type,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+					TypeAst: field.TypeAst,
+					Span:    field.Span,
+				},
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeUnion:
 		out := *typ
 		out.Members = nil
 
-		if out.Name != "" && packageName != "" && !strings.Contains(out.Name, ".") {
-			out.Name = packageName + "." + out.Name
+		result := &out
+		seen[typ] = result
+
+		if result.Name != "" &&
+			packageName != "" &&
+			!strings.Contains(result.Name, ".") {
+			result.Name =
+				packageName + "." + result.Name
 		}
 
 		for _, member := range typ.Members {
-			out.Members = append(out.Members, c.substituteImportedGenericSignatureType(scope, packageName, member, typeSubst, argSubst))
+			result.Members = append(
+				result.Members,
+				c.substituteImportedGenericSignatureTypeSeen(
+					scope,
+					packageName,
+					member,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeInterface:
 		out := *typ
 		out.InterfaceRequirements = nil
 
-		if out.Name != "" && packageName != "" && !strings.Contains(out.Name, ".") {
-			out.Name = packageName + "." + out.Name
+		result := &out
+		seen[typ] = result
+
+		if result.Name != "" &&
+			packageName != "" &&
+			!strings.Contains(result.Name, ".") {
+			result.Name =
+				packageName + "." + result.Name
 		}
 
 		for _, req := range typ.InterfaceRequirements {
 			cloned := InterfaceRequirementInfo{
-				Name:            req.Name,
-				ParamIsVariadic: append([]bool(nil), req.ParamIsVariadic...),
-				IsPure:          req.IsPure,
-				IsTrustedPure:   req.IsTrustedPure,
-				Span:            req.Span,
+				Name: req.Name,
+				ParamIsVariadic: append(
+					[]bool(nil),
+					req.ParamIsVariadic...,
+				),
+				IsPure:        req.IsPure,
+				IsTrustedPure: req.IsTrustedPure,
+				Span:          req.Span,
 			}
 
 			for _, param := range req.Params {
-				cloned.Params = append(cloned.Params, c.substituteImportedGenericSignatureType(scope, packageName, param, typeSubst, argSubst))
+				cloned.Params = append(
+					cloned.Params,
+					c.substituteImportedGenericSignatureTypeSeen(
+						scope,
+						packageName,
+						param,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+				)
 			}
 
-			for _, result := range req.Results {
-				cloned.Results = append(cloned.Results, c.substituteImportedGenericSignatureType(scope, packageName, result, typeSubst, argSubst))
+			for _, resultType := range req.Results {
+				cloned.Results = append(
+					cloned.Results,
+					c.substituteImportedGenericSignatureTypeSeen(
+						scope,
+						packageName,
+						resultType,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+				)
 			}
 
-			out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+			result.InterfaceRequirements = append(
+				result.InterfaceRequirements,
+				cloned,
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeTask:
 		out := *typ
 		out.Params = nil
 		out.Results = nil
 
+		result := &out
+		seen[typ] = result
+
 		for _, param := range typ.Params {
-			out.Params = append(out.Params, c.substituteImportedGenericSignatureType(scope, packageName, param, typeSubst, argSubst))
+			result.Params = append(
+				result.Params,
+				c.substituteImportedGenericSignatureTypeSeen(
+					scope,
+					packageName,
+					param,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		for _, result := range typ.Results {
-			out.Results = append(out.Results, c.substituteImportedGenericSignatureType(scope, packageName, result, typeSubst, argSubst))
+		for _, resultType := range typ.Results {
+			result.Results = append(
+				result.Results,
+				c.substituteImportedGenericSignatureTypeSeen(
+					scope,
+					packageName,
+					resultType,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		return &out
+		return result
 
 	default:
 		return typ
@@ -6975,168 +7167,328 @@ func (c *Checker) taskTypeFromGenericSignature(scope *Scope, generic *Type, args
 	}
 }
 
-func (c *Checker) substituteGenericSignatureType(scope *Scope, typ *Type, typeSubst map[string]*Type, argSubst map[string]ast.GenericArg) *Type {
+func (c *Checker) substituteGenericSignatureType(
+	scope *Scope,
+	typ *Type,
+	typeSubst map[string]*Type,
+	argSubst map[string]ast.GenericArg,
+) *Type {
+	return c.substituteGenericSignatureTypeSeen(
+		scope,
+		typ,
+		typeSubst,
+		argSubst,
+		map[*Type]*Type{},
+	)
+}
+
+func (c *Checker) substituteGenericSignatureTypeSeen(
+	scope *Scope,
+	typ *Type,
+	typeSubst map[string]*Type,
+	argSubst map[string]ast.GenericArg,
+	seen map[*Type]*Type,
+) *Type {
 	if typ == nil {
 		return InvalidType
 	}
 
-	switch typ.Kind {
-	case TypeTypeParam:
+	/*
+		Generic type parameters must be substituted before consulting seen.
+
+		The replacement is already a resolved type from the caller's scope and
+		must be returned directly rather than cloned as part of this graph.
+	*/
+	if typ.Kind == TypeTypeParam {
 		if replacement := typeSubst[typ.Name]; replacement != nil {
 			return replacement
 		}
 
 		return typ
+	}
 
+	if cached := seen[typ]; cached != nil {
+		return cached
+	}
+
+	switch typ.Kind {
 	case TypePointer:
-		return &Type{
+		result := &Type{
 			Kind: TypePointer,
-			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
 		}
 
+		seen[typ] = result
+
+		result.Elem =
+			c.substituteGenericSignatureTypeSeen(
+				scope,
+				typ.Elem,
+				typeSubst,
+				argSubst,
+				seen,
+			)
+
+		return result
+
 	case TypeInlineArray:
-		return c.substituteInlineArrayType(
+		/*
+			Register the result before substituting the element so recursive
+			type graphs cannot repeatedly expand through inline storage.
+		*/
+		result := &Type{
+			Kind: TypeInlineArray,
+		}
+
+		seen[typ] = result
+
+		substituted := c.substituteInlineArrayType(
 			scope,
 			typ,
 			argSubst,
 			func(elem *Type) *Type {
-				return c.substituteGenericSignatureType(
+				return c.substituteGenericSignatureTypeSeen(
 					scope,
 					elem,
 					typeSubst,
 					argSubst,
+					seen,
 				)
 			},
 		)
+
+		if substituted == nil {
+			*result = *InvalidType
+		} else {
+			*result = *substituted
+		}
+
+		return result
 
 	case TypeInterfaceSelf:
 		return typ
 
 	case TypeVariadic:
-		return &Type{
+		result := &Type{
 			Kind: TypeVariadic,
 			Name: typ.Name,
-			Elem: c.substituteGenericSignatureType(scope, typ.Elem, typeSubst, argSubst),
 		}
+
+		seen[typ] = result
+
+		result.Elem =
+			c.substituteGenericSignatureTypeSeen(
+				scope,
+				typ.Elem,
+				typeSubst,
+				argSubst,
+				seen,
+			)
+
+		return result
 
 	case TypeStruct:
 		out := *typ
+
+		/*
+			Clear every recursively substituted collection before exposing the
+			clone through seen. A recursive lookup must never observe slices
+			from the original unsubstituted type.
+		*/
 		out.Fields = nil
 		out.GenericParams = nil
 		out.GenericArguments = nil
 
+		result := &out
+		seen[typ] = result
+
 		if typ.Name != "" {
-			out.Name = c.substitutedGenericDisplayName(
-				typ.Name,
-				typeSubst,
-			)
+			result.Name =
+				c.substitutedGenericDisplayName(
+					typ.Name,
+					typeSubst,
+				)
 		}
 
 		if typ.GenericBaseName != "" {
-			out.GenericBaseName = c.substitutedGenericDisplayName(
-				typ.GenericBaseName,
-				typeSubst,
-			)
+			result.GenericBaseName =
+				c.substitutedGenericDisplayName(
+					typ.GenericBaseName,
+					typeSubst,
+				)
 		}
 
 		for _, arg := range typ.GenericArguments {
 			cloned := arg
 
 			if cloned.Type != nil {
-				cloned.Type = c.substituteGenericSignatureType(
-					scope,
-					cloned.Type,
-					typeSubst,
-					argSubst,
-				)
+				cloned.Type =
+					c.substituteGenericSignatureTypeSeen(
+						scope,
+						cloned.Type,
+						typeSubst,
+						argSubst,
+						seen,
+					)
 			}
 
 			if cloned.Expr != nil {
-				cloned.Expr = c.substituteGenericExpr(
-					cloned.Expr,
-					argSubst,
-				)
-				cloned.Key = exprDisplay(cloned.Expr)
+				cloned.Expr =
+					c.substituteGenericExpr(
+						cloned.Expr,
+						argSubst,
+					)
+
+				cloned.Key =
+					exprDisplay(
+						cloned.Expr,
+					)
 			} else if cloned.Type != nil {
-				cloned.Key = cloned.Type.String()
+				cloned.Key =
+					cloned.Type.String()
 			}
 
-			out.GenericArguments = append(
-				out.GenericArguments,
+			result.GenericArguments = append(
+				result.GenericArguments,
 				cloned,
 			)
 		}
 
 		for _, field := range typ.Fields {
-			out.Fields = append(out.Fields, FieldInfo{
-				Name: field.Name,
-				Type: c.substituteGenericSignatureType(
-					scope,
-					field.Type,
-					typeSubst,
-					argSubst,
-				),
-				TypeAst: field.TypeAst,
-				Span:    field.Span,
-			})
+			result.Fields = append(
+				result.Fields,
+				FieldInfo{
+					Name: field.Name,
+					Type: c.substituteGenericSignatureTypeSeen(
+						scope,
+						field.Type,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+					TypeAst: field.TypeAst,
+					Span:    field.Span,
+				},
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeUnion:
 		out := *typ
 		out.Members = nil
 
+		result := &out
+		seen[typ] = result
+
 		for _, member := range typ.Members {
-			out.Members = append(out.Members, c.substituteGenericSignatureType(scope, member, typeSubst, argSubst))
+			result.Members = append(
+				result.Members,
+				c.substituteGenericSignatureTypeSeen(
+					scope,
+					member,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeInterface:
 		out := *typ
 		out.InterfaceRequirements = nil
 
+		result := &out
+		seen[typ] = result
+
 		for _, req := range typ.InterfaceRequirements {
 			cloned := InterfaceRequirementInfo{
-				Name:            req.Name,
-				ParamIsVariadic: append([]bool(nil), req.ParamIsVariadic...),
-				IsPure:          req.IsPure,
-				IsTrustedPure:   req.IsTrustedPure,
-				Span:            req.Span,
+				Name: req.Name,
+				ParamIsVariadic: append(
+					[]bool(nil),
+					req.ParamIsVariadic...,
+				),
+				IsPure:        req.IsPure,
+				IsTrustedPure: req.IsTrustedPure,
+				Span:          req.Span,
 			}
 
 			for _, param := range req.Params {
-				cloned.Params = append(cloned.Params, c.substituteGenericSignatureType(scope, param, typeSubst, argSubst))
+				cloned.Params = append(
+					cloned.Params,
+					c.substituteGenericSignatureTypeSeen(
+						scope,
+						param,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+				)
 			}
 
-			for _, result := range req.Results {
-				cloned.Results = append(cloned.Results, c.substituteGenericSignatureType(scope, result, typeSubst, argSubst))
+			for _, resultType := range req.Results {
+				cloned.Results = append(
+					cloned.Results,
+					c.substituteGenericSignatureTypeSeen(
+						scope,
+						resultType,
+						typeSubst,
+						argSubst,
+						seen,
+					),
+				)
 			}
 
-			out.InterfaceRequirements = append(out.InterfaceRequirements, cloned)
+			result.InterfaceRequirements = append(
+				result.InterfaceRequirements,
+				cloned,
+			)
 		}
 
-		return &out
+		return result
 
 	case TypeTask:
 		out := *typ
+
 		out.ForeignABI =
 			cloneForeignTaskABIInfo(
 				typ.ForeignABI,
 			)
+
 		out.Params = nil
 		out.Results = nil
 
+		result := &out
+		seen[typ] = result
+
 		for _, param := range typ.Params {
-			out.Params = append(out.Params, c.substituteGenericSignatureType(scope, param, typeSubst, argSubst))
+			result.Params = append(
+				result.Params,
+				c.substituteGenericSignatureTypeSeen(
+					scope,
+					param,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		for _, result := range typ.Results {
-			out.Results = append(out.Results, c.substituteGenericSignatureType(scope, result, typeSubst, argSubst))
+		for _, resultType := range typ.Results {
+			result.Results = append(
+				result.Results,
+				c.substituteGenericSignatureTypeSeen(
+					scope,
+					resultType,
+					typeSubst,
+					argSubst,
+					seen,
+				),
+			)
 		}
 
-		return &out
+		return result
 
 	default:
 		return typ

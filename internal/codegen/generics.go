@@ -4029,6 +4029,73 @@ func (g *Generator) namedGenericTypeIdentityCName(
 	return "", false
 }
 
+func (g *Generator) genericTypeIdentityCName(
+	typ ast.Type,
+) (
+	string,
+	bool,
+) {
+	if typ == nil {
+		return "", false
+	}
+
+	switch t := typ.(type) {
+	case *ast.NamedType:
+		return g.namedGenericTypeIdentityCName(
+			t,
+		)
+
+	case *ast.PointerType:
+		/*
+			Generic specialization identity must preserve the semantic
+			owner of the pointed-to type.
+
+			For example, both of these must have the same identity:
+
+			    *Gate
+			    *threadExample.Gate
+
+			when Gate belongs to threadExample.
+
+			The leading "*" becomes "_" after C-name sanitization, matching
+			the existing representation derived from CType.SealName.
+		*/
+		elemName, ok :=
+			g.genericTypeIdentityCName(
+				t.Elem,
+			)
+
+		if !ok || elemName == "" {
+			return "", false
+		}
+
+		return sanitizeCName(
+			"*" + elemName,
+		), true
+
+	default:
+		/*
+			Generic structures and the remaining composite type forms already
+			have concrete C identities. Use their lowered Seal name.
+
+			Generic structure instance names include their owning package, so
+			this remains stable between the caller and owner translation units.
+		*/
+		lowered :=
+			g.cTypeFromAstInContext(
+				typ,
+			)
+
+		if isInvalidCType(lowered) {
+			return "", false
+		}
+
+		return sanitizeCName(
+			lowered.SealName,
+		), true
+	}
+}
+
 func (g *Generator) genericTypeArgCName(
 	arg ast.GenericArg,
 ) string {
@@ -4040,26 +4107,17 @@ func (g *Generator) genericTypeArgCName(
 			)
 	}
 
-	if typ :=
+	typ :=
 		typeAstFromGenericArgForCGen(
 			arg,
-		); typ != nil {
+		)
+
+	if typ != nil {
 		if name, ok :=
-			g.namedGenericTypeIdentityCName(
+			g.genericTypeIdentityCName(
 				typ,
 			); ok {
 			return name
-		}
-
-		lowered :=
-			g.cTypeFromAstInContext(
-				typ,
-			)
-
-		if !isInvalidCType(lowered) {
-			return sanitizeCName(
-				lowered.SealName,
-			)
 		}
 	}
 
