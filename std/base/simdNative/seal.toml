@@ -1,0 +1,4 @@
+[package]
+name = "simdNative"
+version = "0.1.0"
+kind = "library"

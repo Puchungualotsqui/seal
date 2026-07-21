@@ -1,0 +1,637 @@
+Error :: enum {
+    None
+    InvalidArgument
+}
+
+Backend :: enum {
+    Scalar
+    SIMDe
+}
+
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error == .None {
+        return "no error"
+    }
+
+    return "invalid SIMD argument"
+}
+
+CurrentBackend :: task() Backend {
+    if simdNative.Backend() == 0 {
+        return .Scalar
+    }
+
+    return .SIMDe
+}
+
+BackendString :: pure task(
+    backend Backend,
+) string {
+    if backend == .Scalar {
+        return "scalar"
+    }
+
+    return "SIMDe"
+}
+
+/*
+A zero-length operation accepts nil pointers because no memory is read
+or written.
+*/
+_ValidSource :: pure task<
+    T type,
+>(
+    source *T,
+    length uint,
+) bool {
+    return length == 0 ||
+        source != nil
+}
+
+_ValidDestinationSource :: pure task<
+    T type,
+>(
+    destination *T,
+    source *T,
+    length uint,
+) bool {
+    return length == 0 ||
+        (
+            destination != nil &&
+            source != nil
+        )
+}
+
+_ValidDestinationBinary :: pure task<
+    T type,
+>(
+    destination *T,
+    left *T,
+    right *T,
+    length uint,
+) bool {
+    return length == 0 ||
+        (
+            destination != nil &&
+            left != nil &&
+            right != nil
+        )
+}
+
+/*
+f32 operations.
+
+destination may be exactly left or right. Partially overlapping ranges
+are not supported.
+*/
+
+AddF32 :: task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.AddF32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+SubF32 :: task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.SubF32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+MulF32 :: task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.MulF32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+DivF32 :: task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.DivF32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+ScaleF32 :: task(
+    destination *f32,
+    source *f32,
+    scalar f32,
+    length uint,
+) Error {
+    if !_ValidDestinationSource<f32>(
+        destination,
+        source,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.ScaleF32(
+            destination,
+            source,
+            scalar,
+            length,
+        )
+    }
+
+    return .None
+}
+
+SumF32 :: task(
+    source *f32,
+    length uint,
+) (f32, Error) {
+    if !_ValidSource<f32>(
+        source,
+        length,
+    ) {
+        return cast<f32>(0),
+            .InvalidArgument
+    }
+
+    if length == 0 {
+        return cast<f32>(0),
+            .None
+    }
+
+    return simdNative.SumF32(
+        source,
+        length,
+    ), .None
+}
+
+DotF32 :: task(
+    left *f32,
+    right *f32,
+    length uint,
+) (f32, Error) {
+    if !_ValidDestinationSource<f32>(
+        left,
+        right,
+        length,
+    ) {
+        return cast<f32>(0),
+            .InvalidArgument
+    }
+
+    if length == 0 {
+        return cast<f32>(0),
+            .None
+    }
+
+    return simdNative.DotF32(
+        left,
+        right,
+        length,
+    ), .None
+}
+
+/*
+f64 operations.
+
+destination may be exactly left or right. Partially overlapping ranges
+are not supported.
+*/
+
+AddF64 :: task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f64>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.AddF64(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+SubF64 :: task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f64>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.SubF64(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+MulF64 :: task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f64>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.MulF64(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+DivF64 :: task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<f64>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.DivF64(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+ScaleF64 :: task(
+    destination *f64,
+    source *f64,
+    scalar f64,
+    length uint,
+) Error {
+    if !_ValidDestinationSource<f64>(
+        destination,
+        source,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.ScaleF64(
+            destination,
+            source,
+            scalar,
+            length,
+        )
+    }
+
+    return .None
+}
+
+SumF64 :: task(
+    source *f64,
+    length uint,
+) (f64, Error) {
+    if !_ValidSource<f64>(
+        source,
+        length,
+    ) {
+        return cast<f64>(0),
+            .InvalidArgument
+    }
+
+    if length == 0 {
+        return cast<f64>(0),
+            .None
+    }
+
+    return simdNative.SumF64(
+        source,
+        length,
+    ), .None
+}
+
+DotF64 :: task(
+    left *f64,
+    right *f64,
+    length uint,
+) (f64, Error) {
+    if !_ValidDestinationSource<f64>(
+        left,
+        right,
+        length,
+    ) {
+        return cast<f64>(0),
+            .InvalidArgument
+    }
+
+    if length == 0 {
+        return cast<f64>(0),
+            .None
+    }
+
+    return simdNative.DotF64(
+        left,
+        right,
+        length,
+    ), .None
+}
+
+/*
+u32 operations.
+
+Unsigned arithmetic uses normal wrapping behavior.
+destination may be exactly left or right. Partially overlapping ranges
+are not supported.
+*/
+
+AddU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.AddU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+SubU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.SubU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+MulU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.MulU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+AndU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.AndU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+OrU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.OrU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}
+
+XorU32 :: task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+) Error {
+    if !_ValidDestinationBinary<u32>(
+        destination,
+        left,
+        right,
+        length,
+    ) {
+        return .InvalidArgument
+    }
+
+    if length > 0 {
+        simdNative.XorU32(
+            destination,
+            left,
+            right,
+            length,
+        )
+    }
+
+    return .None
+}

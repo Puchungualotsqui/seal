@@ -1,0 +1,199 @@
+/*
+Backend returns:
+
+    0  explicit scalar implementation
+    1  SIMDe implementation
+
+The SIMDe implementation may use native instructions, compiler vector
+extensions, or SIMDe's portable fallback according to the selected C
+compiler and target flags.
+*/
+Backend :: extern(
+    "seal_simd_backend"
+) task() int
+
+/*
+f32 operations.
+*/
+
+AddF32 :: extern(
+    "seal_simd_add_f32"
+) task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+)
+
+SubF32 :: extern(
+    "seal_simd_sub_f32"
+) task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+)
+
+MulF32 :: extern(
+    "seal_simd_mul_f32"
+) task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+)
+
+DivF32 :: extern(
+    "seal_simd_div_f32"
+) task(
+    destination *f32,
+    left *f32,
+    right *f32,
+    length uint,
+)
+
+ScaleF32 :: extern(
+    "seal_simd_scale_f32"
+) task(
+    destination *f32,
+    source *f32,
+    scalar f32,
+    length uint,
+)
+
+SumF32 :: extern(
+    "seal_simd_sum_f32"
+) task(
+    source *f32,
+    length uint,
+) f32
+
+DotF32 :: extern(
+    "seal_simd_dot_f32"
+) task(
+    left *f32,
+    right *f32,
+    length uint,
+) f32
+
+/*
+f64 operations.
+*/
+
+AddF64 :: extern(
+    "seal_simd_add_f64"
+) task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+)
+
+SubF64 :: extern(
+    "seal_simd_sub_f64"
+) task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+)
+
+MulF64 :: extern(
+    "seal_simd_mul_f64"
+) task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+)
+
+DivF64 :: extern(
+    "seal_simd_div_f64"
+) task(
+    destination *f64,
+    left *f64,
+    right *f64,
+    length uint,
+)
+
+ScaleF64 :: extern(
+    "seal_simd_scale_f64"
+) task(
+    destination *f64,
+    source *f64,
+    scalar f64,
+    length uint,
+)
+
+SumF64 :: extern(
+    "seal_simd_sum_f64"
+) task(
+    source *f64,
+    length uint,
+) f64
+
+DotF64 :: extern(
+    "seal_simd_dot_f64"
+) task(
+    left *f64,
+    right *f64,
+    length uint,
+) f64
+
+/*
+u32 operations.
+*/
+
+AddU32 :: extern(
+    "seal_simd_add_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)
+
+SubU32 :: extern(
+    "seal_simd_sub_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)
+
+MulU32 :: extern(
+    "seal_simd_mul_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)
+
+AndU32 :: extern(
+    "seal_simd_and_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)
+
+OrU32 :: extern(
+    "seal_simd_or_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)
+
+XorU32 :: extern(
+    "seal_simd_xor_u32"
+) task(
+    destination *u32,
+    left *u32,
+    right *u32,
+    length uint,
+)

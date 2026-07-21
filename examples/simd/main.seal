@@ -1,0 +1,996 @@
+Require :: task(
+    condition bool,
+    message string,
+) {
+    if condition {
+        return
+    }
+
+    fmt.Println(
+        "test failed: %v",
+        message,
+    )
+
+    panic(
+        "SIMD integration test failed",
+    )
+}
+
+RequireSIMD :: task(
+    context string,
+    error simd.Error,
+) {
+    if simd.ErrorIsNone(error) {
+        return
+    }
+
+    fmt.Println(
+        "%v: %v",
+        context,
+        simd.ErrorString(error),
+    )
+
+    panic(
+        "SIMD integration test failed",
+    )
+}
+
+/*
+Backend selection.
+*/
+
+TestBackend :: task() {
+    backend :=
+        simd.CurrentBackend()
+
+    Require(
+        backend == .Scalar ||
+            backend == .SIMDe,
+        "unknown SIMD backend",
+    )
+
+    fmt.Println(
+        "SIMD backend: %v",
+        simd.BackendString(
+            backend,
+        ),
+    )
+}
+
+/*
+Argument validation.
+
+Zero-length operations permit nil pointers because they do not access
+memory.
+*/
+
+TestArgumentValidation :: task() {
+    RequireSIMD(
+        "zero-length f32 addition",
+        simd.AddF32(
+            nil,
+            nil,
+            nil,
+            0,
+        ),
+    )
+
+    zeroSum, zeroSumError :=
+        simd.SumF32(
+            nil,
+            0,
+        )
+
+    RequireSIMD(
+        "zero-length f32 sum",
+        zeroSumError,
+    )
+
+    Require(
+        zeroSum ==
+            cast<f32>(0),
+        "zero-length sum must return zero",
+    )
+
+    value :=
+        @inline_array<f32, 1>(
+            cast<f32>(1),
+        )
+
+    invalidBinary :=
+        simd.AddF32(
+            nil,
+            &value[0],
+            &value[0],
+            1,
+        )
+
+    Require(
+        invalidBinary ==
+            .InvalidArgument,
+        "nonempty binary operation accepted a nil destination",
+    )
+
+    invalidScale :=
+        simd.ScaleF32(
+            nil,
+            &value[0],
+            cast<f32>(2),
+            1,
+        )
+
+    Require(
+        invalidScale ==
+            .InvalidArgument,
+        "nonempty scale operation accepted a nil destination",
+    )
+
+    invalidSum, invalidSumError :=
+        simd.SumF32(
+            nil,
+            1,
+        )
+
+    Require(
+        invalidSum ==
+            cast<f32>(0),
+        "failed sum must return zero",
+    )
+
+    Require(
+        invalidSumError ==
+            .InvalidArgument,
+        "nonempty sum accepted a nil source",
+    )
+
+    Require(
+        simd.ErrorString(
+            .InvalidArgument,
+        ) ==
+            "invalid SIMD argument",
+        "unexpected SIMD error string",
+    )
+}
+
+/*
+f32 operations.
+
+The length is 11 so the SIMDe implementation processes one complete
+eight-lane vector and a three-element scalar tail.
+*/
+
+TestF32 :: task() {
+    left :=
+        @inline_array<f32, 11>(
+            cast<f32>(1),
+            cast<f32>(2),
+            cast<f32>(3),
+            cast<f32>(4),
+            cast<f32>(5),
+            cast<f32>(6),
+            cast<f32>(7),
+            cast<f32>(8),
+            cast<f32>(9),
+            cast<f32>(10),
+            cast<f32>(11),
+        )
+
+    right :=
+        @inline_array<f32, 11>(
+            cast<f32>(11),
+            cast<f32>(10),
+            cast<f32>(9),
+            cast<f32>(8),
+            cast<f32>(7),
+            cast<f32>(6),
+            cast<f32>(5),
+            cast<f32>(4),
+            cast<f32>(3),
+            cast<f32>(2),
+            cast<f32>(1),
+        )
+
+    result :=
+        @inline_array<f32, 11>(
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+            cast<f32>(0),
+        )
+
+    length := len(left)
+    index := 0
+
+    /*
+    Addition.
+    */
+
+    RequireSIMD(
+        "f32 addition",
+        simd.AddF32(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                cast<f32>(12),
+            "f32 addition produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Subtraction.
+    */
+
+    RequireSIMD(
+        "f32 subtraction",
+        simd.SubF32(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        expected :=
+            cast<f32>(
+                (index * 2) - 10,
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f32 subtraction produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Multiplication.
+    */
+
+    RequireSIMD(
+        "f32 multiplication",
+        simd.MulF32(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        expected :=
+            cast<f32>(
+                (index + 1) *
+                    (11 - index),
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f32 multiplication produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Division.
+
+    Dividing each positive value by itself should produce exactly one.
+    */
+
+    RequireSIMD(
+        "f32 division",
+        simd.DivF32(
+            &result[0],
+            &left[0],
+            &left[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                cast<f32>(1),
+            "f32 division produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Scalar multiplication.
+    */
+
+    RequireSIMD(
+        "f32 scaling",
+        simd.ScaleF32(
+            &result[0],
+            &left[0],
+            cast<f32>(2),
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        expected :=
+            cast<f32>(
+                (index + 1) * 2,
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f32 scaling produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Reductions.
+    */
+
+    sum, sumError :=
+        simd.SumF32(
+            &left[0],
+            length,
+        )
+
+    RequireSIMD(
+        "f32 sum",
+        sumError,
+    )
+
+    Require(
+        sum == cast<f32>(66),
+        "f32 sum produced an unexpected value",
+    )
+
+    dot, dotError :=
+        simd.DotF32(
+            &left[0],
+            &right[0],
+            length,
+        )
+
+    RequireSIMD(
+        "f32 dot product",
+        dotError,
+    )
+
+    Require(
+        dot == cast<f32>(286),
+        "f32 dot product produced an unexpected value",
+    )
+
+    /*
+    Exact in-place aliasing.
+
+    destination may be exactly the same pointer as one source.
+    */
+
+    inPlace :=
+        @inline_array<f32, 11>(
+            cast<f32>(1),
+            cast<f32>(2),
+            cast<f32>(3),
+            cast<f32>(4),
+            cast<f32>(5),
+            cast<f32>(6),
+            cast<f32>(7),
+            cast<f32>(8),
+            cast<f32>(9),
+            cast<f32>(10),
+            cast<f32>(11),
+        )
+
+    RequireSIMD(
+        "in-place f32 addition",
+        simd.AddF32(
+            &inPlace[0],
+            &inPlace[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            inPlace[index] ==
+                cast<f32>(12),
+            "in-place f32 addition produced an unexpected value",
+        )
+
+        index += 1
+    }
+}
+
+/*
+f64 operations.
+
+The length is 7 so the SIMDe implementation processes one complete
+four-lane vector and a three-element scalar tail.
+*/
+
+TestF64 :: task() {
+    left :=
+        @inline_array<f64, 7>(
+            cast<f64>(1),
+            cast<f64>(2),
+            cast<f64>(3),
+            cast<f64>(4),
+            cast<f64>(5),
+            cast<f64>(6),
+            cast<f64>(7),
+        )
+
+    right :=
+        @inline_array<f64, 7>(
+            cast<f64>(7),
+            cast<f64>(6),
+            cast<f64>(5),
+            cast<f64>(4),
+            cast<f64>(3),
+            cast<f64>(2),
+            cast<f64>(1),
+        )
+
+    result :=
+        @inline_array<f64, 7>(
+            cast<f64>(0),
+            cast<f64>(0),
+            cast<f64>(0),
+            cast<f64>(0),
+            cast<f64>(0),
+            cast<f64>(0),
+            cast<f64>(0),
+        )
+
+    length := len(left)
+    index := 0
+
+    /*
+    Addition.
+    */
+
+    RequireSIMD(
+        "f64 addition",
+        simd.AddF64(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 7 {
+        Require(
+            result[index] ==
+                cast<f64>(8),
+            "f64 addition produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Subtraction.
+    */
+
+    RequireSIMD(
+        "f64 subtraction",
+        simd.SubF64(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 7 {
+        expected :=
+            cast<f64>(
+                (index * 2) - 6,
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f64 subtraction produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Multiplication.
+    */
+
+    RequireSIMD(
+        "f64 multiplication",
+        simd.MulF64(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 7 {
+        expected :=
+            cast<f64>(
+                (index + 1) *
+                    (7 - index),
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f64 multiplication produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Division.
+    */
+
+    RequireSIMD(
+        "f64 division",
+        simd.DivF64(
+            &result[0],
+            &left[0],
+            &left[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 7 {
+        Require(
+            result[index] ==
+                cast<f64>(1),
+            "f64 division produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Scalar multiplication.
+    */
+
+    RequireSIMD(
+        "f64 scaling",
+        simd.ScaleF64(
+            &result[0],
+            &left[0],
+            cast<f64>(3),
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 7 {
+        expected :=
+            cast<f64>(
+                (index + 1) * 3,
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "f64 scaling produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Reductions.
+    */
+
+    sum, sumError :=
+        simd.SumF64(
+            &left[0],
+            length,
+        )
+
+    RequireSIMD(
+        "f64 sum",
+        sumError,
+    )
+
+    Require(
+        sum == cast<f64>(28),
+        "f64 sum produced an unexpected value",
+    )
+
+    dot, dotError :=
+        simd.DotF64(
+            &left[0],
+            &right[0],
+            length,
+        )
+
+    RequireSIMD(
+        "f64 dot product",
+        dotError,
+    )
+
+    Require(
+        dot == cast<f64>(84),
+        "f64 dot product produced an unexpected value",
+    )
+}
+
+/*
+u32 operations.
+
+The length is 11 so the SIMDe implementation exercises one eight-lane
+vector and a three-element scalar tail.
+*/
+
+TestU32 :: task() {
+    left :=
+        @inline_array<u32, 11>(
+            cast<u32>(1),
+            cast<u32>(2),
+            cast<u32>(3),
+            cast<u32>(4),
+            cast<u32>(5),
+            cast<u32>(6),
+            cast<u32>(7),
+            cast<u32>(8),
+            cast<u32>(9),
+            cast<u32>(10),
+            cast<u32>(11),
+        )
+
+    right :=
+        @inline_array<u32, 11>(
+            cast<u32>(11),
+            cast<u32>(10),
+            cast<u32>(9),
+            cast<u32>(8),
+            cast<u32>(7),
+            cast<u32>(6),
+            cast<u32>(5),
+            cast<u32>(4),
+            cast<u32>(3),
+            cast<u32>(2),
+            cast<u32>(1),
+        )
+
+    result :=
+        @inline_array<u32, 11>(
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+        )
+
+    length := len(left)
+    index := 0
+
+    /*
+    Addition.
+    */
+
+    RequireSIMD(
+        "u32 addition",
+        simd.AddU32(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                cast<u32>(12),
+            "u32 addition produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Subtraction.
+    */
+
+    RequireSIMD(
+        "u32 subtraction",
+        simd.SubU32(
+            &result[0],
+            &left[0],
+            &left[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                cast<u32>(0),
+            "u32 subtraction produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Multiplication.
+    */
+
+    RequireSIMD(
+        "u32 multiplication",
+        simd.MulU32(
+            &result[0],
+            &left[0],
+            &right[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        expected :=
+            cast<u32>(
+                (index + 1) *
+                    (11 - index),
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            "u32 multiplication produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    bitLeft :=
+        @inline_array<u32, 11>(
+            cast<u32>(15),
+            cast<u32>(12),
+            cast<u32>(10),
+            cast<u32>(9),
+            cast<u32>(255),
+            cast<u32>(240),
+            cast<u32>(170),
+            cast<u32>(85),
+            cast<u32>(3),
+            cast<u32>(5),
+            cast<u32>(7),
+        )
+
+    bitRight :=
+        @inline_array<u32, 11>(
+            cast<u32>(3),
+            cast<u32>(10),
+            cast<u32>(12),
+            cast<u32>(6),
+            cast<u32>(15),
+            cast<u32>(15),
+            cast<u32>(85),
+            cast<u32>(170),
+            cast<u32>(1),
+            cast<u32>(2),
+            cast<u32>(4),
+        )
+
+    expectedAnd :=
+        @inline_array<u32, 11>(
+            cast<u32>(3),
+            cast<u32>(8),
+            cast<u32>(8),
+            cast<u32>(0),
+            cast<u32>(15),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(0),
+            cast<u32>(1),
+            cast<u32>(0),
+            cast<u32>(4),
+        )
+
+    expectedOr :=
+        @inline_array<u32, 11>(
+            cast<u32>(15),
+            cast<u32>(14),
+            cast<u32>(14),
+            cast<u32>(15),
+            cast<u32>(255),
+            cast<u32>(255),
+            cast<u32>(255),
+            cast<u32>(255),
+            cast<u32>(3),
+            cast<u32>(7),
+            cast<u32>(7),
+        )
+
+    expectedXor :=
+        @inline_array<u32, 11>(
+            cast<u32>(12),
+            cast<u32>(6),
+            cast<u32>(6),
+            cast<u32>(15),
+            cast<u32>(240),
+            cast<u32>(255),
+            cast<u32>(255),
+            cast<u32>(255),
+            cast<u32>(2),
+            cast<u32>(7),
+            cast<u32>(3),
+        )
+
+    /*
+    Bitwise AND.
+    */
+
+    RequireSIMD(
+        "u32 bitwise AND",
+        simd.AndU32(
+            &result[0],
+            &bitLeft[0],
+            &bitRight[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                expectedAnd[index],
+            "u32 AND produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Bitwise OR.
+    */
+
+    RequireSIMD(
+        "u32 bitwise OR",
+        simd.OrU32(
+            &result[0],
+            &bitLeft[0],
+            &bitRight[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                expectedOr[index],
+            "u32 OR produced an unexpected value",
+        )
+
+        index += 1
+    }
+
+    /*
+    Bitwise XOR.
+    */
+
+    RequireSIMD(
+        "u32 bitwise XOR",
+        simd.XorU32(
+            &result[0],
+            &bitLeft[0],
+            &bitRight[0],
+            length,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                expectedXor[index],
+            "u32 XOR produced an unexpected value",
+        )
+
+        index += 1
+    }
+}
+
+Main :: task() {
+    fmt.Println(
+        "starting SIMD tests",
+    )
+
+    TestBackend()
+
+    TestArgumentValidation()
+
+    fmt.Println(
+        "argument validation: ok",
+    )
+
+    TestF32()
+
+    fmt.Println(
+        "f32 operations: ok",
+    )
+
+    TestF64()
+
+    fmt.Println(
+        "f64 operations: ok",
+    )
+
+    TestU32()
+
+    fmt.Println(
+        "u32 operations: ok",
+    )
+
+    fmt.Println(
+        "all SIMD tests passed",
+    )
+}
