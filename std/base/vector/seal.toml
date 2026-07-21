@@ -1,0 +1,8 @@
+[package]
+name = "vector"
+version = "0.1.0"
+kind = "library"
+dependencies = [
+    "lists",
+    "simd",
+]

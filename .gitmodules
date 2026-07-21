@@ -1,0 +1,3 @@
+[submodule "std/base/simdNative/vendor/simde"]
+	path = std/base/simdNative/vendor/simde
+	url = https://github.com/simd-everywhere/simde.git

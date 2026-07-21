@@ -1,0 +1,331 @@
+Failure :: enum {
+    AddOperation
+    AddResult
+    DotOperation
+    DotResult
+    ScaleOperation
+    ScaleResult
+    InPlaceOperation
+    InPlaceResult
+    LengthMismatch
+}
+
+FailureString :: pure task(
+    failure Failure,
+) string {
+    if failure ==
+        .AddOperation {
+        return "vector addition failed"
+    }
+
+    if failure ==
+        .AddResult {
+        return "vector addition produced an unexpected value"
+    }
+
+    if failure ==
+        .DotOperation {
+        return "vector dot product failed"
+    }
+
+    if failure ==
+        .DotResult {
+        return "vector dot product produced an unexpected value"
+    }
+
+    if failure ==
+        .ScaleOperation {
+        return "vector scaling failed"
+    }
+
+    if failure ==
+        .ScaleResult {
+        return "vector scaling produced an unexpected value"
+    }
+
+    if failure ==
+        .InPlaceOperation {
+        return "in-place vector addition failed"
+    }
+
+    if failure ==
+        .InPlaceResult {
+        return "in-place vector addition produced an unexpected value"
+    }
+
+    return "vector length mismatch was not detected"
+}
+
+Require :: task(
+    condition bool,
+    failure Failure,
+) {
+    if condition {
+        return
+    }
+
+    fmt.Println(
+        "test failed: %v",
+        FailureString(
+            failure,
+        ),
+    )
+
+    panic(
+        "vector integration test failed",
+    )
+}
+
+RequireVector :: task(
+    failure Failure,
+    error vector.Error,
+) {
+    if vector.ErrorIsNone(
+        error,
+    ) {
+        return
+    }
+
+    fmt.Println(
+        "%v: %v",
+        FailureString(
+            failure,
+        ),
+        vector.ErrorString(
+            error,
+        ),
+    )
+
+    panic(
+        "vector integration test failed",
+    )
+}
+
+TestF32 :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    zeroAllocator :=
+        cast<mem.ZeroAllocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
+    left :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
+    right :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
+    result :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
+    inPlace :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            11,
+        )
+
+    shortResult :=
+        lists.ArrayWithLength<f32>(
+            zeroAllocator,
+            deallocator,
+            10,
+        )
+
+    defer lists.DestroyArray<f32>(
+        &shortResult,
+    )
+
+    defer lists.DestroyArray<f32>(
+        &inPlace,
+    )
+
+    defer lists.DestroyArray<f32>(
+        &result,
+    )
+
+    defer lists.DestroyArray<f32>(
+        &right,
+    )
+
+    defer lists.DestroyArray<f32>(
+        &left,
+    )
+
+    index := 0
+
+    for index < 11 {
+        left[index] =
+            cast<f32>(
+                index + 1,
+            )
+
+        right[index] =
+            cast<f32>(
+                11 - index,
+            )
+
+        inPlace[index] =
+            cast<f32>(
+                index + 1,
+            )
+
+        index += 1
+    }
+
+    leftValues :=
+        lists.ArraySlice<f32>(
+            &left,
+        )
+
+    rightValues :=
+        lists.ArraySlice<f32>(
+            &right,
+        )
+
+    resultValues :=
+        lists.ArraySlice<f32>(
+            &result,
+        )
+
+    inPlaceValues :=
+        lists.ArraySlice<f32>(
+            &inPlace,
+        )
+
+    shortResultValues :=
+        lists.ArraySlice<f32>(
+            &shortResult,
+        )
+
+    RequireVector(
+        .AddOperation,
+        vector.AddF32(
+            resultValues,
+            leftValues,
+            rightValues,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            result[index] ==
+                cast<f32>(12),
+            .AddResult,
+        )
+
+        index += 1
+    }
+
+    RequireVector(
+        .ScaleOperation,
+        vector.ScaleF32(
+            resultValues,
+            leftValues,
+            cast<f32>(2),
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        expected :=
+            cast<f32>(
+                (index + 1) * 2,
+            )
+
+        Require(
+            result[index] ==
+                expected,
+            .ScaleResult,
+        )
+
+        index += 1
+    }
+
+    dot, dotError :=
+        vector.DotF32(
+            leftValues,
+            rightValues,
+        )
+
+    RequireVector(
+        .DotOperation,
+        dotError,
+    )
+
+    Require(
+        dot == cast<f32>(286),
+        .DotResult,
+    )
+
+    RequireVector(
+        .InPlaceOperation,
+        vector.AddF32(
+            inPlaceValues,
+            inPlaceValues,
+            rightValues,
+        ),
+    )
+
+    index = 0
+
+    for index < 11 {
+        Require(
+            inPlace[index] ==
+                cast<f32>(12),
+            .InPlaceResult,
+        )
+
+        index += 1
+    }
+
+    mismatch :=
+        vector.AddF32(
+            shortResultValues,
+            leftValues,
+            rightValues,
+        )
+
+    Require(
+        mismatch ==
+            .LengthMismatch,
+        .LengthMismatch,
+    )
+}
+
+Main :: task() {
+    fmt.Println(
+        "starting vector tests",
+    )
+
+    TestF32()
+
+    fmt.Println(
+        "f32 vector operations: ok",
+    )
+
+    fmt.Println(
+        "all vector tests passed",
+    )
+}

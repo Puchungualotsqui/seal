@@ -1,0 +1,1007 @@
+Error :: enum {
+    None
+    InvalidArgument
+    LengthMismatch
+}
+
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error == .None
+}
+
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error == .None {
+        return "no error"
+    }
+
+    if error ==
+        .InvalidArgument {
+        return "invalid vector argument"
+    }
+
+    return "vector lengths do not match"
+}
+
+_FromSIMDError :: pure task(
+    error simd.Error,
+) Error {
+    if simd.ErrorIsNone(
+        error,
+    ) {
+        return .None
+    }
+
+    return .InvalidArgument
+}
+
+/*
+An empty slice may contain a nil data pointer.
+*/
+_SliceIsValid :: pure task<
+    T type,
+>(
+    values *lists.Slice<T>,
+) bool {
+    if values == nil {
+        return false
+    }
+
+    length :=
+        lists.SliceLength<T>(
+            values,
+        )
+
+    return length == 0 ||
+        lists.SliceData<T>(
+            values,
+        ) != nil
+}
+
+_ValidateSource :: pure task<
+    T type,
+>(
+    source *lists.Slice<T>,
+) Error {
+    if !_SliceIsValid<T>(
+        source,
+    ) {
+        return .InvalidArgument
+    }
+
+    return .None
+}
+
+_ValidateDestinationSource ::
+    pure task<
+        T type,
+    >(
+        destination *lists.Slice<T>,
+        source *lists.Slice<T>,
+    ) Error {
+        if !_SliceIsValid<T>(
+            destination,
+        ) ||
+            !_SliceIsValid<T>(
+                source,
+            ) {
+            return .InvalidArgument
+        }
+
+        destinationLength :=
+            lists.SliceLength<T>(
+                destination,
+            )
+
+        sourceLength :=
+            lists.SliceLength<T>(
+                source,
+            )
+
+        if destinationLength !=
+            sourceLength {
+            return .LengthMismatch
+        }
+
+        return .None
+    }
+
+_ValidateBinary :: pure task<
+    T type,
+>(
+    destination *lists.Slice<T>,
+    left *lists.Slice<T>,
+    right *lists.Slice<T>,
+) Error {
+    if !_SliceIsValid<T>(
+        destination,
+    ) ||
+        !_SliceIsValid<T>(
+            left,
+        ) ||
+        !_SliceIsValid<T>(
+            right,
+        ) {
+        return .InvalidArgument
+    }
+
+    destinationLength :=
+        lists.SliceLength<T>(
+            destination,
+        )
+
+    leftLength :=
+        lists.SliceLength<T>(
+            left,
+        )
+
+    rightLength :=
+        lists.SliceLength<T>(
+            right,
+        )
+
+    if destinationLength !=
+        leftLength ||
+        leftLength !=
+            rightLength {
+        return .LengthMismatch
+    }
+
+    return .None
+}
+
+_ValidatePair :: pure task<
+    T type,
+>(
+    left *lists.Slice<T>,
+    right *lists.Slice<T>,
+) Error {
+    if !_SliceIsValid<T>(
+        left,
+    ) ||
+        !_SliceIsValid<T>(
+            right,
+        ) {
+        return .InvalidArgument
+    }
+
+    leftLength :=
+        lists.SliceLength<T>(
+            left,
+        )
+
+    rightLength :=
+        lists.SliceLength<T>(
+            right,
+        )
+
+    if leftLength !=
+        rightLength {
+        return .LengthMismatch
+    }
+
+    return .None
+}
+
+/*
+Typed borrowed data pointers.
+*/
+
+_DataF32 :: pure task(
+    values *lists.Slice<f32>,
+) *f32 {
+    return cast<*f32>(
+        lists.SliceData<f32>(
+            values,
+        ),
+    )
+}
+
+_DataF64 :: pure task(
+    values *lists.Slice<f64>,
+) *f64 {
+    return cast<*f64>(
+        lists.SliceData<f64>(
+            values,
+        ),
+    )
+}
+
+_DataU32 :: pure task(
+    values *lists.Slice<u32>,
+) *u32 {
+    return cast<*u32>(
+        lists.SliceData<u32>(
+            values,
+        ),
+    )
+}
+
+/*
+f32 operations.
+
+The destination may be exactly the same slice as a source.
+Partially overlapping slices are not supported.
+*/
+
+AddF32 :: task(
+    destination lists.Slice<f32>,
+    left lists.Slice<f32>,
+    right lists.Slice<f32>,
+) Error {
+    validation :=
+        _ValidateBinary<f32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.AddF32(
+            _DataF32(
+                &destination,
+            ),
+            _DataF32(
+                &left,
+            ),
+            _DataF32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+SubF32 :: task(
+    destination lists.Slice<f32>,
+    left lists.Slice<f32>,
+    right lists.Slice<f32>,
+) Error {
+    validation :=
+        _ValidateBinary<f32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.SubF32(
+            _DataF32(
+                &destination,
+            ),
+            _DataF32(
+                &left,
+            ),
+            _DataF32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+MulF32 :: task(
+    destination lists.Slice<f32>,
+    left lists.Slice<f32>,
+    right lists.Slice<f32>,
+) Error {
+    validation :=
+        _ValidateBinary<f32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.MulF32(
+            _DataF32(
+                &destination,
+            ),
+            _DataF32(
+                &left,
+            ),
+            _DataF32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+DivF32 :: task(
+    destination lists.Slice<f32>,
+    left lists.Slice<f32>,
+    right lists.Slice<f32>,
+) Error {
+    validation :=
+        _ValidateBinary<f32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.DivF32(
+            _DataF32(
+                &destination,
+            ),
+            _DataF32(
+                &left,
+            ),
+            _DataF32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+ScaleF32 :: task(
+    destination lists.Slice<f32>,
+    source lists.Slice<f32>,
+    scalar f32,
+) Error {
+    validation :=
+        _ValidateDestinationSource<f32>(
+            &destination,
+            &source,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.ScaleF32(
+            _DataF32(
+                &destination,
+            ),
+            _DataF32(
+                &source,
+            ),
+            scalar,
+            length,
+        ),
+    )
+}
+
+SumF32 :: task(
+    source lists.Slice<f32>,
+) (f32, Error) {
+    validation :=
+        _ValidateSource<f32>(
+            &source,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return cast<f32>(0),
+            validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &source,
+        )
+
+    result, simdError :=
+        simd.SumF32(
+            _DataF32(
+                &source,
+            ),
+            length,
+        )
+
+    return result,
+        _FromSIMDError(
+            simdError,
+        )
+}
+
+DotF32 :: task(
+    left lists.Slice<f32>,
+    right lists.Slice<f32>,
+) (f32, Error) {
+    validation :=
+        _ValidatePair<f32>(
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return cast<f32>(0),
+            validation
+    }
+
+    length :=
+        lists.SliceLength<f32>(
+            &left,
+        )
+
+    result, simdError :=
+        simd.DotF32(
+            _DataF32(
+                &left,
+            ),
+            _DataF32(
+                &right,
+            ),
+            length,
+        )
+
+    return result,
+        _FromSIMDError(
+            simdError,
+        )
+}
+
+/*
+f64 operations.
+
+The destination may be exactly the same slice as a source.
+Partially overlapping slices are not supported.
+*/
+
+AddF64 :: task(
+    destination lists.Slice<f64>,
+    left lists.Slice<f64>,
+    right lists.Slice<f64>,
+) Error {
+    validation :=
+        _ValidateBinary<f64>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.AddF64(
+            _DataF64(
+                &destination,
+            ),
+            _DataF64(
+                &left,
+            ),
+            _DataF64(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+SubF64 :: task(
+    destination lists.Slice<f64>,
+    left lists.Slice<f64>,
+    right lists.Slice<f64>,
+) Error {
+    validation :=
+        _ValidateBinary<f64>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.SubF64(
+            _DataF64(
+                &destination,
+            ),
+            _DataF64(
+                &left,
+            ),
+            _DataF64(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+MulF64 :: task(
+    destination lists.Slice<f64>,
+    left lists.Slice<f64>,
+    right lists.Slice<f64>,
+) Error {
+    validation :=
+        _ValidateBinary<f64>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.MulF64(
+            _DataF64(
+                &destination,
+            ),
+            _DataF64(
+                &left,
+            ),
+            _DataF64(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+DivF64 :: task(
+    destination lists.Slice<f64>,
+    left lists.Slice<f64>,
+    right lists.Slice<f64>,
+) Error {
+    validation :=
+        _ValidateBinary<f64>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.DivF64(
+            _DataF64(
+                &destination,
+            ),
+            _DataF64(
+                &left,
+            ),
+            _DataF64(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+ScaleF64 :: task(
+    destination lists.Slice<f64>,
+    source lists.Slice<f64>,
+    scalar f64,
+) Error {
+    validation :=
+        _ValidateDestinationSource<f64>(
+            &destination,
+            &source,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.ScaleF64(
+            _DataF64(
+                &destination,
+            ),
+            _DataF64(
+                &source,
+            ),
+            scalar,
+            length,
+        ),
+    )
+}
+
+SumF64 :: task(
+    source lists.Slice<f64>,
+) (f64, Error) {
+    validation :=
+        _ValidateSource<f64>(
+            &source,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return cast<f64>(0),
+            validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &source,
+        )
+
+    result, simdError :=
+        simd.SumF64(
+            _DataF64(
+                &source,
+            ),
+            length,
+        )
+
+    return result,
+        _FromSIMDError(
+            simdError,
+        )
+}
+
+DotF64 :: task(
+    left lists.Slice<f64>,
+    right lists.Slice<f64>,
+) (f64, Error) {
+    validation :=
+        _ValidatePair<f64>(
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return cast<f64>(0),
+            validation
+    }
+
+    length :=
+        lists.SliceLength<f64>(
+            &left,
+        )
+
+    result, simdError :=
+        simd.DotF64(
+            _DataF64(
+                &left,
+            ),
+            _DataF64(
+                &right,
+            ),
+            length,
+        )
+
+    return result,
+        _FromSIMDError(
+            simdError,
+        )
+}
+
+/*
+u32 operations.
+
+Unsigned arithmetic uses normal wrapping behavior.
+
+The destination may be exactly the same slice as a source.
+Partially overlapping slices are not supported.
+*/
+
+AddU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.AddU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+SubU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.SubU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+MulU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.MulU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+BitAndU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.AndU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+BitOrU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.OrU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
+
+BitXorU32 :: task(
+    destination lists.Slice<u32>,
+    left lists.Slice<u32>,
+    right lists.Slice<u32>,
+) Error {
+    validation :=
+        _ValidateBinary<u32>(
+            &destination,
+            &left,
+            &right,
+        )
+
+    if !ErrorIsNone(
+        validation,
+    ) {
+        return validation
+    }
+
+    length :=
+        lists.SliceLength<u32>(
+            &destination,
+        )
+
+    return _FromSIMDError(
+        simd.XorU32(
+            _DataU32(
+                &destination,
+            ),
+            _DataU32(
+                &left,
+            ),
+            _DataU32(
+                &right,
+            ),
+            length,
+        ),
+    )
+}
