@@ -37,6 +37,11 @@ Phase flags indicate successful completion:
 Partial lexer tokens and parser ASTs remain available after syntax failures.
 Resolver and checker results remain available when their respective phases ran,
 even when that phase produced errors.
+
+ResolverSemantic contains lexical declarations, resolved symbol uses,
+definition locations, and source regions associated with lexical scopes.
+
+SemanticInfo contains checker-produced semantic information.
 */
 type Result struct {
 	PackageName string
@@ -50,7 +55,8 @@ type Result struct {
 	ResolverPackage *resolver.PackageInfo
 	CheckerPackage  *checker.PackageInfo
 
-	SemanticInfo checker.SemanticInfo
+	ResolverSemantic resolver.SemanticInfo
+	SemanticInfo     checker.SemanticInfo
 
 	Diagnostics []diag.Diagnostic
 
@@ -127,4 +133,89 @@ func (r *Result) FileByPath(
 	}
 
 	return nil
+}
+
+/*
+ScopeAt returns the innermost lexical scope associated with a source position.
+
+The offset is a UTF-8 byte offset into the file contents.
+*/
+func (r *Result) ScopeAt(
+	path string,
+	offset int,
+) *resolver.Scope {
+	if r == nil {
+		return nil
+	}
+
+	file :=
+		r.FileByPath(
+			path,
+		)
+
+	if file == nil ||
+		file.Source == nil {
+		return nil
+	}
+
+	return r.ResolverSemantic.ScopeAt(
+		file.Source,
+		offset,
+	)
+}
+
+/*
+ResolvedUseAt returns the smallest resolved symbol use containing the supplied
+UTF-8 byte offset.
+*/
+func (r *Result) ResolvedUseAt(
+	path string,
+	offset int,
+) *resolver.ResolvedUse {
+	if r == nil {
+		return nil
+	}
+
+	file :=
+		r.FileByPath(
+			path,
+		)
+
+	if file == nil ||
+		file.Source == nil {
+		return nil
+	}
+
+	return r.ResolverSemantic.UseAt(
+		file.Source,
+		offset,
+	)
+}
+
+/*
+DefinitionAt returns the declaration whose name contains the supplied UTF-8
+byte offset.
+*/
+func (r *Result) DefinitionAt(
+	path string,
+	offset int,
+) *resolver.Definition {
+	if r == nil {
+		return nil
+	}
+
+	file :=
+		r.FileByPath(
+			path,
+		)
+
+	if file == nil ||
+		file.Source == nil {
+		return nil
+	}
+
+	return r.ResolverSemantic.DefinitionAt(
+		file.Source,
+		offset,
+	)
 }

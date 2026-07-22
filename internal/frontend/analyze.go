@@ -100,6 +100,14 @@ func AnalyzePackage(
 			result.Combined,
 		)
 
+	/*
+		Resolver semantic information remains useful even when resolution reports an
+		error. Retain every declaration, successful symbol use, and scope region that
+		was discovered before the failure.
+	*/
+	result.ResolverSemantic =
+		resolverInstance.SemanticInfo()
+
 	allDiagnostics.AddDiagnostics(
 		resolutionReporter.Diagnostics(),
 	)

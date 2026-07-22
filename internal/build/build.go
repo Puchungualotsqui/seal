@@ -408,48 +408,211 @@ func sameOrInside(parent string, child string) (bool, error) {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)), nil
 }
 
-func FindPackageContaining(path string, packages map[string]*Package) (*Package, error) {
-	abs, err := filepath.Abs(path)
+func FindPackageContaining(
+	path string,
+	packages map[string]*Package,
+) (*Package, error) {
+	abs, err :=
+		filepath.Abs(
+			path,
+		)
+
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := os.Stat(abs)
+	info, err :=
+		os.Stat(
+			abs,
+		)
+
 	if err != nil {
 		return nil, err
 	}
 
 	if !info.IsDir() {
-		abs = filepath.Dir(abs)
+		abs =
+			filepath.Dir(
+				abs,
+			)
 	}
 
+	return FindPackageContainingPath(
+		abs,
+		packages,
+	)
+}
+
+/*
+FindPackageContainingPath finds the package whose root most specifically
+contains path.
+
+Unlike FindPackageContaining, this function does not call os.Stat and therefore
+works for:
+
+  - unsaved editor documents;
+  - newly created files;
+  - deleted files that remain open in an editor;
+  - prospective paths that do not exist yet.
+
+The function treats a path ending in a separator as a directory. Otherwise, a
+path with a .seal suffix is treated as a source file and its parent directory is
+used for containment checks.
+
+For other nonexistent paths, the path itself is checked first. This allows both
+directory-like and file-like paths to work when their intended form can be
+determined from package containment.
+*/
+func FindPackageContainingPath(
+	path string,
+	packages map[string]*Package,
+) (*Package, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil,
+			fmt.Errorf(
+				"package lookup path cannot be empty",
+			)
+	}
+
+	abs, err :=
+		filepath.Abs(
+			path,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	abs =
+		filepath.Clean(
+			abs,
+		)
+
+	candidates :=
+		packageContainmentCandidates(
+			abs,
+		)
+
 	var best *Package
-	bestLen := -1
+	bestLength := -1
 
-	for _, pkg := range packages {
-		root, err := filepath.Abs(pkg.Config.RootDir)
-		if err != nil {
-			return nil, err
-		}
-
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			continue
-		}
-
-		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
-			if len(root) > bestLen {
-				best = pkg
-				bestLen = len(root)
+	for _, candidate := range candidates {
+		for _, pkg := range packages {
+			if pkg == nil {
+				continue
 			}
+
+			root :=
+				pkg.Config.RootDir
+
+			if strings.TrimSpace(root) == "" {
+				if pkg.Path == "" {
+					continue
+				}
+
+				root =
+					filepath.Dir(
+						pkg.Path,
+					)
+			}
+
+			rootAbs, err :=
+				filepath.Abs(
+					root,
+				)
+
+			if err != nil {
+				return nil, err
+			}
+
+			rootAbs =
+				filepath.Clean(
+					rootAbs,
+				)
+
+			inside, err :=
+				sameOrInside(
+					rootAbs,
+					candidate,
+				)
+
+			if err != nil {
+				continue
+			}
+
+			if !inside {
+				continue
+			}
+
+			if len(rootAbs) >
+				bestLength {
+				best = pkg
+				bestLength =
+					len(rootAbs)
+			}
+		}
+
+		/*
+			The first candidate is the most literal interpretation of the path.
+			Only try its parent when no package contains that path.
+		*/
+		if best != nil {
+			break
 		}
 	}
 
 	if best == nil {
-		return nil, fmt.Errorf("no package contains %s", path)
+		return nil,
+			fmt.Errorf(
+				"no package contains %s",
+				path,
+			)
 	}
 
 	return best, nil
+}
+
+/*
+packageContainmentCandidates returns possible directories to use for package
+containment.
+
+A Seal source path is unambiguously a file path, even when the file does not
+exist. Other paths are first treated literally and then as possible file paths.
+*/
+func packageContainmentCandidates(
+	path string,
+) []string {
+	path =
+		filepath.Clean(
+			path,
+		)
+
+	if strings.EqualFold(
+		filepath.Ext(path),
+		".seal",
+	) {
+		return []string{
+			filepath.Dir(
+				path,
+			),
+		}
+	}
+
+	parent :=
+		filepath.Dir(
+			path,
+		)
+
+	if parent == path {
+		return []string{
+			path,
+		}
+	}
+
+	return []string{
+		path,
+		parent,
+	}
 }
 
 func BuildOrder(root *Package, packages map[string]*Package) ([]*Package, error) {
