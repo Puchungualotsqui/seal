@@ -21,18 +21,21 @@ const (
 	methodDidSave   = "textDocument/didSave"
 	methodDidClose  = "textDocument/didClose"
 
-	methodDefinition = "textDocument/definition"
-	methodCompletion = "textDocument/completion"
-	methodHover      = "textDocument/hover"
+	methodDefinition    = "textDocument/definition"
+	methodCompletion    = "textDocument/completion"
+	methodHover         = "textDocument/hover"
+	methodSignatureHelp = "textDocument/signatureHelp"
+	methodFormatting    = "textDocument/formatting"
+
+	methodDocumentSymbol = "textDocument/documentSymbol"
+	methodReferences     = "textDocument/references"
+	methodPrepareRename  = "textDocument/prepareRename"
+	methodRename         = "textDocument/rename"
 
 	methodPublishDiagnostics = "textDocument/publishDiagnostics"
 
 	methodCancelRequest = "$/cancelRequest"
 	methodSetTrace      = "$/setTrace"
-
-	methodSignatureHelp = "textDocument/signatureHelp"
-
-	methodFormatting = "textDocument/formatting"
 )
 
 const (
@@ -104,6 +107,9 @@ type ServerCapabilities struct {
 	DefinitionProvider         bool                  `json:"definitionProvider,omitempty"`
 	HoverProvider              bool                  `json:"hoverProvider,omitempty"`
 	DocumentFormattingProvider bool                  `json:"documentFormattingProvider,omitempty"`
+	DocumentSymbolProvider     bool                  `json:"documentSymbolProvider,omitempty"`
+	ReferencesProvider         bool                  `json:"referencesProvider,omitempty"`
+	RenameProvider             *RenameOptions        `json:"renameProvider,omitempty"`
 	CompletionProvider         *CompletionOptions    `json:"completionProvider,omitempty"`
 	SignatureHelpProvider      *SignatureHelpOptions `json:"signatureHelpProvider,omitempty"`
 }
@@ -125,6 +131,91 @@ type FormattingOptions struct {
 type TextEdit struct {
 	Range   Range  `json:"range"`
 	NewText string `json:"newText"`
+}
+
+type DocumentSymbolParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+}
+
+type DocumentSymbolKind int
+
+const (
+	DocumentSymbolFile          DocumentSymbolKind = 1
+	DocumentSymbolModule        DocumentSymbolKind = 2
+	DocumentSymbolNamespace     DocumentSymbolKind = 3
+	DocumentSymbolPackage       DocumentSymbolKind = 4
+	DocumentSymbolClass         DocumentSymbolKind = 5
+	DocumentSymbolMethod        DocumentSymbolKind = 6
+	DocumentSymbolProperty      DocumentSymbolKind = 7
+	DocumentSymbolField         DocumentSymbolKind = 8
+	DocumentSymbolConstructor   DocumentSymbolKind = 9
+	DocumentSymbolEnum          DocumentSymbolKind = 10
+	DocumentSymbolInterface     DocumentSymbolKind = 11
+	DocumentSymbolFunction      DocumentSymbolKind = 12
+	DocumentSymbolVariable      DocumentSymbolKind = 13
+	DocumentSymbolConstant      DocumentSymbolKind = 14
+	DocumentSymbolString        DocumentSymbolKind = 15
+	DocumentSymbolNumber        DocumentSymbolKind = 16
+	DocumentSymbolBoolean       DocumentSymbolKind = 17
+	DocumentSymbolArray         DocumentSymbolKind = 18
+	DocumentSymbolObject        DocumentSymbolKind = 19
+	DocumentSymbolKey           DocumentSymbolKind = 20
+	DocumentSymbolNull          DocumentSymbolKind = 21
+	DocumentSymbolEnumMember    DocumentSymbolKind = 22
+	DocumentSymbolStruct        DocumentSymbolKind = 23
+	DocumentSymbolEvent         DocumentSymbolKind = 24
+	DocumentSymbolOperator      DocumentSymbolKind = 25
+	DocumentSymbolTypeParameter DocumentSymbolKind = 26
+)
+
+type DocumentSymbol struct {
+	Name string `json:"name"`
+
+	Detail string `json:"detail,omitempty"`
+
+	Kind DocumentSymbolKind `json:"kind"`
+
+	Range Range `json:"range"`
+
+	SelectionRange Range `json:"selectionRange"`
+
+	Children []DocumentSymbol `json:"children,omitempty"`
+}
+
+type ReferenceParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+
+	Position Position `json:"position"`
+
+	Context ReferenceContext `json:"context"`
+}
+
+type ReferenceContext struct {
+	IncludeDeclaration bool `json:"includeDeclaration"`
+}
+
+type PrepareRenameParams = TextDocumentPositionParams
+
+type PrepareRenameResult struct {
+	Range Range `json:"range"`
+
+	Placeholder string `json:"placeholder"`
+}
+
+type RenameParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+
+	Position Position `json:"position"`
+
+	NewName string `json:"newName"`
+}
+
+type RenameOptions struct {
+	PrepareProvider bool `json:"prepareProvider,omitempty"`
+}
+
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit `json:"changes,omitempty"`
 }
 
 type HoverParams = TextDocumentPositionParams

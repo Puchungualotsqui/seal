@@ -350,6 +350,12 @@ func (s *Server) handleRequest(
 					DefinitionProvider:         true,
 					HoverProvider:              true,
 					DocumentFormattingProvider: true,
+					DocumentSymbolProvider:     true,
+					ReferencesProvider:         true,
+
+					RenameProvider: &RenameOptions{
+						PrepareProvider: true,
+					},
 
 					CompletionProvider: &CompletionOptions{
 						ResolveProvider: false,
@@ -376,6 +382,158 @@ func (s *Server) handleRequest(
 					Version: s.version,
 				},
 			},
+		)
+
+	case methodDocumentSymbol:
+		params :=
+			DocumentSymbolParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		symbols, err :=
+			s.documentSymbols(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			symbols,
+		)
+
+	case methodReferences:
+		params :=
+			ReferenceParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		locations, err :=
+			s.references(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			locations,
+		)
+
+	case methodPrepareRename:
+		params :=
+			PrepareRenameParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		result, err :=
+			s.prepareRename(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			result,
+		)
+
+	case methodRename:
+		params :=
+			RenameParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		edit, err :=
+			s.rename(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			edit,
 		)
 
 	case methodFormatting:
@@ -935,26 +1093,22 @@ func (s *Server) hover(
 	resolverSemantic :=
 		&packageSnapshot.Result.ResolverSemantic
 
-	if use := resolverSemantic.UseAt(file, offset); use != nil {
+	if use :=
+		resolverSemantic.UseAt(
+			file,
+			offset,
+		); use != nil {
 		if checkerScope != nil {
-			if symbol := checkerScope.FindSymbolBySpan(use.Definition); symbol != nil {
-				hoverSpan := source.Span{
-					File:  file,
-					Start: offset,
-					End:   offset,
-				}
-
-				/*
-					For ordinary expression identifiers, ExprAt normally returns the
-					exact IdentExpr under the cursor, giving hover a proper range.
-				*/
-				if expr := checkerSemantic.ExprAt(file, offset); expr != nil {
-					hoverSpan = expr.Span()
-				}
-
+			if symbol :=
+				checkerScope.FindSymbolBySpan(
+					use.Definition,
+				); symbol != nil {
 				return hoverFromText(
-					checkerSymbolHoverText(symbol, ""),
-					hoverSpan,
+					checkerSymbolHoverText(
+						symbol,
+						"",
+					),
+					use.Use,
 				), nil
 			}
 		}

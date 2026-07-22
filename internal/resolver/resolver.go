@@ -371,6 +371,11 @@ symbols. Builtin identifies compiler-provided symbols.
 PackageName is set for package symbols and package-qualified members.
 */
 type ResolvedUse struct {
+	/*
+		Use is the exact source occurrence of the identifier.
+
+		Definition is the declaration span that this occurrence resolves to.
+	*/
 	Use        source.Span
 	Definition source.Span
 
@@ -546,6 +551,83 @@ func (i *SemanticInfo) DefinitionAt(
 	}
 
 	return &i.Definitions[bestIndex]
+}
+
+/*
+UsesOfDefinition returns every source occurrence resolved to definition.
+
+The declaration itself is not included. LSP references can include the
+declaration separately according to ReferenceContext.IncludeDeclaration.
+*/
+func (i *SemanticInfo) UsesOfDefinition(
+	definition source.Span,
+) []source.Span {
+	if i == nil ||
+		definition.File == nil {
+		return nil
+	}
+
+	var uses []source.Span
+
+	for index := range i.Uses {
+		use :=
+			&i.Uses[index]
+
+		if use.Use.File == nil ||
+			use.Definition.File == nil {
+			continue
+		}
+
+		if !sameSourceFile(
+			use.Definition.File,
+			definition.File,
+		) {
+			continue
+		}
+
+		if use.Definition.Start !=
+			definition.Start ||
+			use.Definition.End !=
+				definition.End {
+			continue
+		}
+
+		uses =
+			append(
+				uses,
+				use.Use,
+			)
+	}
+
+	sort.SliceStable(
+		uses,
+		func(
+			left int,
+			right int,
+		) bool {
+			leftPath :=
+				uses[left].File.Path
+
+			rightPath :=
+				uses[right].File.Path
+
+			if leftPath != rightPath {
+				return leftPath <
+					rightPath
+			}
+
+			if uses[left].Start !=
+				uses[right].Start {
+				return uses[left].Start <
+					uses[right].Start
+			}
+
+			return uses[left].End <
+				uses[right].End
+		},
+	)
+
+	return uses
 }
 
 func sameSourceFile(
