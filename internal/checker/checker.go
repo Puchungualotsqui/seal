@@ -827,18 +827,28 @@ type LenResolution struct {
 }
 
 type Scope struct {
-	Parent  *Scope
-	Symbols map[string]*Symbol
+	Parent   *Scope
+	Children []*Scope
+	Symbols  map[string]*Symbol
 
 	// Top-level impl patterns prepared in this scope.
 	Impls []*ImplInfo
 }
 
 func NewScope(parent *Scope) *Scope {
-	return &Scope{
+	scope := &Scope{
 		Parent:  parent,
 		Symbols: map[string]*Symbol{},
 	}
+
+	if parent != nil {
+		parent.Children = append(
+			parent.Children,
+			scope,
+		)
+	}
+
+	return scope
 }
 
 func (s *Scope) LookupLocal(name string) *Symbol {

@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"seal/internal/checker"
 	"seal/internal/diag"
 	"seal/internal/resolver"
 	"seal/internal/source"
@@ -678,12 +679,14 @@ func (s *Server) definition(
 }
 
 /*
-completion returns package members after packageName. and otherwise returns all
-lexically visible symbols.
+completion returns:
+
+  - package members after packageName.
+  - checker-resolved fields after value.
+  - otherwise all lexically visible symbols.
 
 The client performs prefix and fuzzy filtering using FilterText. Sending all
-visible symbols provides better results than strict server-side prefix
-filtering.
+available candidates gives better results than strict server-side filtering.
 */
 func (s *Server) completion(
 	params CompletionParams,
@@ -716,11 +719,11 @@ func (s *Server) completion(
 		return empty, nil
 	}
 
-	semantic :=
+	resolverSemantic :=
 		&packageSnapshot.Result.ResolverSemantic
 
 	scope :=
-		semantic.ScopeAt(
+		resolverSemantic.ScopeAt(
 			file,
 			offset,
 		)
@@ -736,58 +739,117 @@ func (s *Server) completion(
 		)
 
 	if context.AfterDot {
-		if context.PackageName == "" {
+		/*
+			First interpret a simple identifier receiver as a package.
+
+			    io.
+			    collections.Arr
+		*/
+		if context.PackageName != "" {
+			symbol :=
+				scope.LookupVisible(
+					context.PackageName,
+				)
+
+			if symbol != nil &&
+				symbol.Kind ==
+					resolver.SymbolPackage &&
+				symbol.Package != nil {
+				items :=
+					make(
+						[]CompletionItem,
+						0,
+						len(
+							symbol.Package.Symbols,
+						),
+					)
+
+				for _, member := range symbol.Package.Symbols {
+					if member == nil ||
+						member.Name == "" {
+						continue
+					}
+
+					items =
+						append(
+							items,
+							makeCompletionItem(
+								member.Name,
+								member.Kind,
+								fmt.Sprintf(
+									"%s from package %s",
+									member.Kind.String(),
+									symbol.Package.Name,
+								),
+							),
+						)
+				}
+
+				sortCompletionItems(
+					items,
+				)
+
+				return CompletionList{
+					IsIncomplete: false,
+
+					Items: items,
+				}, nil
+			}
+		}
+
+		/*
+			The receiver may be any checked expression:
+
+			    value.
+			    pointer.
+			    call().
+			    list[index].
+			    object.child.
+
+			Completion is often requested while the selector itself is
+			incomplete, so locate the checked expression immediately before
+			the dot instead of requiring a complete SelectorExpr.
+		*/
+		checkerSemantic :=
+			packageSnapshot.Result.SemanticInfo
+
+		receiverType,
+			receiverExpr,
+			found :=
+			checkerSemantic.TypeEndingAtOrBefore(
+				file,
+				context.DotOffset,
+			)
+
+		if !found ||
+			receiverExpr == nil {
 			return empty, nil
 		}
 
-		symbol :=
-			scope.LookupVisible(
-				context.PackageName,
-			)
+		receiverSpan :=
+			receiverExpr.Span()
 
-		if symbol == nil ||
-			symbol.Kind != resolver.SymbolPackage ||
-			symbol.Package == nil {
-			/*
-				Fields and methods on ordinary runtime values require checker
-				type information and will be added in a later layer.
-			*/
+		if !onlyWhitespaceBetween(
+			file.Text,
+			receiverSpan.End,
+			context.DotOffset,
+		) {
 			return empty, nil
 		}
 
 		items :=
-			make(
-				[]CompletionItem,
-				0,
-				len(symbol.Package.Symbols),
+			selectorFieldCompletionItems(
+				receiverType,
 			)
 
-		for _, member := range symbol.Package.Symbols {
-			if member == nil ||
-				member.Name == "" {
-				continue
-			}
-
-			items =
-				append(
-					items,
-					makeCompletionItem(
-						member.Name,
-						member.Kind,
-						fmt.Sprintf(
-							"%s from package %s",
-							member.Kind.String(),
-							symbol.Package.Name,
-						),
-					),
-				)
+		if len(items) == 0 {
+			return empty, nil
 		}
-
-		sortCompletionItems(items)
 
 		return CompletionList{
 			IsIncomplete: false,
-			Items:        items,
+
+			Items: items,
 		}, nil
 	}
 
@@ -855,7 +917,9 @@ func (s *Server) completion(
 
 					Detail: "interface requirement",
 
-					SortText: completionSortText(name),
+					SortText: completionSortText(
+						name,
+					),
 
 					FilterText: name,
 
@@ -1043,8 +1107,17 @@ func protocolRangeFromSpan(
 }
 
 type completionContext struct {
-	AfterDot    bool
+	AfterDot bool
+
+	/*
+		PackageName is the simple identifier directly before the dot. It is
+		also populated for ordinary identifiers; the completion handler decides
+		whether that identifier actually denotes a package.
+	*/
 	PackageName string
+
+	// DotOffset is the byte offset of the selector dot.
+	DotOffset int
 }
 
 /*
@@ -1054,8 +1127,14 @@ completionContextAt recognizes:
 	package.Member
 	package . Member
 
+It also records the dot for arbitrary expression receivers:
+
+	call().
+	items[index].
+	value.field.
+
 The parser is not used because completion is often requested while the current
-expression is syntactically incomplete.
+selector is syntactically incomplete.
 */
 func completionContextAt(
 	text string,
@@ -1094,7 +1173,11 @@ func completionContextAt(
 		return completionContext{}
 	}
 
-	cursor -= width
+	dotOffset :=
+		cursor -
+			width
+
+	cursor = dotOffset
 
 	cursor =
 		skipWhitespaceBackward(
@@ -1111,6 +1194,8 @@ func completionContextAt(
 	if packageStart == cursor {
 		return completionContext{
 			AfterDot: true,
+
+			DotOffset: dotOffset,
 		}
 	}
 
@@ -1118,7 +1203,150 @@ func completionContextAt(
 		AfterDot: true,
 
 		PackageName: text[packageStart:cursor],
+
+		DotOffset: dotOffset,
 	}
+}
+
+/*
+selectorFieldCompletionItems returns fields accessible through Seal selector
+syntax.
+
+The checker currently performs one automatic pointer dereference during field
+selection, so completion follows the same rule.
+*/
+func selectorFieldCompletionItems(
+	typ *checker.Type,
+) []CompletionItem {
+	typ =
+		selectorFieldContainerType(
+			typ,
+		)
+
+	if typ == nil {
+		return []CompletionItem{}
+	}
+
+	items :=
+		make(
+			[]CompletionItem,
+			0,
+			len(typ.Fields),
+		)
+
+	seen :=
+		map[string]bool{}
+
+	for _, field := range typ.Fields {
+		if field.Name == "" ||
+			seen[field.Name] {
+			continue
+		}
+
+		seen[field.Name] = true
+
+		detail :=
+			"field"
+
+		if field.Type != nil {
+			detail =
+				"field: " +
+					field.Type.String()
+		}
+
+		items =
+			append(
+				items,
+				CompletionItem{
+					Label: field.Name,
+
+					Kind: CompletionItemField,
+
+					Detail: detail,
+
+					SortText: completionSortText(
+						field.Name,
+					),
+
+					FilterText: field.Name,
+
+					InsertText: field.Name,
+				},
+			)
+	}
+
+	sortCompletionItems(
+		items,
+	)
+
+	return items
+}
+
+func selectorFieldContainerType(
+	typ *checker.Type,
+) *checker.Type {
+	if typ == nil {
+		return nil
+	}
+
+	/*
+		Match checkSelectorExpr, which automatically dereferences one typed
+		pointer before looking for fields.
+	*/
+	if typ.Kind ==
+		checker.TypePointer {
+		typ = typ.Elem
+	}
+
+	if typ == nil {
+		return nil
+	}
+
+	switch typ.Kind {
+	case checker.TypeStruct,
+		checker.TypeTypeParam:
+		return typ
+
+	default:
+		return nil
+	}
+}
+
+/*
+onlyWhitespaceBetween verifies that the expression selected by
+ExprEndingAtOrBefore is directly adjacent to the completion dot, allowing
+formatting whitespace:
+
+	value .
+*/
+func onlyWhitespaceBetween(
+	text string,
+	start int,
+	end int,
+) bool {
+	if start < 0 {
+		start = 0
+	}
+
+	if end < 0 {
+		end = 0
+	}
+
+	if start > len(text) {
+		start = len(text)
+	}
+
+	if end > len(text) {
+		end = len(text)
+	}
+
+	if start > end {
+		return false
+	}
+
+	return strings.TrimSpace(
+		text[start:end],
+	) == ""
 }
 
 func identifierStart(
