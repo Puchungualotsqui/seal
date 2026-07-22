@@ -1,0 +1,1830 @@
+/*
+The parser operates on UTF-8 bytes rather than Unicode-scalar indexing.
+
+Error offsets are zero-based byte offsets into the original source.
+*/
+
+_Parser :: struct {
+    Source string
+    Data rawptr
+    Length uint
+    Offset uint
+
+    Allocator mem.Allocator
+    Deallocator mem.Deallocator
+}
+
+_MaximumNestingDepth :: pure task(
+) uint {
+    return 512
+}
+
+_ByteIsDigit :: pure task(
+    value u8,
+) bool {
+    return value >= 48 &&
+        value <= 57
+}
+
+_ByteIsNonZeroDigit :: pure task(
+    value u8,
+) bool {
+    return value >= 49 &&
+        value <= 57
+}
+
+_ByteIsWhitespace :: pure task(
+    value u8,
+) bool {
+    return value == 32 ||
+        value == 9 ||
+        value == 10 ||
+        value == 13
+}
+
+_ByteIsContinuation :: pure task(
+    value u8,
+) bool {
+    return value >= 128 &&
+        value <= 191
+}
+
+_ParserAtEnd :: pure task(
+    parser *_Parser,
+) bool {
+    return parser.Offset >=
+        parser.Length
+}
+
+_ParserByteAt :: pure task(
+    parser *_Parser,
+    offset uint,
+) u8, bool {
+    if offset >=
+        parser.Length {
+        return 0, false
+    }
+
+    return parser.Data[
+        cast<int>(offset)
+    ], true
+}
+
+_ParserPeek :: pure task(
+    parser *_Parser,
+) u8, bool {
+    return _ParserByteAt(
+        parser,
+        parser.Offset,
+    )
+}
+
+_SkipWhitespace :: task(
+    parser *_Parser,
+) {
+    for parser.Offset <
+        parser.Length {
+        value :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset,
+                )
+            ]
+
+        if !_ByteIsWhitespace(
+            value,
+        ) {
+            return
+        }
+
+        parser.Offset += 1
+    }
+}
+
+_MatchLiteral :: task(
+    parser *_Parser,
+    expected string,
+) bool {
+    expectedLength :=
+        size(expected)
+
+    if expectedLength >
+        parser.Length -
+            parser.Offset {
+        return false
+    }
+
+    expectedData :=
+        cast<rawptr>(
+            expected,
+        )
+
+    index: uint = 0
+
+    for index <
+        expectedLength {
+        sourceByte :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset +
+                    index,
+                )
+            ]
+
+        expectedByte :=
+            expectedData[
+                cast<int>(index)
+            ]
+
+        if sourceByte !=
+            expectedByte {
+            return false
+        }
+
+        index += 1
+    }
+
+    parser.Offset +=
+        expectedLength
+
+    return true
+}
+
+_HexValue :: pure task(
+    value u8,
+) u32, bool {
+    if value >= 48 &&
+        value <= 57 {
+        return cast<u32>(
+            value - 48,
+        ), true
+    }
+
+    if value >= 65 &&
+        value <= 70 {
+        return cast<u32>(
+            value - 65 + 10,
+        ), true
+    }
+
+    if value >= 97 &&
+        value <= 102 {
+        return cast<u32>(
+            value - 97 + 10,
+        ), true
+    }
+
+    return cast<u32>(0),
+        false
+}
+
+_ReadHex4 :: task(
+    parser *_Parser,
+) u32, bool {
+    remaining :=
+        parser.Length -
+        parser.Offset
+
+    if remaining < 4 {
+        return cast<u32>(0),
+            false
+    }
+
+    result: u32 = 0
+    index: uint = 0
+
+    for index < 4 {
+        value :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset +
+                    index,
+                )
+            ]
+
+        digit, valid :=
+            _HexValue(
+                value,
+            )
+
+        if !valid {
+            return cast<u32>(0),
+                false
+        }
+
+        result =
+            result *
+                16 +
+            digit
+
+        index += 1
+    }
+
+    parser.Offset += 4
+
+    return result, true
+}
+
+/*
+_UTF8WidthAt validates one UTF-8 sequence and returns its byte width.
+*/
+_UTF8WidthAt :: pure task(
+    data rawptr,
+    offset uint,
+    length uint,
+) uint, bool {
+    if data == nil ||
+        offset >= length {
+        return 0, false
+    }
+
+    first :=
+        data[
+            cast<int>(offset)
+        ]
+
+    if first <= 127 {
+        return 1, true
+    }
+
+    remaining :=
+        length -
+        offset
+
+    if first >= 194 &&
+        first <= 223 {
+        if remaining < 2 {
+            return 0, false
+        }
+
+        second :=
+            data[
+                cast<int>(
+                    offset + 1,
+                )
+            ]
+
+        if !_ByteIsContinuation(
+            second,
+        ) {
+            return 0, false
+        }
+
+        return 2, true
+    }
+
+    if first >= 224 &&
+        first <= 239 {
+        if remaining < 3 {
+            return 0, false
+        }
+
+        second :=
+            data[
+                cast<int>(
+                    offset + 1,
+                )
+            ]
+
+        third :=
+            data[
+                cast<int>(
+                    offset + 2,
+                )
+            ]
+
+        if !_ByteIsContinuation(
+            third,
+        ) {
+            return 0, false
+        }
+
+        if first == 224 {
+            if second < 160 ||
+                second > 191 {
+                return 0, false
+            }
+        } else if first == 237 {
+            if second < 128 ||
+                second > 159 {
+                return 0, false
+            }
+        } else if !_ByteIsContinuation(
+            second,
+        ) {
+            return 0, false
+        }
+
+        return 3, true
+    }
+
+    if first >= 240 &&
+        first <= 244 {
+        if remaining < 4 {
+            return 0, false
+        }
+
+        second :=
+            data[
+                cast<int>(
+                    offset + 1,
+                )
+            ]
+
+        third :=
+            data[
+                cast<int>(
+                    offset + 2,
+                )
+            ]
+
+        fourth :=
+            data[
+                cast<int>(
+                    offset + 3,
+                )
+            ]
+
+        if !_ByteIsContinuation(
+                third,
+            ) ||
+            !_ByteIsContinuation(
+                fourth,
+            ) {
+            return 0, false
+        }
+
+        if first == 240 {
+            if second < 144 ||
+                second > 191 {
+                return 0, false
+            }
+        } else if first == 244 {
+            if second < 128 ||
+                second > 143 {
+                return 0, false
+            }
+        } else if !_ByteIsContinuation(
+            second,
+        ) {
+            return 0, false
+        }
+
+        return 4, true
+    }
+
+    return 0, false
+}
+
+_WriteUnicodeScalar :: task(
+    destination rawptr,
+    writeOffset uint,
+    scalar u32,
+) uint {
+    if scalar <= 127 {
+        destination[
+            cast<int>(writeOffset)
+        ] = cast<u8>(
+            scalar,
+        )
+
+        return writeOffset + 1
+    }
+
+    if scalar <= 2047 {
+        destination[
+            cast<int>(writeOffset)
+        ] = cast<u8>(
+            192 |
+            (scalar >> 6),
+        )
+
+        destination[
+            cast<int>(
+                writeOffset + 1,
+            )
+        ] = cast<u8>(
+            128 |
+            (scalar & 63),
+        )
+
+        return writeOffset + 2
+    }
+
+    if scalar <= 65535 {
+        destination[
+            cast<int>(writeOffset)
+        ] = cast<u8>(
+            224 |
+            (scalar >> 12),
+        )
+
+        destination[
+            cast<int>(
+                writeOffset + 1,
+            )
+        ] = cast<u8>(
+            128 |
+            (
+                scalar >>
+                6
+            ) &
+            63,
+        )
+
+        destination[
+            cast<int>(
+                writeOffset + 2,
+            )
+        ] = cast<u8>(
+            128 |
+            (scalar & 63),
+        )
+
+        return writeOffset + 3
+    }
+
+    destination[
+        cast<int>(writeOffset)
+    ] = cast<u8>(
+        240 |
+        (scalar >> 18),
+    )
+
+    destination[
+        cast<int>(
+            writeOffset + 1,
+        )
+    ] = cast<u8>(
+        128 |
+        (
+            scalar >>
+            12
+        ) &
+        63,
+    )
+
+    destination[
+        cast<int>(
+            writeOffset + 2,
+        )
+    ] = cast<u8>(
+        128 |
+        (
+            scalar >>
+            6
+        ) &
+        63,
+    )
+
+    destination[
+        cast<int>(
+            writeOffset + 3,
+        )
+    ] = cast<u8>(
+        128 |
+        (scalar & 63),
+    )
+
+    return writeOffset + 4
+}
+
+_ParseString :: task(
+    parser *_Parser,
+) strings.OwnedString, Error {
+    openingOffset :=
+        parser.Offset
+
+    opening, present :=
+        _ParserPeek(
+            parser,
+        )
+
+    if !present {
+        return _EmptyOwnedString(),
+            NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+    }
+
+    if opening != 34 {
+        return _EmptyOwnedString(),
+            NewError(
+                .InvalidString,
+                parser.Offset,
+            )
+    }
+
+    parser.Offset += 1
+
+    maximumLength :=
+        parser.Length -
+        parser.Offset
+
+    allocationSize :=
+        maximumLength
+
+    if allocationSize == 0 {
+        allocationSize = 1
+    }
+
+    destination :=
+        mem.AllocWith(
+            parser.Allocator,
+            allocationSize,
+        )
+
+    if destination == nil {
+        return _EmptyOwnedString(),
+            NewError(
+                .AllocationFailed,
+                openingOffset,
+            )
+    }
+
+    writeOffset: uint = 0
+
+    for parser.Offset <
+        parser.Length {
+        byteOffset :=
+            parser.Offset
+
+        value :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset,
+                )
+            ]
+
+        parser.Offset += 1
+
+        if value == 34 {
+            return strings.OwnedString{
+                Data = destination,
+                ByteLength = writeOffset,
+            }, NoError()
+        }
+
+        if value < 32 {
+            mem.FreeWith(
+                parser.Deallocator,
+                destination,
+            )
+
+            return _EmptyOwnedString(),
+                NewError(
+                    .InvalidString,
+                    byteOffset,
+                )
+        }
+
+        if value == 92 {
+            escapeOffset :=
+                parser.Offset
+
+            if parser.Offset >=
+                parser.Length {
+                mem.FreeWith(
+                    parser.Deallocator,
+                    destination,
+                )
+
+                return _EmptyOwnedString(),
+                    NewError(
+                        .UnexpectedEnd,
+                        parser.Offset,
+                    )
+            }
+
+            escape :=
+                parser.Data[
+                    cast<int>(
+                        parser.Offset,
+                    )
+                ]
+
+            parser.Offset += 1
+
+            if escape == 34 ||
+                escape == 92 ||
+                escape == 47 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = escape
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape == 98 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = 8
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape == 102 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = 12
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape == 110 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = 10
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape == 114 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = 13
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape == 116 {
+                destination[
+                    cast<int>(
+                        writeOffset,
+                    )
+                ] = 9
+
+                writeOffset += 1
+
+                continue
+            }
+
+            if escape != 117 {
+                mem.FreeWith(
+                    parser.Deallocator,
+                    destination,
+                )
+
+                return _EmptyOwnedString(),
+                    NewError(
+                        .InvalidEscape,
+                        escapeOffset,
+                    )
+            }
+
+            firstUnit, valid :=
+                _ReadHex4(
+                    parser,
+                )
+
+            if !valid {
+                mem.FreeWith(
+                    parser.Deallocator,
+                    destination,
+                )
+
+                return _EmptyOwnedString(),
+                    NewError(
+                        .InvalidUnicodeEscape,
+                        escapeOffset,
+                    )
+            }
+
+            scalar :=
+                firstUnit
+
+            if firstUnit >= 55296 &&
+                firstUnit <= 56319 {
+                remaining :=
+                    parser.Length -
+                    parser.Offset
+
+                if remaining < 2 {
+                    mem.FreeWith(
+                        parser.Deallocator,
+                        destination,
+                    )
+
+                    return _EmptyOwnedString(),
+                        NewError(
+                            .InvalidUnicodeEscape,
+                            escapeOffset,
+                        )
+                }
+
+                slash :=
+                    parser.Data[
+                        cast<int>(
+                            parser.Offset,
+                        )
+                    ]
+
+                marker :=
+                    parser.Data[
+                        cast<int>(
+                            parser.Offset +
+                            1,
+                        )
+                    ]
+
+                if slash != 92 ||
+                    marker != 117 {
+                    mem.FreeWith(
+                        parser.Deallocator,
+                        destination,
+                    )
+
+                    return _EmptyOwnedString(),
+                        NewError(
+                            .InvalidUnicodeEscape,
+                            escapeOffset,
+                        )
+                }
+
+                parser.Offset += 2
+
+                secondUnit, secondValid :=
+                    _ReadHex4(
+                        parser,
+                    )
+
+                if !secondValid ||
+                    secondUnit < 56320 ||
+                    secondUnit > 57343 {
+                    mem.FreeWith(
+                        parser.Deallocator,
+                        destination,
+                    )
+
+                    return _EmptyOwnedString(),
+                        NewError(
+                            .InvalidUnicodeEscape,
+                            escapeOffset,
+                        )
+                }
+
+                scalar =
+                    65536 +
+                    (
+                        firstUnit -
+                        55296
+                    ) *
+                    1024 +
+                    (
+                        secondUnit -
+                        56320
+                    )
+            } else if firstUnit >= 56320 &&
+                firstUnit <= 57343 {
+                mem.FreeWith(
+                    parser.Deallocator,
+                    destination,
+                )
+
+                return _EmptyOwnedString(),
+                    NewError(
+                        .InvalidUnicodeEscape,
+                        escapeOffset,
+                    )
+            }
+
+            writeOffset =
+                _WriteUnicodeScalar(
+                    destination,
+                    writeOffset,
+                    scalar,
+                )
+
+            continue
+        }
+
+        if value <= 127 {
+            destination[
+                cast<int>(
+                    writeOffset,
+                )
+            ] = value
+
+            writeOffset += 1
+
+            continue
+        }
+
+        width, valid :=
+            _UTF8WidthAt(
+                parser.Data,
+                byteOffset,
+                parser.Length,
+            )
+
+        if !valid {
+            mem.FreeWith(
+                parser.Deallocator,
+                destination,
+            )
+
+            return _EmptyOwnedString(),
+                NewError(
+                    .InvalidUTF8,
+                    byteOffset,
+                )
+        }
+
+        copyIndex: uint = 0
+
+        for copyIndex <
+            width {
+            destination[
+                cast<int>(
+                    writeOffset +
+                    copyIndex,
+                )
+            ] = parser.Data[
+                cast<int>(
+                    byteOffset +
+                    copyIndex,
+                )
+            ]
+
+            copyIndex += 1
+        }
+
+        writeOffset +=
+            width
+
+        parser.Offset =
+            byteOffset +
+            width
+    }
+
+    mem.FreeWith(
+        parser.Deallocator,
+        destination,
+    )
+
+    return _EmptyOwnedString(),
+        NewError(
+            .UnexpectedEnd,
+            parser.Offset,
+        )
+}
+
+_ParseNumber :: task(
+    parser *_Parser,
+) Value, Error {
+    start :=
+        parser.Offset
+
+    first, present :=
+        _ParserPeek(
+            parser,
+        )
+
+    if !present {
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .UnexpectedEnd,
+            parser.Offset,
+        )
+    }
+
+    if first == 45 {
+        parser.Offset += 1
+
+        if _ParserAtEnd(
+            parser,
+        ) {
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .InvalidNumber,
+                start,
+            )
+        }
+    }
+
+    integerFirst :=
+        parser.Data[
+            cast<int>(
+                parser.Offset,
+            )
+        ]
+
+    if integerFirst == 48 {
+        parser.Offset += 1
+
+        if parser.Offset <
+            parser.Length {
+            following :=
+                parser.Data[
+                    cast<int>(
+                        parser.Offset,
+                    )
+                ]
+
+            if _ByteIsDigit(
+                following,
+            ) {
+                return NewNull(
+                    parser.Allocator,
+                    parser.Deallocator,
+                ), NewError(
+                    .InvalidNumber,
+                    start,
+                )
+            }
+        }
+    } else if _ByteIsNonZeroDigit(
+        integerFirst,
+    ) {
+        parser.Offset += 1
+
+        for parser.Offset <
+            parser.Length {
+            digit :=
+                parser.Data[
+                    cast<int>(
+                        parser.Offset,
+                    )
+                ]
+
+            if !_ByteIsDigit(
+                digit,
+            ) {
+                break
+            }
+
+            parser.Offset += 1
+        }
+    } else {
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .InvalidNumber,
+            start,
+        )
+    }
+
+    if parser.Offset <
+        parser.Length {
+        marker :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset,
+                )
+            ]
+
+        if marker == 46 {
+            parser.Offset += 1
+
+            fractionStart :=
+                parser.Offset
+
+            for parser.Offset <
+                parser.Length {
+                digit :=
+                    parser.Data[
+                        cast<int>(
+                            parser.Offset,
+                        )
+                    ]
+
+                if !_ByteIsDigit(
+                    digit,
+                ) {
+                    break
+                }
+
+                parser.Offset += 1
+            }
+
+            if parser.Offset ==
+                fractionStart {
+                return NewNull(
+                    parser.Allocator,
+                    parser.Deallocator,
+                ), NewError(
+                    .InvalidNumber,
+                    start,
+                )
+            }
+        }
+    }
+
+    if parser.Offset <
+        parser.Length {
+        marker :=
+            parser.Data[
+                cast<int>(
+                    parser.Offset,
+                )
+            ]
+
+        if marker == 101 ||
+            marker == 69 {
+            parser.Offset += 1
+
+            if parser.Offset <
+                parser.Length {
+                sign :=
+                    parser.Data[
+                        cast<int>(
+                            parser.Offset,
+                        )
+                    ]
+
+                if sign == 43 ||
+                    sign == 45 {
+                    parser.Offset += 1
+                }
+            }
+
+            exponentStart :=
+                parser.Offset
+
+            for parser.Offset <
+                parser.Length {
+                digit :=
+                    parser.Data[
+                        cast<int>(
+                            parser.Offset,
+                        )
+                    ]
+
+                if !_ByteIsDigit(
+                    digit,
+                ) {
+                    break
+                }
+
+                parser.Offset += 1
+            }
+
+            if parser.Offset ==
+                exponentStart {
+                return NewNull(
+                    parser.Allocator,
+                    parser.Deallocator,
+                ), NewError(
+                    .InvalidNumber,
+                    start,
+                )
+            }
+        }
+    }
+
+    byteLength :=
+        parser.Offset -
+        start
+
+    numberText :=
+        cast<string>(
+            cast<rawptr>(
+                &parser.Data[
+                    cast<int>(start)
+                ],
+            ),
+            byteLength,
+        )
+
+    number, valid :=
+        strconv.ParseF64(
+            numberText,
+        )
+
+    if !valid {
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .InvalidNumber,
+            start,
+        )
+    }
+
+    return NewNumber(
+        parser.Allocator,
+        parser.Deallocator,
+        number,
+    ), NoError()
+}
+
+_ParseArray :: task(
+    parser *_Parser,
+    depth uint,
+) Value, Error {
+    start :=
+        parser.Offset
+
+    parser.Offset += 1
+
+    result :=
+        NewArray(
+            parser.Allocator,
+            parser.Deallocator,
+        )
+
+    _SkipWhitespace(
+        parser,
+    )
+
+    next, present :=
+        _ParserPeek(
+            parser,
+        )
+
+    if !present {
+        DestroyValue(
+            &result,
+        )
+
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .UnexpectedEnd,
+            parser.Offset,
+        )
+    }
+
+    if next == 93 {
+        parser.Offset += 1
+
+        return result,
+            NoError()
+    }
+
+    for true {
+        item, itemError :=
+            _ParseValue(
+                parser,
+                depth + 1,
+            )
+
+        if !ErrorIsNone(
+            itemError,
+        ) {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), itemError
+        }
+
+        appendError :=
+            AppendArray(
+                &result,
+                item,
+            )
+
+        if !ErrorIsNone(
+            appendError,
+        ) {
+            DestroyValue(
+                &item,
+            )
+
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), appendError
+        }
+
+        _SkipWhitespace(
+            parser,
+        )
+
+        separator, separatorPresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !separatorPresent {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if separator == 93 {
+            parser.Offset += 1
+
+            return result,
+                NoError()
+        }
+
+        if separator != 44 {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .ExpectedCommaOrEnd,
+                parser.Offset,
+            )
+        }
+
+        parser.Offset += 1
+
+        _SkipWhitespace(
+            parser,
+        )
+
+        afterComma, afterCommaPresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !afterCommaPresent {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if afterComma == 93 {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedCharacter,
+                parser.Offset,
+            )
+        }
+    }
+
+    DestroyValue(
+        &result,
+    )
+
+    return NewNull(
+        parser.Allocator,
+        parser.Deallocator,
+    ), NewError(
+        .UnexpectedCharacter,
+        start,
+    )
+}
+
+_ParseObject :: task(
+    parser *_Parser,
+    depth uint,
+) Value, Error {
+    parser.Offset += 1
+
+    result :=
+        NewObject(
+            parser.Allocator,
+            parser.Deallocator,
+        )
+
+    _SkipWhitespace(
+        parser,
+    )
+
+    next, present :=
+        _ParserPeek(
+            parser,
+        )
+
+    if !present {
+        DestroyValue(
+            &result,
+        )
+
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .UnexpectedEnd,
+            parser.Offset,
+        )
+    }
+
+    if next == 125 {
+        parser.Offset += 1
+
+        return result,
+            NoError()
+    }
+
+    for true {
+        nameStart :=
+            parser.Offset
+
+        nameMarker, namePresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !namePresent {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if nameMarker != 34 {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .InvalidString,
+                nameStart,
+            )
+        }
+
+        name, nameError :=
+            _ParseString(
+                parser,
+            )
+
+        if !ErrorIsNone(
+            nameError,
+        ) {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), nameError
+        }
+
+        _SkipWhitespace(
+            parser,
+        )
+
+        colon, colonPresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !colonPresent {
+            strings.Destroy(
+                parser.Deallocator,
+                &name,
+            )
+
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if colon != 58 {
+            strings.Destroy(
+                parser.Deallocator,
+                &name,
+            )
+
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .ExpectedColon,
+                parser.Offset,
+            )
+        }
+
+        parser.Offset += 1
+
+        item, itemError :=
+            _ParseValue(
+                parser,
+                depth + 1,
+            )
+
+        if !ErrorIsNone(
+            itemError,
+        ) {
+            strings.Destroy(
+                parser.Deallocator,
+                &name,
+            )
+
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), itemError
+        }
+
+        appendError :=
+            AppendObjectOwned(
+                &result,
+                name,
+                item,
+            )
+
+        if !ErrorIsNone(
+            appendError,
+        ) {
+            strings.Destroy(
+                parser.Deallocator,
+                &name,
+            )
+
+            DestroyValue(
+                &item,
+            )
+
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), appendError
+        }
+
+        _SkipWhitespace(
+            parser,
+        )
+
+        separator, separatorPresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !separatorPresent {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if separator == 125 {
+            parser.Offset += 1
+
+            return result,
+                NoError()
+        }
+
+        if separator != 44 {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .ExpectedCommaOrEnd,
+                parser.Offset,
+            )
+        }
+
+        parser.Offset += 1
+
+        _SkipWhitespace(
+            parser,
+        )
+
+        afterComma, afterCommaPresent :=
+            _ParserPeek(
+                parser,
+            )
+
+        if !afterCommaPresent {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedEnd,
+                parser.Offset,
+            )
+        }
+
+        if afterComma == 125 {
+            DestroyValue(
+                &result,
+            )
+
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .UnexpectedCharacter,
+                parser.Offset,
+            )
+        }
+    }
+}
+
+_ParseValue :: task(
+    parser *_Parser,
+    depth uint,
+) Value, Error {
+    _SkipWhitespace(
+        parser,
+    )
+
+    if depth >
+        _MaximumNestingDepth() {
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .NestingTooDeep,
+            parser.Offset,
+        )
+    }
+
+    next, present :=
+        _ParserPeek(
+            parser,
+        )
+
+    if !present {
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NewError(
+            .UnexpectedEnd,
+            parser.Offset,
+        )
+    }
+
+    if next == 110 {
+        start :=
+            parser.Offset
+
+        if !_MatchLiteral(
+            parser,
+            "null",
+        ) {
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .InvalidLiteral,
+                start,
+            )
+        }
+
+        return NewNull(
+            parser.Allocator,
+            parser.Deallocator,
+        ), NoError()
+    }
+
+    if next == 116 {
+        start :=
+            parser.Offset
+
+        if !_MatchLiteral(
+            parser,
+            "true",
+        ) {
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .InvalidLiteral,
+                start,
+            )
+        }
+
+        return NewBoolean(
+            parser.Allocator,
+            parser.Deallocator,
+            true,
+        ), NoError()
+    }
+
+    if next == 102 {
+        start :=
+            parser.Offset
+
+        if !_MatchLiteral(
+            parser,
+            "false",
+        ) {
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), NewError(
+                .InvalidLiteral,
+                start,
+            )
+        }
+
+        return NewBoolean(
+            parser.Allocator,
+            parser.Deallocator,
+            false,
+        ), NoError()
+    }
+
+    if next == 34 {
+        text, textError :=
+            _ParseString(
+                parser,
+            )
+
+        if !ErrorIsNone(
+            textError,
+        ) {
+            return NewNull(
+                parser.Allocator,
+                parser.Deallocator,
+            ), textError
+        }
+
+        return NewOwnedString(
+            parser.Allocator,
+            parser.Deallocator,
+            text,
+        ), NoError()
+    }
+
+    if next == 91 {
+        return _ParseArray(
+            parser,
+            depth,
+        )
+    }
+
+    if next == 123 {
+        return _ParseObject(
+            parser,
+            depth,
+        )
+    }
+
+    if next == 45 ||
+        _ByteIsDigit(
+            next,
+        ) {
+        return _ParseNumber(
+            parser,
+        )
+    }
+
+    return NewNull(
+        parser.Allocator,
+        parser.Deallocator,
+    ), NewError(
+        .UnexpectedCharacter,
+        parser.Offset,
+    )
+}
+
+/*
+Parse parses exactly one JSON value.
+
+Leading and trailing JSON whitespace is accepted. Any other characters
+after the value cause TrailingCharacters.
+
+The returned Value owns all strings, arrays, objects, member names, and
+nested values. Release it with DestroyValue.
+*/
+Parse :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    source string,
+) Value, Error {
+    parser := _Parser{
+        Source = source,
+        Data = cast<rawptr>(
+            source,
+        ),
+        Length = size(
+            source,
+        ),
+        Offset = 0,
+
+        Allocator = allocator,
+        Deallocator = deallocator,
+    }
+
+    value, parseError :=
+        _ParseValue(
+            &parser,
+            0,
+        )
+
+    if !ErrorIsNone(
+        parseError,
+    ) {
+        return value,
+            parseError
+    }
+
+    _SkipWhitespace(
+        &parser,
+    )
+
+    if parser.Offset !=
+        parser.Length {
+        trailingOffset :=
+            parser.Offset
+
+        DestroyValue(
+            &value,
+        )
+
+        return NewNull(
+            allocator,
+            deallocator,
+        ), NewError(
+            .TrailingCharacters,
+            trailingOffset,
+        )
+    }
+
+    return value,
+        NoError()
+}

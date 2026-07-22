@@ -1,0 +1,1188 @@
+Failure :: enum {
+    ReadTestFile
+    ParseDocument
+
+    RootKind
+    RootMemberCount
+
+    NameMissing
+    NameKind
+    NameValue
+
+    ActiveMissing
+    ActiveKind
+    ActiveValue
+
+    CountMissing
+    CountKind
+    CountValue
+
+    RatioMissing
+    RatioKind
+    RatioValue
+
+    NullMissing
+    NullKind
+
+    EscapedMissing
+    EscapedKind
+    EscapedValue
+
+    UnicodeMissing
+    UnicodeKind
+    UnicodeValue
+
+    ItemsMissing
+    ItemsKind
+    ItemsLength
+
+    FirstItemMissing
+    FirstItemKind
+    FirstItemValue
+
+    SecondItemMissing
+    SecondItemKind
+    SecondItemValue
+
+    ThirdItemMissing
+    ThirdItemKind
+    ThirdItemValue
+
+    FourthItemMissing
+    FourthItemKind
+
+    FifthItemMissing
+    FifthItemKind
+    FifthItemValue
+
+    SixthItemMissing
+    SixthItemKind
+
+    NestedMissing
+    NestedKind
+    NestedValue
+
+    ObjectMissing
+    ObjectKind
+    ObjectLength
+
+    AlphaMissing
+    AlphaKind
+    AlphaValue
+
+    BetaMissing
+    BetaKind
+    BetaValue
+
+    DuplicateMissing
+    DuplicateKind
+    DuplicateValue
+
+    StringifyDocument
+    StringifyEmpty
+
+    ParseRoundTrip
+    RoundTripKind
+    RoundTripMemberCount
+
+    RoundTripUnicodeMissing
+    RoundTripUnicodeKind
+    RoundTripUnicodeValue
+
+    RoundTripDuplicateMissing
+    RoundTripDuplicateKind
+    RoundTripDuplicateValue
+}
+
+FailureString :: pure task(
+    failure Failure,
+) string {
+    if failure == .ReadTestFile {
+        return "failed to read test.json"
+    }
+
+    if failure == .ParseDocument {
+        return "failed to parse test.json"
+    }
+
+    if failure == .RootKind {
+        return "root is not an object"
+    }
+
+    if failure == .RootMemberCount {
+        return "unexpected root member count"
+    }
+
+    if failure == .NameMissing {
+        return "name member is missing"
+    }
+
+    if failure == .NameKind {
+        return "name is not a string"
+    }
+
+    if failure == .NameValue {
+        return "name has the wrong value"
+    }
+
+    if failure == .ActiveMissing {
+        return "active member is missing"
+    }
+
+    if failure == .ActiveKind {
+        return "active is not a Boolean"
+    }
+
+    if failure == .ActiveValue {
+        return "active has the wrong value"
+    }
+
+    if failure == .CountMissing {
+        return "count member is missing"
+    }
+
+    if failure == .CountKind {
+        return "count is not a number"
+    }
+
+    if failure == .CountValue {
+        return "count has the wrong value"
+    }
+
+    if failure == .RatioMissing {
+        return "ratio member is missing"
+    }
+
+    if failure == .RatioKind {
+        return "ratio is not a number"
+    }
+
+    if failure == .RatioValue {
+        return "ratio has the wrong value"
+    }
+
+    if failure == .NullMissing {
+        return "nothing member is missing"
+    }
+
+    if failure == .NullKind {
+        return "nothing is not null"
+    }
+
+    if failure == .EscapedMissing {
+        return "escaped member is missing"
+    }
+
+    if failure == .EscapedKind {
+        return "escaped is not a string"
+    }
+
+    if failure == .EscapedValue {
+        return "escaped has the wrong value"
+    }
+
+    if failure == .UnicodeMissing {
+        return "unicode member is missing"
+    }
+
+    if failure == .UnicodeKind {
+        return "unicode is not a string"
+    }
+
+    if failure == .UnicodeValue {
+        return "unicode has the wrong value"
+    }
+
+    if failure == .ItemsMissing {
+        return "items member is missing"
+    }
+
+    if failure == .ItemsKind {
+        return "items is not an array"
+    }
+
+    if failure == .ItemsLength {
+        return "items has the wrong length"
+    }
+
+    if failure == .FirstItemMissing {
+        return "first array item is missing"
+    }
+
+    if failure == .FirstItemKind {
+        return "first array item is not a number"
+    }
+
+    if failure == .FirstItemValue {
+        return "first array item has the wrong value"
+    }
+
+    if failure == .SecondItemMissing {
+        return "second array item is missing"
+    }
+
+    if failure == .SecondItemKind {
+        return "second array item is not a number"
+    }
+
+    if failure == .SecondItemValue {
+        return "second array item has the wrong value"
+    }
+
+    if failure == .ThirdItemMissing {
+        return "third array item is missing"
+    }
+
+    if failure == .ThirdItemKind {
+        return "third array item is not a Boolean"
+    }
+
+    if failure == .ThirdItemValue {
+        return "third array item has the wrong value"
+    }
+
+    if failure == .FourthItemMissing {
+        return "fourth array item is missing"
+    }
+
+    if failure == .FourthItemKind {
+        return "fourth array item is not null"
+    }
+
+    if failure == .FifthItemMissing {
+        return "fifth array item is missing"
+    }
+
+    if failure == .FifthItemKind {
+        return "fifth array item is not a string"
+    }
+
+    if failure == .FifthItemValue {
+        return "fifth array item has the wrong value"
+    }
+
+    if failure == .SixthItemMissing {
+        return "sixth array item is missing"
+    }
+
+    if failure == .SixthItemKind {
+        return "sixth array item is not an object"
+    }
+
+    if failure == .NestedMissing {
+        return "nested member is missing"
+    }
+
+    if failure == .NestedKind {
+        return "nested member is not a string"
+    }
+
+    if failure == .NestedValue {
+        return "nested member has the wrong value"
+    }
+
+    if failure == .ObjectMissing {
+        return "object member is missing"
+    }
+
+    if failure == .ObjectKind {
+        return "object member is not an object"
+    }
+
+    if failure == .ObjectLength {
+        return "object member has the wrong length"
+    }
+
+    if failure == .AlphaMissing {
+        return "alpha member is missing"
+    }
+
+    if failure == .AlphaKind {
+        return "alpha member is not a number"
+    }
+
+    if failure == .AlphaValue {
+        return "alpha member has the wrong value"
+    }
+
+    if failure == .BetaMissing {
+        return "beta member is missing"
+    }
+
+    if failure == .BetaKind {
+        return "beta member is not a number"
+    }
+
+    if failure == .BetaValue {
+        return "beta member has the wrong value"
+    }
+
+    if failure == .DuplicateMissing {
+        return "duplicate member is missing"
+    }
+
+    if failure == .DuplicateKind {
+        return "duplicate member is not a number"
+    }
+
+    if failure == .DuplicateValue {
+        return "duplicate lookup did not return the final member"
+    }
+
+    if failure == .StringifyDocument {
+        return "failed to stringify parsed document"
+    }
+
+    if failure == .StringifyEmpty {
+        return "stringified document is empty"
+    }
+
+    if failure == .ParseRoundTrip {
+        return "failed to parse stringified document"
+    }
+
+    if failure == .RoundTripKind {
+        return "round-trip root is not an object"
+    }
+
+    if failure == .RoundTripMemberCount {
+        return "round-trip member count changed"
+    }
+
+    if failure == .RoundTripUnicodeMissing {
+        return "round-trip unicode member is missing"
+    }
+
+    if failure == .RoundTripUnicodeKind {
+        return "round-trip unicode member is not a string"
+    }
+
+    if failure == .RoundTripUnicodeValue {
+        return "round-trip unicode value changed"
+    }
+
+    if failure == .RoundTripDuplicateMissing {
+        return "round-trip duplicate member is missing"
+    }
+
+    if failure == .RoundTripDuplicateKind {
+        return "round-trip duplicate member is not a number"
+    }
+
+    return "round-trip duplicate value changed"
+}
+
+Require :: task(
+    condition bool,
+    failure Failure,
+) {
+    if condition {
+        return
+    }
+
+    fmt.Println(
+        "JSON test failed: %v",
+        FailureString(
+            failure,
+        ),
+    )
+
+    panic(
+        FailureString(
+            failure,
+        ),
+    )
+}
+
+RequireJSONError :: task(
+    error json.Error,
+    failure Failure,
+) {
+    if json.ErrorIsNone(
+        error,
+    ) {
+        return
+    }
+
+    fmt.Println(
+        "JSON test failed: %v",
+        FailureString(
+            failure,
+        ),
+    )
+
+    fmt.Println(
+        "JSON error at byte %v: %v",
+        error.Offset,
+        json.ErrorString(
+            error,
+        ),
+    )
+
+    panic(
+        FailureString(
+            failure,
+        ),
+    )
+}
+
+RequireOSError :: task(
+    error os.Error,
+    failure Failure,
+) {
+    if os.ErrorIsNone(
+        error,
+    ) {
+        return
+    }
+
+    fmt.Println(
+        "JSON test failed: %v",
+        FailureString(
+            failure,
+        ),
+    )
+
+    fmt.Println(
+        "OS error: %v",
+        os.ErrorString(
+            error,
+        ),
+    )
+
+    panic(
+        FailureString(
+            failure,
+        ),
+    )
+}
+
+TestRootScalars :: task(
+    root *json.Value,
+) {
+    Require(
+        json.IsObject(
+            root,
+        ),
+        .RootKind,
+    )
+
+    Require(
+        json.ObjectLength(
+            root,
+        ) == 11,
+        .RootMemberCount,
+    )
+
+    name, found :=
+        json.ObjectGet(
+            root,
+            "name",
+        )
+
+    Require(
+        found,
+        .NameMissing,
+    )
+
+    nameText, valid :=
+        json.StringValue(
+            &name,
+        )
+
+    Require(
+        valid,
+        .NameKind,
+    )
+
+    Require(
+        nameText ==
+            "Seal JSON",
+        .NameValue,
+    )
+
+    active, found :=
+        json.ObjectGet(
+            root,
+            "active",
+        )
+
+    Require(
+        found,
+        .ActiveMissing,
+    )
+
+    activeValue, valid :=
+        json.BooleanValue(
+            &active,
+        )
+
+    Require(
+        valid,
+        .ActiveKind,
+    )
+
+    Require(
+        activeValue,
+        .ActiveValue,
+    )
+
+    count, found :=
+        json.ObjectGet(
+            root,
+            "count",
+        )
+
+    Require(
+        found,
+        .CountMissing,
+    )
+
+    countValue, valid :=
+        json.NumberValue(
+            &count,
+        )
+
+    Require(
+        valid,
+        .CountKind,
+    )
+
+    Require(
+        countValue ==
+            cast<f64>(3),
+        .CountValue,
+    )
+
+    ratio, found :=
+        json.ObjectGet(
+            root,
+            "ratio",
+        )
+
+    Require(
+        found,
+        .RatioMissing,
+    )
+
+    ratioValue, valid :=
+        json.NumberValue(
+            &ratio,
+        )
+
+    Require(
+        valid,
+        .RatioKind,
+    )
+
+    Require(
+        ratioValue ==
+            cast<f64>(-1250),
+        .RatioValue,
+    )
+
+    nothing, found :=
+        json.ObjectGet(
+            root,
+            "nothing",
+        )
+
+    Require(
+        found,
+        .NullMissing,
+    )
+
+    Require(
+        json.IsNull(
+            &nothing,
+        ),
+        .NullKind,
+    )
+
+    escaped, found :=
+        json.ObjectGet(
+            root,
+            "escaped",
+        )
+
+    Require(
+        found,
+        .EscapedMissing,
+    )
+
+    escapedText, valid :=
+        json.StringValue(
+            &escaped,
+        )
+
+    Require(
+        valid,
+        .EscapedKind,
+    )
+
+    Require(
+        escapedText ==
+            "quote: \" slash: \\ newline:\n tab:\t",
+        .EscapedValue,
+    )
+
+    unicode, found :=
+        json.ObjectGet(
+            root,
+            "unicode",
+        )
+
+    Require(
+        found,
+        .UnicodeMissing,
+    )
+
+    unicodeText, valid :=
+        json.StringValue(
+            &unicode,
+        )
+
+    Require(
+        valid,
+        .UnicodeKind,
+    )
+
+    Require(
+        unicodeText ==
+            "Bolivia 🇧🇴",
+        .UnicodeValue,
+    )
+}
+
+TestArray :: task(
+    root *json.Value,
+) {
+    items, found :=
+        json.ObjectGet(
+            root,
+            "items",
+        )
+
+    Require(
+        found,
+        .ItemsMissing,
+    )
+
+    Require(
+        json.IsArray(
+            &items,
+        ),
+        .ItemsKind,
+    )
+
+    Require(
+        json.ArrayLength(
+            &items,
+        ) == 6,
+        .ItemsLength,
+    )
+
+    first, found :=
+        json.ArrayGet(
+            &items,
+            0,
+        )
+
+    Require(
+        found,
+        .FirstItemMissing,
+    )
+
+    firstValue, valid :=
+        json.NumberValue(
+            &first,
+        )
+
+    Require(
+        valid,
+        .FirstItemKind,
+    )
+
+    Require(
+        firstValue ==
+            cast<f64>(1),
+        .FirstItemValue,
+    )
+
+    second, found :=
+        json.ArrayGet(
+            &items,
+            1,
+        )
+
+    Require(
+        found,
+        .SecondItemMissing,
+    )
+
+    secondValue, valid :=
+        json.NumberValue(
+            &second,
+        )
+
+    Require(
+        valid,
+        .SecondItemKind,
+    )
+
+    Require(
+        secondValue ==
+            cast<f64>(2.5),
+        .SecondItemValue,
+    )
+
+    third, found :=
+        json.ArrayGet(
+            &items,
+            2,
+        )
+
+    Require(
+        found,
+        .ThirdItemMissing,
+    )
+
+    thirdValue, valid :=
+        json.BooleanValue(
+            &third,
+        )
+
+    Require(
+        valid,
+        .ThirdItemKind,
+    )
+
+    Require(
+        !thirdValue,
+        .ThirdItemValue,
+    )
+
+    fourth, found :=
+        json.ArrayGet(
+            &items,
+            3,
+        )
+
+    Require(
+        found,
+        .FourthItemMissing,
+    )
+
+    Require(
+        json.IsNull(
+            &fourth,
+        ),
+        .FourthItemKind,
+    )
+
+    fifth, found :=
+        json.ArrayGet(
+            &items,
+            4,
+        )
+
+    Require(
+        found,
+        .FifthItemMissing,
+    )
+
+    fifthText, valid :=
+        json.StringValue(
+            &fifth,
+        )
+
+    Require(
+        valid,
+        .FifthItemKind,
+    )
+
+    Require(
+        fifthText == "text",
+        .FifthItemValue,
+    )
+
+    sixth, found :=
+        json.ArrayGet(
+            &items,
+            5,
+        )
+
+    Require(
+        found,
+        .SixthItemMissing,
+    )
+
+    Require(
+        json.IsObject(
+            &sixth,
+        ),
+        .SixthItemKind,
+    )
+
+    nested, found :=
+        json.ObjectGet(
+            &sixth,
+            "nested",
+        )
+
+    Require(
+        found,
+        .NestedMissing,
+    )
+
+    nestedText, valid :=
+        json.StringValue(
+            &nested,
+        )
+
+    Require(
+        valid,
+        .NestedKind,
+    )
+
+    Require(
+        nestedText == "value",
+        .NestedValue,
+    )
+}
+
+TestNestedObject :: task(
+    root *json.Value,
+) {
+    object, found :=
+        json.ObjectGet(
+            root,
+            "object",
+        )
+
+    Require(
+        found,
+        .ObjectMissing,
+    )
+
+    Require(
+        json.IsObject(
+            &object,
+        ),
+        .ObjectKind,
+    )
+
+    Require(
+        json.ObjectLength(
+            &object,
+        ) == 2,
+        .ObjectLength,
+    )
+
+    alpha, found :=
+        json.ObjectGet(
+            &object,
+            "alpha",
+        )
+
+    Require(
+        found,
+        .AlphaMissing,
+    )
+
+    alphaValue, valid :=
+        json.NumberValue(
+            &alpha,
+        )
+
+    Require(
+        valid,
+        .AlphaKind,
+    )
+
+    Require(
+        alphaValue ==
+            cast<f64>(1),
+        .AlphaValue,
+    )
+
+    beta, found :=
+        json.ObjectGet(
+            &object,
+            "beta",
+        )
+
+    Require(
+        found,
+        .BetaMissing,
+    )
+
+    betaValue, valid :=
+        json.NumberValue(
+            &beta,
+        )
+
+    Require(
+        valid,
+        .BetaKind,
+    )
+
+    Require(
+        betaValue ==
+            cast<f64>(2),
+        .BetaValue,
+    )
+}
+
+TestDuplicateMember :: task(
+    root *json.Value,
+) {
+    duplicate, found :=
+        json.ObjectGet(
+            root,
+            "duplicate",
+        )
+
+    Require(
+        found,
+        .DuplicateMissing,
+    )
+
+    duplicateValue, valid :=
+        json.NumberValue(
+            &duplicate,
+        )
+
+    Require(
+        valid,
+        .DuplicateKind,
+    )
+
+    /*
+    ObjectGet searches from the end, so the final duplicate member wins.
+    Both members remain stored in the object.
+    */
+    Require(
+        duplicateValue ==
+            cast<f64>(2),
+        .DuplicateValue,
+    )
+}
+
+TestRoundTrip :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    root *json.Value,
+) {
+    encoded, encodeError :=
+        json.Stringify(
+            allocator,
+            deallocator,
+            root,
+        )
+
+    RequireJSONError(
+        encodeError,
+        .StringifyDocument,
+    )
+
+    defer {
+        strings.Destroy(
+            deallocator,
+            &encoded,
+        )
+    }
+
+    encodedText :=
+        strings.View(
+            &encoded,
+        )
+
+    Require(
+        size(encodedText) > 0,
+        .StringifyEmpty,
+    )
+
+    fmt.Println(
+        "compact JSON:",
+    )
+
+    fmt.Println(
+        "%v",
+        encodedText,
+    )
+
+    roundTrip, parseError :=
+        json.Parse(
+            allocator,
+            deallocator,
+            encodedText,
+        )
+
+    RequireJSONError(
+        parseError,
+        .ParseRoundTrip,
+    )
+
+    defer {
+        json.DestroyValue(
+            &roundTrip,
+        )
+    }
+
+    Require(
+        json.IsObject(
+            &roundTrip,
+        ),
+        .RoundTripKind,
+    )
+
+    Require(
+        json.ObjectLength(
+            &roundTrip,
+        ) == 11,
+        .RoundTripMemberCount,
+    )
+
+    unicode, found :=
+        json.ObjectGet(
+            &roundTrip,
+            "unicode",
+        )
+
+    Require(
+        found,
+        .RoundTripUnicodeMissing,
+    )
+
+    unicodeText, valid :=
+        json.StringValue(
+            &unicode,
+        )
+
+    Require(
+        valid,
+        .RoundTripUnicodeKind,
+    )
+
+    Require(
+        unicodeText ==
+            "Bolivia 🇧🇴",
+        .RoundTripUnicodeValue,
+    )
+
+    duplicate, found :=
+        json.ObjectGet(
+            &roundTrip,
+            "duplicate",
+        )
+
+    Require(
+        found,
+        .RoundTripDuplicateMissing,
+    )
+
+    duplicateValue, valid :=
+        json.NumberValue(
+            &duplicate,
+        )
+
+    Require(
+        valid,
+        .RoundTripDuplicateKind,
+    )
+
+    Require(
+        duplicateValue ==
+            cast<f64>(2),
+        .RoundTripDuplicateValue,
+    )
+}
+
+Main :: task() {
+    allocatorValue :=
+        mem.NewCAllocator()
+
+    allocator :=
+        cast<mem.Allocator>(
+            &allocatorValue,
+        )
+
+    deallocator :=
+        cast<mem.Deallocator>(
+            &allocatorValue,
+        )
+
+    contents, readError :=
+        os.ReadFile(
+            allocator,
+            deallocator,
+            "examples/core/json/test.json",
+        )
+
+    RequireOSError(
+        readError,
+        .ReadTestFile,
+    )
+
+    defer {
+        os.DestroyOwnedBytes(
+            &contents,
+        )
+    }
+
+    sourceBytes :=
+        os.OwnedBytesSpan(
+            &contents,
+        )
+
+    source :=
+        cast<string>(
+            sourceBytes.Data,
+            sourceBytes.Length,
+        )
+
+    root, parseError :=
+        json.Parse(
+            allocator,
+            deallocator,
+            source,
+        )
+
+    RequireJSONError(
+        parseError,
+        .ParseDocument,
+    )
+
+    defer {
+        json.DestroyValue(
+            &root,
+        )
+    }
+
+    TestRootScalars(
+        &root,
+    )
+
+    TestArray(
+        &root,
+    )
+
+    TestNestedObject(
+        &root,
+    )
+
+    TestDuplicateMember(
+        &root,
+    )
+
+    TestRoundTrip(
+        allocator,
+        deallocator,
+        &root,
+    )
+
+    fmt.Println(
+        "all JSON integration tests passed",
+    )
+}

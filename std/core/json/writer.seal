@@ -1,0 +1,744 @@
+/*
+_Buffer is a private growing byte buffer used by Stringify.
+*/
+_Buffer :: struct {
+    Data rawptr
+    Length uint
+    Capacity uint
+
+    Allocator mem.Allocator
+    Deallocator mem.Deallocator
+}
+
+_NewBuffer :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) _Buffer {
+    return _Buffer{
+        Data = nil,
+        Length = 0,
+        Capacity = 0,
+
+        Allocator = allocator,
+        Deallocator = deallocator,
+    }
+}
+
+_DestroyBuffer :: task(
+    buffer *_Buffer,
+) {
+    if buffer.Data != nil {
+        mem.FreeWith(
+            buffer.Deallocator,
+            buffer.Data,
+        )
+    }
+
+    buffer.Data = nil
+    buffer.Length = 0
+    buffer.Capacity = 0
+}
+
+_BufferEnsure :: task(
+    buffer *_Buffer,
+    additional uint,
+) bool {
+    maximum :=
+        ~cast<uint>(0)
+
+    if buffer.Length >
+        maximum -
+        additional {
+        return false
+    }
+
+    required :=
+        buffer.Length +
+        additional
+
+    if required <=
+        buffer.Capacity {
+        return true
+    }
+
+    newCapacity :=
+        buffer.Capacity
+
+    if newCapacity == 0 {
+        newCapacity = 64
+    }
+
+    for newCapacity <
+        required {
+        if newCapacity >
+            maximum / 2 {
+            newCapacity =
+                required
+
+            break
+        }
+
+        newCapacity *= 2
+    }
+
+    newData :=
+        mem.AllocWith(
+            buffer.Allocator,
+            newCapacity,
+        )
+
+    if newData == nil {
+        return false
+    }
+
+    if buffer.Length > 0 {
+        mem.MemmoveC(
+            newData,
+            buffer.Data,
+            buffer.Length,
+        )
+    }
+
+    if buffer.Data != nil {
+        mem.FreeWith(
+            buffer.Deallocator,
+            buffer.Data,
+        )
+    }
+
+    buffer.Data =
+        newData
+
+    buffer.Capacity =
+        newCapacity
+
+    return true
+}
+
+_BufferAppendByte :: task(
+    buffer *_Buffer,
+    value u8,
+) bool {
+    if !_BufferEnsure(
+        buffer,
+        1,
+    ) {
+        return false
+    }
+
+    buffer.Data[
+        cast<int>(
+            buffer.Length,
+        )
+    ] = value
+
+    buffer.Length += 1
+
+    return true
+}
+
+_BufferAppendRaw :: task(
+    buffer *_Buffer,
+    source rawptr,
+    length uint,
+) bool {
+    if length == 0 {
+        return true
+    }
+
+    if source == nil {
+        return false
+    }
+
+    if !_BufferEnsure(
+        buffer,
+        length,
+    ) {
+        return false
+    }
+
+    destination :=
+        cast<rawptr>(
+            &buffer.Data[
+                cast<int>(
+                    buffer.Length,
+                )
+            ],
+        )
+
+    mem.MemmoveC(
+        destination,
+        source,
+        length,
+    )
+
+    buffer.Length +=
+        length
+
+    return true
+}
+
+_BufferAppendString :: task(
+    buffer *_Buffer,
+    value string,
+) bool {
+    return _BufferAppendRaw(
+        buffer,
+        cast<rawptr>(
+            value,
+        ),
+        size(value),
+    )
+}
+
+_BufferTake :: task(
+    buffer *_Buffer,
+) strings.OwnedString {
+    result :=
+        strings.OwnedString{
+            Data = buffer.Data,
+            ByteLength = buffer.Length,
+        }
+
+    buffer.Data = nil
+    buffer.Length = 0
+    buffer.Capacity = 0
+
+    return result
+}
+
+_HexDigitByte :: pure task(
+    value u8,
+) u8 {
+    if value < 10 {
+        return value + 48
+    }
+
+    return value - 10 + 97
+}
+
+_AppendEscapedPair :: task(
+    buffer *_Buffer,
+    second u8,
+) bool {
+    if !_BufferAppendByte(
+        buffer,
+        92,
+    ) {
+        return false
+    }
+
+    return _BufferAppendByte(
+        buffer,
+        second,
+    )
+}
+
+_WriteJSONString :: task(
+    buffer *_Buffer,
+    value string,
+) ErrorKind {
+    if !_BufferAppendByte(
+        buffer,
+        34,
+    ) {
+        return .AllocationFailed
+    }
+
+    data :=
+        cast<rawptr>(
+            value,
+        )
+
+    length :=
+        size(value)
+
+    offset: uint = 0
+
+    for offset <
+        length {
+        current :=
+            data[
+                cast<int>(offset)
+            ]
+
+        if current == 34 {
+            if !_AppendEscapedPair(
+                buffer,
+                34,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 92 {
+            if !_AppendEscapedPair(
+                buffer,
+                92,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 8 {
+            if !_AppendEscapedPair(
+                buffer,
+                98,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 12 {
+            if !_AppendEscapedPair(
+                buffer,
+                102,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 10 {
+            if !_AppendEscapedPair(
+                buffer,
+                110,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 13 {
+            if !_AppendEscapedPair(
+                buffer,
+                114,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current == 9 {
+            if !_AppendEscapedPair(
+                buffer,
+                116,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        if current < 32 {
+            if !_BufferEnsure(
+                buffer,
+                6,
+            ) {
+                return .AllocationFailed
+            }
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length,
+                )
+            ] = 92
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length + 1,
+                )
+            ] = 117
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length + 2,
+                )
+            ] = 48
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length + 3,
+                )
+            ] = 48
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length + 4,
+                )
+            ] = _HexDigitByte(
+                current >> 4,
+            )
+
+            buffer.Data[
+                cast<int>(
+                    buffer.Length + 5,
+                )
+            ] = _HexDigitByte(
+                current & 15,
+            )
+
+            buffer.Length += 6
+            offset += 1
+
+            continue
+        }
+
+        if current <= 127 {
+            if !_BufferAppendByte(
+                buffer,
+                current,
+            ) {
+                return .AllocationFailed
+            }
+
+            offset += 1
+
+            continue
+        }
+
+        width, valid :=
+            _UTF8WidthAt(
+                data,
+                offset,
+                length,
+            )
+
+        if !valid {
+            return .InvalidUTF8
+        }
+
+        source :=
+            cast<rawptr>(
+                &data[
+                    cast<int>(offset)
+                ],
+            )
+
+        if !_BufferAppendRaw(
+            buffer,
+            source,
+            width,
+        ) {
+            return .AllocationFailed
+        }
+
+        offset +=
+            width
+    }
+
+    if !_BufferAppendByte(
+        buffer,
+        34,
+    ) {
+        return .AllocationFailed
+    }
+
+    return .None
+}
+
+_WriteValue :: task(
+    buffer *_Buffer,
+    value *Value,
+    depth uint,
+) ErrorKind {
+    if value == nil {
+        return .InvalidValue
+    }
+
+    if depth >
+        _MaximumNestingDepth() {
+        return .NestingTooDeep
+    }
+
+    if value.Kind == .Null {
+        if !_BufferAppendString(
+            buffer,
+            "null",
+        ) {
+            return .AllocationFailed
+        }
+
+        return .None
+    }
+
+    if value.Kind == .Boolean {
+        if value.Boolean {
+            if !_BufferAppendString(
+                buffer,
+                "true",
+            ) {
+                return .AllocationFailed
+            }
+        } else {
+            if !_BufferAppendString(
+                buffer,
+                "false",
+            ) {
+                return .AllocationFailed
+            }
+        }
+
+        return .None
+    }
+
+    if value.Kind == .Number {
+        formatted :=
+            strconv.FormatF64(
+                buffer.Allocator,
+                value.Number,
+            )
+
+        if formatted.Data == nil {
+            return .AllocationFailed
+        }
+
+        text :=
+            strings.View(
+                &formatted,
+            )
+
+        if text == "nan" ||
+            text == "inf" ||
+            text == "-inf" {
+            strings.Destroy(
+                buffer.Deallocator,
+                &formatted,
+            )
+
+            return .NonFiniteNumber
+        }
+
+        appended :=
+            _BufferAppendString(
+                buffer,
+                text,
+            )
+
+        strings.Destroy(
+            buffer.Deallocator,
+            &formatted,
+        )
+
+        if !appended {
+            return .AllocationFailed
+        }
+
+        return .None
+    }
+
+    if value.Kind == .String {
+        text :=
+            strings.View(
+                &value.Text,
+            )
+
+        return _WriteJSONString(
+            buffer,
+            text,
+        )
+    }
+
+    if value.Kind == .Array {
+        if !_BufferAppendByte(
+            buffer,
+            91,
+        ) {
+            return .AllocationFailed
+        }
+
+        count :=
+            lists.DynamicArrayLength<Value>(
+                &value.Elements,
+            )
+
+        index: uint = 0
+
+        for index <
+            count {
+            if index > 0 {
+                if !_BufferAppendByte(
+                    buffer,
+                    44,
+                ) {
+                    return .AllocationFailed
+                }
+            }
+
+            item :=
+                lists.DynamicArrayGetUnsafe<Value>(
+                    &value.Elements,
+                    index,
+                )
+
+            itemError :=
+                _WriteValue(
+                    buffer,
+                    &item,
+                    depth + 1,
+                )
+
+            if itemError != .None {
+                return itemError
+            }
+
+            index += 1
+        }
+
+        if !_BufferAppendByte(
+            buffer,
+            93,
+        ) {
+            return .AllocationFailed
+        }
+
+        return .None
+    }
+
+    if value.Kind == .Object {
+        if !_BufferAppendByte(
+            buffer,
+            123,
+        ) {
+            return .AllocationFailed
+        }
+
+        count :=
+            lists.DynamicArrayLength<Member>(
+                &value.Members,
+            )
+
+        index: uint = 0
+
+        for index <
+            count {
+            if index > 0 {
+                if !_BufferAppendByte(
+                    buffer,
+                    44,
+                ) {
+                    return .AllocationFailed
+                }
+            }
+
+            member :=
+                lists.DynamicArrayGetUnsafe<Member>(
+                    &value.Members,
+                    index,
+                )
+
+            name :=
+                strings.View(
+                    &member.Name,
+                )
+
+            nameError :=
+                _WriteJSONString(
+                    buffer,
+                    name,
+                )
+
+            if nameError != .None {
+                return nameError
+            }
+
+            if !_BufferAppendByte(
+                buffer,
+                58,
+            ) {
+                return .AllocationFailed
+            }
+
+            itemError :=
+                _WriteValue(
+                    buffer,
+                    &member.Item,
+                    depth + 1,
+                )
+
+            if itemError != .None {
+                return itemError
+            }
+
+            index += 1
+        }
+
+        if !_BufferAppendByte(
+            buffer,
+            125,
+        ) {
+            return .AllocationFailed
+        }
+
+        return .None
+    }
+
+    return .InvalidValue
+}
+
+/*
+Stringify creates a compact owned JSON representation.
+
+The returned string must be released with:
+
+    strings.Destroy(deallocator, &result)
+
+NaN and infinity are rejected because they are not JSON numbers.
+*/
+Stringify :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value *Value,
+) strings.OwnedString, Error {
+    buffer :=
+        _NewBuffer(
+            allocator,
+            deallocator,
+        )
+
+    kind :=
+        _WriteValue(
+            &buffer,
+            value,
+            0,
+        )
+
+    if kind != .None {
+        _DestroyBuffer(
+            &buffer,
+        )
+
+        return _EmptyOwnedString(),
+            NewError(
+                kind,
+                0,
+            )
+    }
+
+    return _BufferTake(
+        &buffer,
+    ), NoError()
+}

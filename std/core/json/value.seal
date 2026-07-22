@@ -1,0 +1,616 @@
+/*
+Kind identifies the active JSON value field.
+*/
+Kind :: enum {
+    Null
+    Boolean
+    Number
+    String
+    Array
+    Object
+}
+
+/*
+Member owns Name and Item.
+
+Member values are move-only by convention. Copying a Member performs a
+shallow ownership copy.
+*/
+Member :: struct {
+    Name strings.OwnedString
+    Item Value
+}
+
+/*
+Value is an owned JSON tree node.
+
+Value uses a straightforward tagged representation. Unused fields are
+explicitly initialized to empty values.
+
+Value is move-only by convention. Copying Value performs shallow copies
+of all owned fields and must be avoided.
+
+Values returned by ArrayGet, ObjectMemberAt, and ObjectGet are borrowed
+shallow views. They must not be destroyed independently.
+*/
+Value :: struct {
+    Kind Kind
+
+    Boolean bool
+    Number f64
+    Text strings.OwnedString
+
+    Elements lists.DynamicArray<Value>
+    Members lists.DynamicArray<Member>
+
+    Allocator mem.Allocator
+    Deallocator mem.Deallocator
+}
+
+_EmptyOwnedString :: pure task(
+) strings.OwnedString {
+    return strings.OwnedString{
+        Data = nil,
+        ByteLength = 0,
+    }
+}
+
+_BaseValue :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    kind Kind,
+) Value {
+    return Value{
+        Kind = kind,
+
+        Boolean = false,
+        Number = cast<f64>(0),
+        Text = _EmptyOwnedString(),
+
+        Elements =
+            lists.NewDynamicArrayEmpty<Value>(
+                allocator,
+                deallocator,
+            ),
+
+        Members =
+            lists.NewDynamicArrayEmpty<Member>(
+                allocator,
+                deallocator,
+            ),
+
+        Allocator = allocator,
+        Deallocator = deallocator,
+    }
+}
+
+/*
+NewNull creates a JSON null value.
+*/
+NewNull :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Value {
+    return _BaseValue(
+        allocator,
+        deallocator,
+        .Null,
+    )
+}
+
+/*
+NewBoolean creates a JSON Boolean value.
+*/
+NewBoolean :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value bool,
+) Value {
+    result := _BaseValue(
+        allocator,
+        deallocator,
+        .Boolean,
+    )
+
+    result.Boolean = value
+
+    return result
+}
+
+/*
+NewNumber creates a JSON number value.
+
+Stringify rejects NaN and positive or negative infinity.
+*/
+NewNumber :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value f64,
+) Value {
+    result := _BaseValue(
+        allocator,
+        deallocator,
+        .Number,
+    )
+
+    result.Number = value
+
+    return result
+}
+
+/*
+NewString creates a JSON string containing an owned clone of value.
+*/
+NewString :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    value string,
+) Value, Error {
+    text :=
+        strings.Clone(
+            allocator,
+            value,
+        )
+
+    if text.Data == nil {
+        return NewNull(
+            allocator,
+            deallocator,
+        ), NewError(
+            .AllocationFailed,
+            0,
+        )
+    }
+
+    result := _BaseValue(
+        allocator,
+        deallocator,
+        .String,
+    )
+
+    result.Text = text
+
+    return result,
+        NoError()
+}
+
+/*
+NewOwnedString transfers ownership of text into a JSON value.
+
+text must be released by the same deallocator supplied here.
+*/
+NewOwnedString :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+    text strings.OwnedString,
+) Value {
+    result := _BaseValue(
+        allocator,
+        deallocator,
+        .String,
+    )
+
+    result.Text = text
+
+    return result
+}
+
+/*
+NewArray creates an empty JSON array.
+*/
+NewArray :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Value {
+    return _BaseValue(
+        allocator,
+        deallocator,
+        .Array,
+    )
+}
+
+/*
+NewObject creates an empty JSON object.
+*/
+NewObject :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) Value {
+    return _BaseValue(
+        allocator,
+        deallocator,
+        .Object,
+    )
+}
+
+/*
+ValueKind returns the value's active kind.
+*/
+ValueKind :: pure task(
+    value *Value,
+) Kind {
+    return value.Kind
+}
+
+IsNull :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .Null
+}
+
+IsBoolean :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .Boolean
+}
+
+IsNumber :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .Number
+}
+
+IsString :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .String
+}
+
+IsArray :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .Array
+}
+
+IsObject :: pure task(
+    value *Value,
+) bool {
+    return value != nil &&
+        value.Kind == .Object
+}
+
+BooleanValue :: pure task(
+    value *Value,
+) bool, bool {
+    if value == nil ||
+        value.Kind != .Boolean {
+        return false, false
+    }
+
+    return value.Boolean, true
+}
+
+NumberValue :: pure task(
+    value *Value,
+) f64, bool {
+    if value == nil ||
+        value.Kind != .Number {
+        return cast<f64>(0),
+            false
+    }
+
+    return value.Number, true
+}
+
+/*
+StringValue returns a borrowed string view.
+
+The view remains valid until the owning Value is destroyed.
+*/
+StringValue :: pure task(
+    value *Value,
+) string, bool {
+    if value == nil ||
+        value.Kind != .String {
+        return "", false
+    }
+
+    return strings.View(
+        &value.Text,
+    ), true
+}
+
+ArrayLength :: pure task(
+    value *Value,
+) uint {
+    if value == nil ||
+        value.Kind != .Array {
+        return 0
+    }
+
+    return lists.DynamicArrayLength<Value>(
+        &value.Elements,
+    )
+}
+
+/*
+ArrayGet returns a borrowed shallow copy.
+
+The returned Value must not be passed to DestroyValue.
+*/
+ArrayGet :: pure task(
+    value *Value,
+    index int,
+) Value, bool {
+    if value == nil ||
+        value.Kind != .Array {
+        empty: Value
+
+        return empty, false
+    }
+
+    return lists.DynamicArrayGet<Value>(
+        &value.Elements,
+        index,
+    )
+}
+
+/*
+AppendArray transfers ownership of item into value.
+
+After a successful call, the caller must not destroy or otherwise treat
+item as an independent owner.
+*/
+AppendArray :: task(
+    value *Value,
+    item Value,
+) Error {
+    if value == nil ||
+        value.Kind != .Array {
+        return NewError(
+            .InvalidValue,
+            0,
+        )
+    }
+
+    lists.Append<Value>(
+        &value.Elements,
+        item,
+    )
+
+    return NoError()
+}
+
+ObjectLength :: pure task(
+    value *Value,
+) uint {
+    if value == nil ||
+        value.Kind != .Object {
+        return 0
+    }
+
+    return lists.DynamicArrayLength<Member>(
+        &value.Members,
+    )
+}
+
+/*
+ObjectMemberAt returns a borrowed shallow copy.
+
+Neither the returned member nor its fields may be destroyed separately.
+*/
+ObjectMemberAt :: pure task(
+    value *Value,
+    index int,
+) Member, bool {
+    if value == nil ||
+        value.Kind != .Object {
+        empty: Member
+
+        return empty, false
+    }
+
+    return lists.DynamicArrayGet<Member>(
+        &value.Members,
+        index,
+    )
+}
+
+/*
+ObjectGet returns the final member having the requested name.
+
+JSON permits duplicate object names. Searching from the end makes the
+most recently appended member visible through this convenience task.
+
+The returned Value is a borrowed shallow copy and must not be destroyed.
+*/
+ObjectGet :: pure task(
+    value *Value,
+    name string,
+) Value, bool {
+    if value == nil ||
+        value.Kind != .Object {
+        empty: Value
+
+        return empty, false
+    }
+
+    count :=
+        lists.DynamicArrayLength<Member>(
+            &value.Members,
+        )
+
+    index := count
+
+    for index > 0 {
+        index -= 1
+
+        member :=
+            lists.DynamicArrayGetUnsafe<Member>(
+                &value.Members,
+                index,
+            )
+
+        memberName :=
+            strings.View(
+                &member.Name,
+            )
+
+        if memberName == name {
+            return member.Item,
+                true
+        }
+    }
+
+    empty: Value
+
+    return empty, false
+}
+
+/*
+AppendObject clones name and transfers ownership of item into value.
+
+Duplicate names are preserved.
+*/
+AppendObject :: task(
+    value *Value,
+    name string,
+    item Value,
+) Error {
+    if value == nil ||
+        value.Kind != .Object {
+        return NewError(
+            .InvalidValue,
+            0,
+        )
+    }
+
+    ownedName :=
+        strings.Clone(
+            value.Allocator,
+            name,
+        )
+
+    if ownedName.Data == nil {
+        return NewError(
+            .AllocationFailed,
+            0,
+        )
+    }
+
+    lists.Append<Member>(
+        &value.Members,
+        Member{
+            Name = ownedName,
+            Item = item,
+        },
+    )
+
+    return NoError()
+}
+
+/*
+AppendObjectOwned transfers ownership of both name and item into value.
+
+name must be compatible with value.Deallocator.
+*/
+AppendObjectOwned :: task(
+    value *Value,
+    name strings.OwnedString,
+    item Value,
+) Error {
+    if value == nil ||
+        value.Kind != .Object {
+        return NewError(
+            .InvalidValue,
+            0,
+        )
+    }
+
+    lists.Append<Member>(
+        &value.Members,
+        Member{
+            Name = name,
+            Item = item,
+        },
+    )
+
+    return NoError()
+}
+
+/*
+DestroyValue recursively releases all owned memory.
+
+Calling DestroyValue more than once on the same Value is safe.
+*/
+DestroyValue :: task(
+    value *Value,
+) {
+    if value == nil {
+        return
+    }
+
+    if value.Text.Data != nil {
+        strings.Destroy(
+            value.Deallocator,
+            &value.Text,
+        )
+    }
+
+    elementCount :=
+        lists.DynamicArrayLength<Value>(
+            &value.Elements,
+        )
+
+    elementIndex: uint = 0
+
+    for elementIndex <
+        elementCount {
+        element :=
+            lists.DynamicArrayGetUnsafe<Value>(
+                &value.Elements,
+                elementIndex,
+            )
+
+        DestroyValue(
+            &element,
+        )
+
+        elementIndex += 1
+    }
+
+    memberCount :=
+        lists.DynamicArrayLength<Member>(
+            &value.Members,
+        )
+
+    memberIndex: uint = 0
+
+    for memberIndex <
+        memberCount {
+        member :=
+            lists.DynamicArrayGetUnsafe<Member>(
+                &value.Members,
+                memberIndex,
+            )
+
+        strings.Destroy(
+            value.Deallocator,
+            &member.Name,
+        )
+
+        DestroyValue(
+            &member.Item,
+        )
+
+        memberIndex += 1
+    }
+
+    lists.DestroyDynamicArray<Value>(
+        &value.Elements,
+    )
+
+    lists.DestroyDynamicArray<Member>(
+        &value.Members,
+    )
+
+    value.Kind = .Null
+    value.Boolean = false
+    value.Number = cast<f64>(0)
+    value.Text = _EmptyOwnedString()
+}

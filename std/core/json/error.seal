@@ -1,0 +1,131 @@
+ErrorKind :: enum {
+    None
+
+    UnexpectedEnd
+    UnexpectedCharacter
+    InvalidLiteral
+    InvalidNumber
+
+    InvalidString
+    InvalidUTF8
+    InvalidEscape
+    InvalidUnicodeEscape
+
+    ExpectedColon
+    ExpectedCommaOrEnd
+    TrailingCharacters
+
+    AllocationFailed
+    NestingTooDeep
+
+    NonFiniteNumber
+    InvalidValue
+}
+
+Error :: struct {
+    Kind ErrorKind
+    Offset uint
+}
+
+NoError :: pure task() Error {
+    return Error{
+        Kind = .None,
+        Offset = 0,
+    }
+}
+
+NewError :: pure task(
+    kind ErrorKind,
+    offset uint,
+) Error {
+    return Error{
+        Kind = kind,
+        Offset = offset,
+    }
+}
+
+ErrorIsNone :: pure task(
+    error Error,
+) bool {
+    return error.Kind == .None
+}
+
+ErrorString :: pure task(
+    error Error,
+) string {
+    if error.Kind == .None {
+        return "no error"
+    }
+
+    if error.Kind ==
+        .UnexpectedEnd {
+        return "unexpected end of JSON input"
+    }
+
+    if error.Kind ==
+        .UnexpectedCharacter {
+        return "unexpected character"
+    }
+
+    if error.Kind ==
+        .InvalidLiteral {
+        return "invalid JSON literal"
+    }
+
+    if error.Kind ==
+        .InvalidNumber {
+        return "invalid JSON number"
+    }
+
+    if error.Kind ==
+        .InvalidString {
+        return "invalid JSON string"
+    }
+
+    if error.Kind ==
+        .InvalidUTF8 {
+        return "invalid UTF-8 in JSON string"
+    }
+
+    if error.Kind ==
+        .InvalidEscape {
+        return "invalid JSON escape sequence"
+    }
+
+    if error.Kind ==
+        .InvalidUnicodeEscape {
+        return "invalid JSON Unicode escape"
+    }
+
+    if error.Kind ==
+        .ExpectedColon {
+        return "expected colon after object member name"
+    }
+
+    if error.Kind ==
+        .ExpectedCommaOrEnd {
+        return "expected comma or collection end"
+    }
+
+    if error.Kind ==
+        .TrailingCharacters {
+        return "unexpected characters after JSON value"
+    }
+
+    if error.Kind ==
+        .AllocationFailed {
+        return "JSON allocation failed"
+    }
+
+    if error.Kind ==
+        .NestingTooDeep {
+        return "JSON nesting is too deep"
+    }
+
+    if error.Kind ==
+        .NonFiniteNumber {
+        return "JSON cannot represent a non-finite number"
+    }
+
+    return "invalid JSON value"
+}

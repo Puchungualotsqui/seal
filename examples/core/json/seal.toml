@@ -1,0 +1,49 @@
+[package]
+name = "jsonExample"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    "fmt",
+    "json",
+    "mem",
+    "os",
+    "strings",
+]
+
+[build]
+compiler = "tcc"
+
+[compiler.default]
+standard = "c11"
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+
+[compiler.tcc]
+path = "tcc"
+c_flags = []
+link_flags = []
+
+[compiler.gcc]
+c_flags = [
+    "-O3",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+]
+link_flags = []
+
+[compiler.clang]
+c_flags = [
+    "-O3",
+    "-Wall",
+    "-Wextra",
+]
+link_flags = []
+
+[compiler.msvc]
+c_flags = [
+    "/O2",
+]
+link_flags = []

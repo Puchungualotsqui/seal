@@ -1,0 +1,25 @@
+{
+  "name": "Seal JSON",
+  "active": true,
+  "count": 3,
+  "ratio": -12.5e2,
+  "nothing": null,
+  "escaped": "quote: \" slash: \\ newline:\n tab:\t",
+  "unicode": "Bolivia \uD83C\uDDE7\uD83C\uDDF4",
+  "items": [
+    1,
+    2.5,
+    false,
+    null,
+    "text",
+    {
+      "nested": "value"
+    }
+  ],
+  "object": {
+    "alpha": 1,
+    "beta": 2
+  },
+  "duplicate": 1,
+  "duplicate": 2
+}
