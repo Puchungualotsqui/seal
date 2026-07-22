@@ -21,6 +21,8 @@ var ErrStaleAnalysis = errors.New(
 	"workspace analysis became stale",
 )
 
+const standaloneGenericConstraintMaxDepth = 64
+
 /*
 PackageSnapshot is one immutable package analysis.
 
@@ -29,8 +31,21 @@ analysis must continue using the most recent successful exported package
 information.
 */
 type PackageSnapshot struct {
+	/*
+		Package is non-nil for ordinary manifest-backed packages.
+	*/
 	Package *build.Package
-	Result  frontend.Result
+
+	/*
+		StandalonePath is non-empty for a synthetic package created for one
+		open standalone file.
+
+		Each standalone file receives its own package snapshot so unrelated
+		executables can declare the same top-level names.
+	*/
+	StandalonePath string
+
+	Result frontend.Result
 
 	ResolverPackage *resolver.PackageInfo
 	CheckerPackage  *checker.PackageInfo
@@ -71,6 +86,35 @@ func (s *WorkspaceSnapshot) PackageForPath(
 		return nil
 	}
 
+	requestedKey, err := canonicalPath(path)
+	if err != nil {
+		return nil
+	}
+
+	/*
+		Standalone snapshots own exactly one file. Check them before package
+		root containment.
+	*/
+	for _, snapshot := range s.Packages {
+		if snapshot == nil ||
+			snapshot.StandalonePath == "" {
+			continue
+		}
+
+		standaloneKey, keyErr :=
+			canonicalPath(
+				snapshot.StandalonePath,
+			)
+
+		if keyErr != nil {
+			continue
+		}
+
+		if standaloneKey == requestedKey {
+			return snapshot
+		}
+	}
+
 	var best *PackageSnapshot
 	bestLength := -1
 
@@ -87,23 +131,23 @@ func (s *WorkspaceSnapshot) PackageForPath(
 			continue
 		}
 
-		inside, err :=
+		inside, pathErr :=
 			pathInside(
 				root,
 				path,
 			)
 
-		if err != nil ||
+		if pathErr != nil ||
 			!inside {
 			continue
 		}
 
-		absoluteRoot, err :=
+		absoluteRoot, absoluteErr :=
 			filepath.Abs(
 				root,
 			)
 
-		if err != nil {
+		if absoluteErr != nil {
 			continue
 		}
 
@@ -273,26 +317,57 @@ RefreshPackages rediscovers seal.toml files and standard-library packages.
 
 Call it after seal.toml or seal.workspace changes.
 */
-func (w *Workspace) RefreshPackages(
-	startPath string,
-) error {
-	if w == nil {
-		return fmt.Errorf(
-			"missing workspace",
-		)
-	}
-
-	return w.refreshPackages(
-		startPath,
-	)
-}
-
 func (w *Workspace) refreshPackages(
 	startPath string,
 ) error {
+	startDirectory, err :=
+		workspaceStartDirectory(
+			startPath,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	hasManifest, err :=
+		hasSealManifestAbove(
+			startDirectory,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	/*
+		A missing manifest is valid for the language server.
+
+		The workspace remains empty until .seal documents are opened. Each
+		unowned open document is analyzed as a standalone synthetic package.
+	*/
+	if !hasManifest {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+
+		w.root =
+			startDirectory
+
+		w.packages =
+			map[string]*build.Package{}
+
+		w.order =
+			nil
+
+		w.reverseDependencies =
+			map[string][]string{}
+
+		w.workspaceRevision++
+
+		return nil
+	}
+
 	root, err :=
 		build.FindWorkspaceRoot(
-			startPath,
+			startDirectory,
 		)
 
 	if err != nil {
@@ -348,6 +423,142 @@ func (w *Workspace) refreshPackages(
 	w.workspaceRevision++
 
 	return nil
+}
+
+func workspaceStartDirectory(
+	startPath string,
+) (
+	string,
+	error,
+) {
+	if strings.TrimSpace(startPath) == "" {
+		return "",
+			fmt.Errorf(
+				"workspace start path cannot be empty",
+			)
+	}
+
+	absolutePath, err :=
+		filepath.Abs(
+			startPath,
+		)
+
+	if err != nil {
+		return "",
+			err
+	}
+
+	absolutePath =
+		filepath.Clean(
+			absolutePath,
+		)
+
+	info, statErr :=
+		os.Stat(
+			absolutePath,
+		)
+
+	switch {
+	case statErr == nil:
+		if !info.IsDir() {
+			absolutePath =
+				filepath.Dir(
+					absolutePath,
+				)
+		}
+
+	case errors.Is(
+		statErr,
+		os.ErrNotExist,
+	):
+		/*
+			A not-yet-created .seal file can still be supplied as the fallback
+			workspace path.
+		*/
+		if strings.EqualFold(
+			filepath.Ext(absolutePath),
+			".seal",
+		) {
+			absolutePath =
+				filepath.Dir(
+					absolutePath,
+				)
+		}
+
+	default:
+		return "",
+			fmt.Errorf(
+				"examining workspace path %q: %w",
+				startPath,
+				statErr,
+			)
+	}
+
+	return filepath.Clean(
+		absolutePath,
+	), nil
+}
+
+func hasSealManifestAbove(
+	startDirectory string,
+) (
+	bool,
+	error,
+) {
+	current :=
+		filepath.Clean(
+			startDirectory,
+		)
+
+	for {
+		for _, manifestName := range []string{
+			"seal.workspace",
+			"seal.toml",
+		} {
+			manifestPath :=
+				filepath.Join(
+					current,
+					manifestName,
+				)
+
+			_, err :=
+				os.Stat(
+					manifestPath,
+				)
+
+			if err == nil {
+				return true,
+					nil
+			}
+
+			if !errors.Is(
+				err,
+				os.ErrNotExist,
+			) {
+				return false,
+					fmt.Errorf(
+						"examining Seal manifest %q: %w",
+						manifestPath,
+						err,
+					)
+			}
+		}
+
+		parent :=
+			filepath.Dir(
+				current,
+			)
+
+		if parent == current {
+			break
+		}
+
+		current =
+			parent
+	}
+
+	return false,
+		nil
 }
 
 /*
@@ -538,6 +749,17 @@ func (w *Workspace) Analyze(
 			)
 	}
 
+	if err :=
+		analyzeStandaloneDocuments(
+			ctx,
+			snapshot,
+			documents,
+			packages,
+		); err != nil {
+		return nil,
+			err
+	}
+
 	/*
 		Do not publish results produced from an old editor overlay.
 	*/
@@ -563,6 +785,177 @@ func (w *Workspace) Analyze(
 		snapshot
 
 	return snapshot,
+		nil
+}
+
+func analyzeStandaloneDocuments(
+	ctx context.Context,
+	snapshot *WorkspaceSnapshot,
+	documents DocumentSnapshot,
+	packages map[string]*build.Package,
+) error {
+	if snapshot == nil {
+		return fmt.Errorf(
+			"missing workspace snapshot",
+		)
+	}
+
+	standaloneDocuments :=
+		standaloneDocumentsForAnalysis(
+			documents,
+			packages,
+		)
+
+	for _, document := range standaloneDocuments {
+		if err :=
+			ctx.Err(); err != nil {
+			return err
+		}
+
+		result :=
+			frontend.AnalyzePackage(
+				frontend.PackageInput{
+					Name: "standalone",
+
+					Files: []frontend.SourceInput{
+						{
+							Path: document.Path,
+
+							Text: document.Text,
+						},
+					},
+
+					CheckerOptions: checker.Options{
+						GenericConstraintMaxDepth: standaloneGenericConstraintMaxDepth,
+					},
+				},
+				nil,
+				nil,
+			)
+
+		snapshotKey, err :=
+			standalonePackageSnapshotKey(
+				document.Path,
+			)
+
+		if err != nil {
+			return err
+		}
+
+		packageSnapshot :=
+			&PackageSnapshot{
+				StandalonePath: document.Path,
+
+				Result: result,
+
+				ResolverPackage: result.ResolverPackage,
+
+				CheckerPackage: result.CheckerPackage,
+			}
+
+		snapshot.Packages[snapshotKey] =
+			packageSnapshot
+
+		snapshot.Order =
+			append(
+				snapshot.Order,
+				snapshotKey,
+			)
+	}
+
+	return nil
+}
+
+func standaloneDocumentsForAnalysis(
+	documents DocumentSnapshot,
+	packages map[string]*build.Package,
+) []Document {
+	standalone :=
+		make(
+			[]Document,
+			0,
+			len(documents.Documents),
+		)
+
+	for _, document := range documents.Documents {
+		if !strings.EqualFold(
+			filepath.Ext(
+				document.Path,
+			),
+			".seal",
+		) {
+			continue
+		}
+
+		/*
+			Documents belonging to ordinary manifest packages are already
+			included by packageSourceInputs.
+		*/
+		owner, _ :=
+			build.FindPackageContainingPath(
+				document.Path,
+				packages,
+			)
+
+		if owner != nil {
+			continue
+		}
+
+		standalone =
+			append(
+				standalone,
+				document,
+			)
+	}
+
+	sort.SliceStable(
+		standalone,
+		func(
+			left int,
+			right int,
+		) bool {
+			leftKey, leftErr :=
+				canonicalPath(
+					standalone[left].Path,
+				)
+
+			rightKey, rightErr :=
+				canonicalPath(
+					standalone[right].Path,
+				)
+
+			if leftErr != nil ||
+				rightErr != nil {
+				return standalone[left].Path <
+					standalone[right].Path
+			}
+
+			return leftKey <
+				rightKey
+		},
+	)
+
+	return standalone
+}
+
+func standalonePackageSnapshotKey(
+	path string,
+) (
+	string,
+	error,
+) {
+	key, err :=
+		canonicalPath(
+			path,
+		)
+
+	if err != nil {
+		return "",
+			err
+	}
+
+	return "standalone:" +
+			key,
 		nil
 }
 
