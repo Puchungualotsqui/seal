@@ -12,10 +12,8 @@ import (
 	"seal/internal/checker"
 	cgen "seal/internal/codegen"
 	"seal/internal/diag"
-	"seal/internal/lexer"
-	"seal/internal/parser"
+	"seal/internal/frontend"
 	"seal/internal/resolver"
-	"seal/internal/source"
 )
 
 type LoadedPackage struct {
@@ -29,7 +27,9 @@ type LoadedPackage struct {
 	SemanticInfo checker.SemanticInfo
 }
 
-func checkerOptionsFromConfig(cfg Config) checker.Options {
+func checkerOptionsFromConfig(
+	cfg Config,
+) checker.Options {
 	return checker.Options{
 		GenericConstraintMaxDepth: cfg.GenericConstraintMaxDepth,
 	}
@@ -40,17 +40,23 @@ func LoadAndCheckPackage(
 	reporter *diag.Reporter,
 	resolverPackages map[string]*resolver.PackageInfo,
 	checkerPackages map[string]*checker.PackageInfo,
-) (*ast.File, *resolver.Scope, *checker.Scope, error) {
+) (
+	*ast.File,
+	*resolver.Scope,
+	*checker.Scope,
+	error,
+) {
 	file,
 		resolverScope,
 		checkerScope,
 		_,
-		err := LoadAndCheckPackageWithSemanticInfo(
-		pkg,
-		reporter,
-		resolverPackages,
-		checkerPackages,
-	)
+		err :=
+		LoadAndCheckPackageWithSemanticInfo(
+			pkg,
+			reporter,
+			resolverPackages,
+			checkerPackages,
+		)
 
 	return file,
 		resolverScope,
@@ -70,7 +76,21 @@ func LoadAndCheckPackageWithSemanticInfo(
 	checker.SemanticInfo,
 	error,
 ) {
-	files, err := SealFiles(pkg.Config.RootDir)
+	if pkg == nil {
+		return nil,
+			nil,
+			nil,
+			checker.SemanticInfo{},
+			fmt.Errorf(
+				"missing package",
+			)
+	}
+
+	files, err :=
+		SealFiles(
+			pkg.Config.RootDir,
+		)
+
 	if err != nil {
 		return nil,
 			nil,
@@ -79,126 +99,92 @@ func LoadAndCheckPackageWithSemanticInfo(
 			err
 	}
 
-	checkerOptions :=
-		checkerOptionsFromConfig(pkg.Config)
-
-	if len(files) == 0 {
-		if pkg.Config.Kind != KindLibrary {
-			return nil,
-				nil,
-				nil,
-				checker.SemanticInfo{},
-				fmt.Errorf(
-					"executable package %q has no .seal files",
-					pkg.Config.Name,
-				)
-		}
-
-		empty := &ast.File{}
-
-		r := resolver.NewWithPackages(
-			reporter,
-			resolverPackages,
-		)
-
-		resolverScope := r.ResolveFile(empty)
-
-		if reporter.HasErrors() {
-			return nil,
-				nil,
-				nil,
-				checker.SemanticInfo{},
-				fmt.Errorf(
-					"resolving failed for package %q",
-					pkg.Config.Name,
-				)
-		}
-
-		c := checker.NewWithPackagesAndOptions(
-			reporter,
-			checkerPackages,
-			checkerOptions,
-		)
-
-		checkerScope := c.CheckFile(empty)
-
-		if reporter.HasErrors() {
-			return nil,
-				nil,
-				nil,
-				checker.SemanticInfo{},
-				fmt.Errorf(
-					"checking failed for package %q",
-					pkg.Config.Name,
-				)
-		}
-
-		return empty,
-			resolverScope,
-			checkerScope,
-			c.SemanticInfo(),
-			nil
+	if len(files) == 0 &&
+		pkg.Config.Kind != KindLibrary {
+		return nil,
+			nil,
+			nil,
+			checker.SemanticInfo{},
+			fmt.Errorf(
+				"executable package %q has no .seal files",
+				pkg.Config.Name,
+			)
 	}
 
-	combined := &ast.File{}
+	sources := make(
+		[]frontend.SourceInput,
+		0,
+		len(files),
+	)
 
 	for _, path := range files {
-		srcBytes, err := os.ReadFile(path)
+		sourceBytes, err :=
+			os.ReadFile(
+				path,
+			)
+
 		if err != nil {
 			return nil,
 				nil,
 				nil,
 				checker.SemanticInfo{},
-				err
-		}
-
-		src := source.NewFile(
-			path,
-			string(srcBytes),
-		)
-
-		lex := lexer.New(src, reporter)
-		tokens := lex.LexAll()
-
-		if reporter.HasErrors() {
-			return nil,
-				nil,
-				nil,
-				checker.SemanticInfo{},
 				fmt.Errorf(
-					"lexing failed for package %q",
-					pkg.Config.Name,
+					"reading Seal source %q: %w",
+					path,
+					err,
 				)
 		}
 
-		p := parser.New(tokens, reporter)
-		parsed := p.ParseFile()
-
-		if reporter.HasErrors() {
-			return nil,
-				nil,
-				nil,
-				checker.SemanticInfo{},
-				fmt.Errorf(
-					"parsing failed for package %q",
-					pkg.Config.Name,
-				)
-		}
-
-		combined.Decls = append(
-			combined.Decls,
-			parsed.Decls...,
+		sources = append(
+			sources,
+			frontend.SourceInput{
+				Path: path,
+				Text: string(
+					sourceBytes,
+				),
+			},
 		)
 	}
 
-	r := resolver.NewWithPackages(
-		reporter,
-		resolverPackages,
-	)
+	result :=
+		frontend.AnalyzePackage(
+			frontend.PackageInput{
+				Name: pkg.Config.Name,
 
-	resolverScope := r.ResolveFile(combined)
+				Files: sources,
 
-	if reporter.HasErrors() {
+				CheckerOptions: checkerOptionsFromConfig(
+					pkg.Config,
+				),
+			},
+			resolverPackages,
+			checkerPackages,
+		)
+
+	if reporter != nil {
+		reporter.AddDiagnostics(
+			result.Diagnostics,
+		)
+	}
+
+	if !result.Parsed {
+		phase :=
+			frontendSyntaxFailurePhase(
+				&result,
+			)
+
+		return nil,
+			nil,
+			nil,
+			checker.SemanticInfo{},
+			fmt.Errorf(
+				"%s failed for package %q",
+				phase,
+				pkg.Config.Name,
+			)
+	}
+
+	if !result.Resolved {
 		return nil,
 			nil,
 			nil,
@@ -209,15 +195,7 @@ func LoadAndCheckPackageWithSemanticInfo(
 			)
 	}
 
-	c := checker.NewWithPackagesAndOptions(
-		reporter,
-		checkerPackages,
-		checkerOptions,
-	)
-
-	checkerScope := c.CheckFile(combined)
-
-	if reporter.HasErrors() {
+	if !result.Checked {
 		return nil,
 			nil,
 			nil,
@@ -228,11 +206,35 @@ func LoadAndCheckPackageWithSemanticInfo(
 			)
 	}
 
-	return combined,
-		resolverScope,
-		checkerScope,
-		c.SemanticInfo(),
+	return result.Combined,
+		result.ResolverScope,
+		result.CheckerScope,
+		result.SemanticInfo,
 		nil
+}
+
+/*
+frontendSyntaxFailurePhase distinguishes lexical errors from parser errors.
+
+The frontend does not run the parser for a file that contains lexical errors,
+so a nil per-file AST means lexing failed. A non-nil partial AST with Parsed
+set to false means parsing failed.
+*/
+func frontendSyntaxFailurePhase(
+	result *frontend.Result,
+) string {
+	if result == nil {
+		return "parsing"
+	}
+
+	for _, file := range result.Files {
+		if file == nil ||
+			file.AST == nil {
+			return "lexing"
+		}
+	}
+
+	return "parsing"
 }
 
 func shouldSkipPackageDirectory(
@@ -254,19 +256,27 @@ func shouldSkipPackageDirectory(
 		return true, nil
 	}
 
-	manifestPath := filepath.Join(
-		path,
-		"seal.toml",
-	)
+	manifestPath :=
+		filepath.Join(
+			path,
+			"seal.toml",
+		)
 
-	_, err := os.Stat(manifestPath)
+	_, err :=
+		os.Stat(
+			manifestPath,
+		)
 
 	switch {
 	case err == nil:
-		// This directory is the root of another Seal package.
+		/*
+			This directory is the root of another Seal package.
+		*/
 		return true, nil
 
-	case os.IsNotExist(err):
+	case os.IsNotExist(
+		err,
+	):
 		return false, nil
 
 	default:
@@ -277,59 +287,66 @@ func shouldSkipPackageDirectory(
 func CFiles(
 	root string,
 ) ([]string, error) {
-	root = filepath.Clean(root)
+	root =
+		filepath.Clean(
+			root,
+		)
 
 	var files []string
 
-	err := filepath.WalkDir(
-		root,
-		func(
-			path string,
-			entry os.DirEntry,
-			walkErr error,
-		) error {
-			if walkErr != nil {
-				return walkErr
-			}
-
-			if entry.IsDir() {
-				skip, err :=
-					shouldSkipPackageDirectory(
-						root,
-						path,
-						entry,
-					)
-
-				if err != nil {
-					return err
+	err :=
+		filepath.WalkDir(
+			root,
+			func(
+				path string,
+				entry os.DirEntry,
+				walkErr error,
+			) error {
+				if walkErr != nil {
+					return walkErr
 				}
 
-				if skip {
-					return fs.SkipDir
+				if entry.IsDir() {
+					skip, err :=
+						shouldSkipPackageDirectory(
+							root,
+							path,
+							entry,
+						)
+
+					if err != nil {
+						return err
+					}
+
+					if skip {
+						return fs.SkipDir
+					}
+
+					return nil
+				}
+
+				if strings.HasSuffix(
+					entry.Name(),
+					".c",
+				) {
+					files = append(
+						files,
+						path,
+					)
 				}
 
 				return nil
-			}
-
-			if strings.HasSuffix(
-				entry.Name(),
-				".c",
-			) {
-				files = append(
-					files,
-					path,
-				)
-			}
-
-			return nil
-		},
-	)
+			},
+		)
 
 	if err != nil {
 		return nil, err
 	}
 
-	sort.Strings(files)
+	sort.Strings(
+		files,
+	)
+
 	return files, nil
 }
 
@@ -338,7 +355,11 @@ func GeneratePackageC(
 	file *ast.File,
 	reporter *diag.Reporter,
 	codegenPackages map[string]*cgen.PackageInfo,
-) (string, *cgen.PackageInfo, error) {
+) (
+	string,
+	*cgen.PackageInfo,
+	error,
+) {
 	return GeneratePackageCWithSemanticInfo(
 		pkg,
 		file,
@@ -354,18 +375,28 @@ func GeneratePackageCWithSemanticInfo(
 	reporter *diag.Reporter,
 	codegenPackages map[string]*cgen.PackageInfo,
 	semantic checker.SemanticInfo,
-) (string, *cgen.PackageInfo, error) {
-	if file == nil || len(file.Decls) == 0 {
-		info := &cgen.PackageInfo{
-			Name:      pkg.Config.Name,
-			Tasks:     map[string]cgen.TaskInfo{},
-			Overloads: map[string][]string{},
-		}
+) (
+	string,
+	*cgen.PackageInfo,
+	error,
+) {
+	if file == nil ||
+		len(file.Decls) == 0 {
+		info :=
+			&cgen.PackageInfo{
+				Name: pkg.Config.Name,
+
+				Tasks: map[string]cgen.TaskInfo{},
+
+				Overloads: map[string][]string{},
+			}
 
 		return fmt.Sprintf(
-			"/* empty package %s */\n",
-			pkg.Config.Name,
-		), info, nil
+				"/* empty package %s */\n",
+				pkg.Config.Name,
+			),
+			info,
+			nil
 	}
 
 	info :=
@@ -386,18 +417,22 @@ func GeneratePackageCWithSemanticInfo(
 			)
 	}
 
-	g := cgen.NewWithPackagesAndSemanticInfo(
-		reporter,
-		pkg.Config.Name,
-		codegenPackages,
-		semantic,
-	)
+	g :=
+		cgen.NewWithPackagesAndSemanticInfo(
+			reporter,
+			pkg.Config.Name,
+			codegenPackages,
+			semantic,
+		)
 
 	g.SetWorkspacePackages(
 		codegenPackages,
 	)
 
-	out := g.Generate(file)
+	out :=
+		g.Generate(
+			file,
+		)
 
 	if reporter.HasErrors() {
 		return "",
@@ -408,64 +443,73 @@ func GeneratePackageCWithSemanticInfo(
 			)
 	}
 
-	return out, info, nil
+	return out,
+		info,
+		nil
 }
 
 func SealFiles(
 	root string,
 ) ([]string, error) {
-	root = filepath.Clean(root)
+	root =
+		filepath.Clean(
+			root,
+		)
 
 	var files []string
 
-	err := filepath.WalkDir(
-		root,
-		func(
-			path string,
-			entry os.DirEntry,
-			walkErr error,
-		) error {
-			if walkErr != nil {
-				return walkErr
-			}
-
-			if entry.IsDir() {
-				skip, err :=
-					shouldSkipPackageDirectory(
-						root,
-						path,
-						entry,
-					)
-
-				if err != nil {
-					return err
+	err :=
+		filepath.WalkDir(
+			root,
+			func(
+				path string,
+				entry os.DirEntry,
+				walkErr error,
+			) error {
+				if walkErr != nil {
+					return walkErr
 				}
 
-				if skip {
-					return fs.SkipDir
+				if entry.IsDir() {
+					skip, err :=
+						shouldSkipPackageDirectory(
+							root,
+							path,
+							entry,
+						)
+
+					if err != nil {
+						return err
+					}
+
+					if skip {
+						return fs.SkipDir
+					}
+
+					return nil
+				}
+
+				if strings.HasSuffix(
+					entry.Name(),
+					".seal",
+				) {
+					files = append(
+						files,
+						path,
+					)
 				}
 
 				return nil
-			}
-
-			if strings.HasSuffix(
-				entry.Name(),
-				".seal",
-			) {
-				files = append(
-					files,
-					path,
-				)
-			}
-
-			return nil
-		},
-	)
+			},
+		)
 
 	if err != nil {
 		return nil, err
 	}
 
-	sort.Strings(files)
+	sort.Strings(
+		files,
+	)
+
 	return files, nil
 }

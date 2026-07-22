@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	"sort"
 
 	"seal/internal/ast"
 	"seal/internal/builtin"
@@ -45,57 +46,83 @@ func (k SymbolKind) String() string {
 	switch k {
 	case SymbolPackage:
 		return "package"
+
 	case SymbolConst:
 		return "constant"
+
 	case SymbolVar:
 		return "variable"
+
 	case SymbolParam:
 		return "parameter"
+
 	case SymbolTask:
 		return "task"
+
 	case SymbolDistinct:
 		return "distinct type"
+
 	case SymbolStruct:
 		return "struct"
+
 	case SymbolEnum:
 		return "enum"
+
 	case SymbolUnion:
 		return "union"
+
 	case SymbolInterface:
 		return "interface"
+
 	case SymbolBitSet:
 		return "bit_set"
+
 	case SymbolOverload:
 		return "overload"
+
 	case SymbolForeignType:
 		return "foreign type"
+
 	case SymbolForeignTaskABI:
 		return "foreign task ABI"
+
 	case SymbolBuiltinType:
 		return "builtin type"
+
 	case SymbolBuiltinTask:
 		return "builtin task"
+
 	case SymbolGenericType:
 		return "generic type"
+
 	case SymbolGenericEnum:
 		return "generic enum"
+
 	case SymbolGenericUnion:
 		return "generic union"
+
 	case SymbolGenericTask:
 		return "generic task"
+
 	case SymbolGenericValue:
 		return "generic value"
+
 	default:
 		return "symbol"
 	}
 }
 
 func (k SymbolKind) IsRuntime() bool {
-	return k == SymbolVar || k == SymbolParam
+	return k == SymbolVar ||
+		k == SymbolParam
 }
 
 func (k SymbolKind) IsCompileTime() bool {
 	return !k.IsRuntime()
+}
+
+func (k SymbolKind) IsType() bool {
+	return isTypeSymbolKind(k)
 }
 
 type Symbol struct {
@@ -119,64 +146,164 @@ const (
 	ScopeDecl
 )
 
+func (k ScopeKind) String() string {
+	switch k {
+	case ScopeGlobal:
+		return "global"
+
+	case ScopeBlock:
+		return "block"
+
+	case ScopeTask:
+		return "task"
+
+	case ScopeDecl:
+		return "declaration"
+
+	default:
+		return "scope"
+	}
+}
+
 type Scope struct {
 	Kind    ScopeKind
 	Parent  *Scope
 	Symbols map[string]*Symbol
 	TaskID  int
 
-	// InterfaceRequirements records callable interface requirement names
-	// separately from ordinary lexical symbols.
-	//
-	// Several interfaces may declare the same requirement name, so these
-	// must not be represented as ordinary symbols.
+	/*
+		InterfaceRequirements records callable interface requirement names
+		separately from ordinary lexical symbols.
+
+		Several interfaces may declare the same requirement name, so these
+		must not be represented as ordinary symbols.
+	*/
 	InterfaceRequirements map[string]struct{}
 }
 
-func NewScope(kind ScopeKind, parent *Scope) *Scope {
+func NewScope(
+	kind ScopeKind,
+	parent *Scope,
+) *Scope {
 	taskID := 0
+
 	if parent != nil {
 		taskID = parent.TaskID
 	}
 
 	return &Scope{
-		Kind:                  kind,
-		Parent:                parent,
-		Symbols:               map[string]*Symbol{},
-		TaskID:                taskID,
+		Kind: kind,
+
+		Parent: parent,
+
+		Symbols: map[string]*Symbol{},
+
+		TaskID: taskID,
+
 		InterfaceRequirements: map[string]struct{}{},
 	}
 }
 
-func (s *Scope) LookupLocal(name string) *Symbol {
+func (s *Scope) LookupLocal(
+	name string,
+) *Symbol {
+	if s == nil {
+		return nil
+	}
+
 	return s.Symbols[name]
 }
 
-func (s *Scope) LookupVisible(name string) *Symbol {
+func (s *Scope) LookupVisible(
+	name string,
+) *Symbol {
 	for scope := s; scope != nil; scope = scope.Parent {
-		if sym := scope.LookupLocal(name); sym != nil {
-			return sym
+		if symbol :=
+			scope.LookupLocal(
+				name,
+			); symbol != nil {
+			return symbol
 		}
 	}
 
 	return nil
 }
 
-func (s *Scope) DeclareInterfaceRequirement(name string) {
-	if s == nil || name == "" {
+/*
+VisibleSymbols returns the symbols visible from this scope.
+
+When a name exists in more than one scope, only the nearest declaration is
+returned. Results are sorted by name and then by symbol kind so completion
+results remain deterministic.
+*/
+func (s *Scope) VisibleSymbols() []*Symbol {
+	if s == nil {
+		return nil
+	}
+
+	seen :=
+		map[string]bool{}
+
+	var symbols []*Symbol
+
+	for scope := s; scope != nil; scope = scope.Parent {
+		for name, symbol := range scope.Symbols {
+			if symbol == nil ||
+				seen[name] {
+				continue
+			}
+
+			seen[name] = true
+
+			symbols = append(
+				symbols,
+				symbol,
+			)
+		}
+	}
+
+	sort.Slice(
+		symbols,
+		func(
+			left int,
+			right int,
+		) bool {
+			if symbols[left].Name !=
+				symbols[right].Name {
+				return symbols[left].Name <
+					symbols[right].Name
+			}
+
+			return symbols[left].Kind <
+				symbols[right].Kind
+		},
+	)
+
+	return symbols
+}
+
+func (s *Scope) DeclareInterfaceRequirement(
+	name string,
+) {
+	if s == nil ||
+		name == "" {
 		return
 	}
 
-	s.InterfaceRequirements[name] = struct{}{}
+	s.InterfaceRequirements[name] =
+		struct{}{}
 }
 
-func (s *Scope) HasVisibleInterfaceRequirement(name string) bool {
+func (s *Scope) HasVisibleInterfaceRequirement(
+	name string,
+) bool {
 	if name == "" {
 		return false
 	}
 
 	for scope := s; scope != nil; scope = scope.Parent {
-		if _, ok := scope.InterfaceRequirements[name]; ok {
+		if _, found :=
+			scope.InterfaceRequirements[name]; found {
 			return true
 		}
 	}
@@ -184,42 +311,379 @@ func (s *Scope) HasVisibleInterfaceRequirement(name string) bool {
 	return false
 }
 
+/*
+VisibleInterfaceRequirements returns all interface requirement names visible
+from this scope in deterministic order.
+*/
+func (s *Scope) VisibleInterfaceRequirements() []string {
+	if s == nil {
+		return nil
+	}
+
+	seen :=
+		map[string]bool{}
+
+	var names []string
+
+	for scope := s; scope != nil; scope = scope.Parent {
+		for name := range scope.InterfaceRequirements {
+			if name == "" ||
+				seen[name] {
+				continue
+			}
+
+			seen[name] = true
+
+			names = append(
+				names,
+				name,
+			)
+		}
+	}
+
+	sort.Strings(
+		names,
+	)
+
+	return names
+}
+
+/*
+Definition identifies one source declaration introduced into a lexical scope.
+
+Symbol points to the exact resolver symbol. It is valid for the lifetime of the
+resolver analysis snapshot.
+*/
+type Definition struct {
+	Name string
+	Kind SymbolKind
+	Span source.Span
+
+	Symbol *Symbol
+}
+
+/*
+ResolvedUse connects a symbol use to its declaration.
+
+Definition may have no source file for compiler builtins and synthetic package
+symbols. Builtin identifies compiler-provided symbols.
+
+PackageName is set for package symbols and package-qualified members.
+*/
+type ResolvedUse struct {
+	Use        source.Span
+	Definition source.Span
+
+	Name string
+	Kind SymbolKind
+
+	Builtin     bool
+	PackageName string
+
+	Symbol *Symbol
+}
+
+/*
+ScopeRegion associates a source range with the lexical scope active in that
+range.
+
+Nested regions may overlap. ScopeAt selects the smallest and deepest matching
+region.
+*/
+type ScopeRegion struct {
+	Span  source.Span
+	Scope *Scope
+}
+
+/*
+SemanticInfo contains resolver-side information needed by editor tooling.
+
+The AST and checker still provide type-specific semantic information. This
+structure handles lexical declarations, lexical uses, package member uses, and
+scope lookup.
+*/
+type SemanticInfo struct {
+	GlobalScope *Scope
+
+	Definitions  []Definition
+	Uses         []ResolvedUse
+	ScopeRegions []ScopeRegion
+}
+
+func (i *SemanticInfo) ScopeAt(
+	file *source.File,
+	offset int,
+) *Scope {
+	if i == nil {
+		return nil
+	}
+
+	var best *Scope
+
+	bestWidth := 0
+	bestDepth := -1
+	found := false
+
+	for _, region := range i.ScopeRegions {
+		if region.Scope == nil ||
+			!spanContainsOffset(
+				region.Span,
+				file,
+				offset,
+			) {
+			continue
+		}
+
+		width :=
+			spanWidth(
+				region.Span,
+			)
+
+		depth :=
+			scopeDepth(
+				region.Scope,
+			)
+
+		if !found ||
+			width < bestWidth ||
+			(width == bestWidth &&
+				depth > bestDepth) {
+			best =
+				region.Scope
+
+			bestWidth = width
+			bestDepth = depth
+			found = true
+		}
+	}
+
+	if best != nil {
+		return best
+	}
+
+	return i.GlobalScope
+}
+
+func (i *SemanticInfo) UseAt(
+	file *source.File,
+	offset int,
+) *ResolvedUse {
+	if i == nil {
+		return nil
+	}
+
+	bestIndex := -1
+	bestWidth := 0
+
+	for index := range i.Uses {
+		use :=
+			&i.Uses[index]
+
+		if !spanContainsOffset(
+			use.Use,
+			file,
+			offset,
+		) {
+			continue
+		}
+
+		width :=
+			spanWidth(
+				use.Use,
+			)
+
+		if bestIndex < 0 ||
+			width < bestWidth {
+			bestIndex = index
+			bestWidth = width
+		}
+	}
+
+	if bestIndex < 0 {
+		return nil
+	}
+
+	return &i.Uses[bestIndex]
+}
+
+func (i *SemanticInfo) DefinitionAt(
+	file *source.File,
+	offset int,
+) *Definition {
+	if i == nil {
+		return nil
+	}
+
+	bestIndex := -1
+	bestWidth := 0
+
+	for index := range i.Definitions {
+		definition :=
+			&i.Definitions[index]
+
+		if !spanContainsOffset(
+			definition.Span,
+			file,
+			offset,
+		) {
+			continue
+		}
+
+		width :=
+			spanWidth(
+				definition.Span,
+			)
+
+		if bestIndex < 0 ||
+			width < bestWidth {
+			bestIndex = index
+			bestWidth = width
+		}
+	}
+
+	if bestIndex < 0 {
+		return nil
+	}
+
+	return &i.Definitions[bestIndex]
+}
+
+func sameSourceFile(
+	left *source.File,
+	right *source.File,
+) bool {
+	if left == nil ||
+		right == nil {
+		return false
+	}
+
+	if left == right {
+		return true
+	}
+
+	return left.Path != "" &&
+		left.Path == right.Path
+}
+
+func spanContainsOffset(
+	span source.Span,
+	file *source.File,
+	offset int,
+) bool {
+	if span.File == nil ||
+		file == nil ||
+		!sameSourceFile(
+			span.File,
+			file,
+		) {
+		return false
+	}
+
+	start := span.Start
+	end := span.End
+
+	if start < 0 {
+		start = 0
+	}
+
+	if end < start {
+		end = start
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+
+	if offset > len(file.Text) {
+		offset = len(file.Text)
+	}
+
+	return offset >= start &&
+		offset <= end
+}
+
+func spanWidth(
+	span source.Span,
+) int {
+	if span.End <= span.Start {
+		return 0
+	}
+
+	return span.End -
+		span.Start
+}
+
+func scopeDepth(
+	scope *Scope,
+) int {
+	depth := 0
+
+	for current := scope; current != nil; current = current.Parent {
+		depth++
+	}
+
+	return depth
+}
+
 type Resolver struct {
 	diags      *diag.Reporter
 	global     *Scope
 	nextTaskID int
 	packages   map[string]*PackageInfo
+
+	semantic SemanticInfo
 }
 
-func New(diags *diag.Reporter) *Resolver {
-	return NewWithPackages(diags, nil)
+func New(
+	diags *diag.Reporter,
+) *Resolver {
+	return NewWithPackages(
+		diags,
+		nil,
+	)
 }
 
-func NewWithPackages(diags *diag.Reporter, packages map[string]*PackageInfo) *Resolver {
-	r := &Resolver{
-		diags:      diags,
-		global:     NewScope(ScopeGlobal, nil),
-		nextTaskID: 1,
-		packages:   packages,
-	}
+func NewWithPackages(
+	diags *diag.Reporter,
+	packages map[string]*PackageInfo,
+) *Resolver {
+	global :=
+		NewScope(
+			ScopeGlobal,
+			nil,
+		)
 
-	r.declareBuiltins()
-	r.declarePackages()
+	resolver :=
+		&Resolver{
+			diags:      diags,
+			global:     global,
+			nextTaskID: 1,
+			packages:   packages,
 
-	return r
+			semantic: SemanticInfo{
+				GlobalScope: global,
+			},
+		}
+
+	resolver.declareBuiltins()
+	resolver.declarePackages()
+
+	return resolver
 }
 
 type PackageInfo struct {
 	Name    string
 	Symbols map[string]*PackageSymbol
 
-	// InterfaceRequirements contains exported interface requirement names.
-	//
-	// They are not ordinary package symbols because calls such as:
-	//
-	//     Read(reader)
-	//
-	// are resolved by argument types in the checker.
+	/*
+		InterfaceRequirements contains exported interface requirement names.
+
+		They are not ordinary package symbols because calls such as:
+
+		    Read(reader)
+
+		are resolved by argument types in the checker.
+	*/
 	InterfaceRequirements map[string]struct{}
 }
 
@@ -230,47 +694,249 @@ type PackageSymbol struct {
 }
 
 func (r *Resolver) GlobalScope() *Scope {
+	if r == nil {
+		return nil
+	}
+
 	return r.global
 }
 
-func (r *Resolver) ResolveFile(file *ast.File) *Scope {
-	for _, decl := range file.Decls {
-		r.declareDeclSymbol(r.global, decl)
+/*
+SemanticInfo returns a copy of the resolver semantic snapshot.
+
+The contained Scope and Symbol pointers remain owned by the resolver snapshot.
+The returned slices may be modified independently.
+*/
+func (r *Resolver) SemanticInfo() SemanticInfo {
+	if r == nil {
+		return SemanticInfo{}
 	}
 
-	for _, decl := range file.Decls {
-		r.resolveDecl(r.global, decl)
+	return SemanticInfo{
+		GlobalScope: r.semantic.GlobalScope,
+
+		Definitions: append(
+			[]Definition(nil),
+			r.semantic.Definitions...,
+		),
+
+		Uses: append(
+			[]ResolvedUse(nil),
+			r.semantic.Uses...,
+		),
+
+		ScopeRegions: append(
+			[]ScopeRegion(nil),
+			r.semantic.ScopeRegions...,
+		),
+	}
+}
+
+func (r *Resolver) ResolveFile(
+	file *ast.File,
+) *Scope {
+	if r == nil {
+		return nil
+	}
+
+	if file == nil {
+		return r.global
+	}
+
+	for _, declaration := range file.Decls {
+		r.declareDeclSymbol(
+			r.global,
+			declaration,
+		)
+	}
+
+	for _, declaration := range file.Decls {
+		r.resolveDecl(
+			r.global,
+			declaration,
+		)
 	}
 
 	return r.global
+}
+
+func (r *Resolver) recordDefinition(
+	symbol *Symbol,
+) {
+	if r == nil ||
+		symbol == nil ||
+		symbol.Name == "" ||
+		symbol.Builtin ||
+		symbol.Span.File == nil {
+		return
+	}
+
+	r.semantic.Definitions =
+		append(
+			r.semantic.Definitions,
+			Definition{
+				Name: symbol.Name,
+				Kind: symbol.Kind,
+				Span: symbol.Span,
+
+				Symbol: symbol,
+			},
+		)
+}
+
+func (r *Resolver) recordSymbolUse(
+	use source.Span,
+	symbol *Symbol,
+) {
+	if r == nil ||
+		symbol == nil ||
+		use.File == nil {
+		return
+	}
+
+	packageName := ""
+
+	if symbol.Kind ==
+		SymbolPackage &&
+		symbol.Package != nil {
+		packageName =
+			symbol.Package.Name
+	}
+
+	r.semantic.Uses =
+		append(
+			r.semantic.Uses,
+			ResolvedUse{
+				Use:        use,
+				Definition: symbol.Span,
+
+				Name: symbol.Name,
+				Kind: symbol.Kind,
+
+				Builtin:     symbol.Builtin,
+				PackageName: packageName,
+
+				Symbol: symbol,
+			},
+		)
+}
+
+func (r *Resolver) recordPackageSymbolUse(
+	use source.Span,
+	pkg *PackageInfo,
+	symbol *PackageSymbol,
+) {
+	if r == nil ||
+		symbol == nil ||
+		use.File == nil {
+		return
+	}
+
+	packageName := ""
+
+	if pkg != nil {
+		packageName = pkg.Name
+	}
+
+	r.semantic.Uses =
+		append(
+			r.semantic.Uses,
+			ResolvedUse{
+				Use:        use,
+				Definition: symbol.Span,
+
+				Name: symbol.Name,
+				Kind: symbol.Kind,
+
+				PackageName: packageName,
+			},
+		)
+}
+
+func (r *Resolver) recordScopeRegion(
+	span source.Span,
+	scope *Scope,
+) {
+	if r == nil ||
+		scope == nil ||
+		span.File == nil {
+		return
+	}
+
+	if span.End < span.Start {
+		span.End = span.Start
+	}
+
+	for _, existing := range r.semantic.ScopeRegions {
+		if existing.Scope == scope &&
+			existing.Span.File == span.File &&
+			existing.Span.Start == span.Start &&
+			existing.Span.End == span.End {
+			return
+		}
+	}
+
+	r.semantic.ScopeRegions =
+		append(
+			r.semantic.ScopeRegions,
+			ScopeRegion{
+				Span:  span,
+				Scope: scope,
+			},
+		)
 }
 
 func (r *Resolver) declareBuiltins() {
 	for _, typ := range builtin.Types {
-		r.declareBuiltin(typ.Name, SymbolBuiltinType)
+		r.declareBuiltin(
+			typ.Name,
+			SymbolBuiltinType,
+		)
 	}
 
 	for _, task := range builtin.Tasks {
-		r.declareBuiltin(task.Name, SymbolBuiltinTask)
+		r.declareBuiltin(
+			task.Name,
+			SymbolBuiltinTask,
+		)
 	}
 }
 
-func (r *Resolver) declareBuiltin(name string, kind SymbolKind) {
-	r.global.Symbols[name] = &Symbol{
-		Name:    name,
-		Kind:    kind,
-		Scope:   r.global,
-		Builtin: true,
-	}
+func (r *Resolver) declareBuiltin(
+	name string,
+	kind SymbolKind,
+) {
+	r.global.Symbols[name] =
+		&Symbol{
+			Name:    name,
+			Kind:    kind,
+			Scope:   r.global,
+			Builtin: true,
+		}
 }
 
-func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, span source.Span, node ast.Node) *Symbol {
-	if name == "" {
+func (r *Resolver) declareSymbol(
+	scope *Scope,
+	name string,
+	kind SymbolKind,
+	span source.Span,
+	node ast.Node,
+) *Symbol {
+	if scope == nil ||
+		name == "" {
 		return nil
 	}
 
-	if existing := scope.LookupVisible(name); existing != nil {
-		if existing.Builtin && existing.Kind == SymbolBuiltinTask {
+	if existing :=
+		scope.LookupVisible(
+			name,
+		); existing != nil {
+		if existing.Builtin &&
+			existing.Kind ==
+				SymbolBuiltinTask {
+			/*
+				User tasks may override builtin task names.
+			*/
 		} else {
 			r.diags.Add(
 				span,
@@ -281,21 +947,29 @@ func (r *Resolver) declareSymbol(scope *Scope, name string, kind SymbolKind, spa
 					existing.Span.String(),
 				),
 			)
+
 			return nil
 		}
 	}
 
-	sym := &Symbol{
-		Name:   name,
-		Kind:   kind,
-		Span:   span,
-		Node:   node,
-		Scope:  scope,
-		TaskID: scope.TaskID,
-	}
+	symbol :=
+		&Symbol{
+			Name:   name,
+			Kind:   kind,
+			Span:   span,
+			Node:   node,
+			Scope:  scope,
+			TaskID: scope.TaskID,
+		}
 
-	scope.Symbols[name] = sym
-	return sym
+	scope.Symbols[name] =
+		symbol
+
+	r.recordDefinition(
+		symbol,
+	)
+
+	return symbol
 }
 
 func (r *Resolver) declareShortVar(
@@ -317,9 +991,10 @@ func (r *Resolver) declareShortVar(
 
 		The checker determines whether the existing symbol is assignable.
 	*/
-	if existing := scope.LookupLocal(
-		name.Name,
-	); existing != nil {
+	if existing :=
+		scope.LookupLocal(
+			name.Name,
+		); existing != nil {
 		return existing
 	}
 
@@ -335,21 +1010,29 @@ func (r *Resolver) declareShortVar(
 
 		The inner valid is a new variable that shadows the outer valid.
 	*/
-	sym := &Symbol{
-		Name:   name.Name,
-		Kind:   SymbolVar,
-		Span:   name.Span(),
-		Node:   node,
-		Scope:  scope,
-		TaskID: scope.TaskID,
-	}
+	symbol :=
+		&Symbol{
+			Name:   name.Name,
+			Kind:   SymbolVar,
+			Span:   name.Span(),
+			Node:   node,
+			Scope:  scope,
+			TaskID: scope.TaskID,
+		}
 
-	scope.Symbols[name.Name] = sym
+	scope.Symbols[name.Name] =
+		symbol
 
-	return sym
+	r.recordDefinition(
+		symbol,
+	)
+
+	return symbol
 }
 
-func genericParamSymbolKind(category ast.GenericParamCategory) SymbolKind {
+func genericParamSymbolKind(
+	category ast.GenericParamCategory,
+) SymbolKind {
 	switch category {
 	case ast.GenericParamType:
 		return SymbolGenericType
@@ -374,75 +1057,141 @@ func genericParamSymbolKind(category ast.GenericParamCategory) SymbolKind {
 	}
 }
 
-func (r *Resolver) declareGenericParams(scope *Scope, params []ast.GenericParam) {
-	for _, param := range params {
-		kind := genericParamSymbolKind(param.Category)
-		if kind == SymbolInvalid {
-			r.diags.Add(param.Span(), fmt.Sprintf("invalid generic parameter category for %q", param.Name.Name))
+func (r *Resolver) declareGenericParams(
+	scope *Scope,
+	params []ast.GenericParam,
+) {
+	for _, parameter := range params {
+		kind :=
+			genericParamSymbolKind(
+				parameter.Category,
+			)
+
+		if kind ==
+			SymbolInvalid {
+			r.diags.Add(
+				parameter.Span(),
+				fmt.Sprintf(
+					"invalid generic parameter category for %q",
+					parameter.Name.Name,
+				),
+			)
+
 			continue
 		}
 
-		r.declareSymbol(scope, param.Name.Name, kind, param.Name.Span(), nil)
+		r.declareSymbol(
+			scope,
+			parameter.Name.Name,
+			kind,
+			parameter.Name.Span(),
+			nil,
+		)
 	}
 }
 
-func (r *Resolver) resolveGenericParams(scope *Scope, params []ast.GenericParam) {
-	for _, param := range params {
-		if param.Type != nil {
-			r.resolveType(scope, param.Type)
+func (r *Resolver) resolveGenericParams(
+	scope *Scope,
+	params []ast.GenericParam,
+) {
+	for _, parameter := range params {
+		if parameter.Type != nil {
+			r.resolveType(
+				scope,
+				parameter.Type,
+			)
 		}
 
-		for _, constraint := range param.Constraints {
-			r.resolveGenericConstraint(scope, constraint)
+		for _, constraint := range parameter.Constraints {
+			r.resolveGenericConstraint(
+				scope,
+				constraint,
+			)
 		}
 	}
 }
 
-func (r *Resolver) resolveGenericConstraint(scope *Scope, constraint ast.GenericConstraint) {
-	switch c := constraint.(type) {
+func (r *Resolver) resolveGenericConstraint(
+	scope *Scope,
+	constraint ast.GenericConstraint,
+) {
+	switch value :=
+		constraint.(type) {
 	case *ast.GenericExprConstraint:
-		r.resolveExpr(scope, c.Expr)
+		r.resolveExpr(
+			scope,
+			value.Expr,
+		)
 
 	case *ast.GenericFieldConstraint:
-		if c.HasType && c.Type != nil {
-			r.resolveType(scope, c.Type)
+		if value.HasType &&
+			value.Type != nil {
+			r.resolveType(
+				scope,
+				value.Type,
+			)
 		}
 
 	case *ast.GenericImplConstraint:
-		r.resolveType(scope, c.Interface)
+		r.resolveType(
+			scope,
+			value.Interface,
+		)
 
 	case *ast.GenericEnumVariantConstraint:
-		// Variant names are checked later by the checker.
+		/*
+			Variant names are checked later by the checker.
+		*/
 
 	case *ast.GenericUnionMemberConstraint:
-		r.resolveType(scope, c.Member)
+		r.resolveType(
+			scope,
+			value.Member,
+		)
 
 	case *ast.GenericTaskConstraint:
-		for _, param := range c.Params {
-			r.resolveType(scope, param)
+		for _, parameter := range value.Params {
+			r.resolveType(
+				scope,
+				parameter,
+			)
 		}
 
-		for _, result := range c.Results {
-			r.resolveType(scope, result)
+		for _, result := range value.Results {
+			r.resolveType(
+				scope,
+				result,
+			)
 		}
 	}
 }
 
-func (r *Resolver) resolveGenericArg(scope *Scope, arg ast.GenericArg) {
+func (r *Resolver) resolveGenericArg(
+	scope *Scope,
+	arg ast.GenericArg,
+) {
 	switch arg.Kind {
 	case ast.GenericArgType:
 		if arg.Type != nil {
-			r.resolveType(scope, arg.Type)
+			r.resolveType(
+				scope,
+				arg.Type,
+			)
 		}
 
 	case ast.GenericArgExpr:
 		if arg.Expr != nil {
-			r.resolveExpr(scope, arg.Expr)
+			r.resolveExpr(
+				scope,
+				arg.Expr,
+			)
 		}
 	}
 }
 
-func isTypeSymbolKind(kind SymbolKind) bool {
+func isTypeSymbolKind(
+	kind SymbolKind,
+) bool {
 	switch kind {
 	case SymbolStruct,
 		SymbolDistinct,
@@ -462,103 +1211,127 @@ func isTypeSymbolKind(kind SymbolKind) bool {
 	}
 }
 
-func (r *Resolver) declareGenericSymbol(scope *Scope, name string, kind SymbolKind, span source.Span) *Symbol {
-	if existing := scope.LookupLocal(name); existing != nil {
+func (r *Resolver) declareGenericSymbol(
+	scope *Scope,
+	name string,
+	kind SymbolKind,
+	span source.Span,
+) *Symbol {
+	if scope == nil {
+		return nil
+	}
+
+	if existing :=
+		scope.LookupLocal(
+			name,
+		); existing != nil {
 		if existing.Kind == kind {
 			return existing
 		}
 	}
 
-	return r.declareSymbol(scope, name, kind, span, nil)
+	return r.declareSymbol(
+		scope,
+		name,
+		kind,
+		span,
+		nil,
+	)
 }
 
-func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
-	switch d := decl.(type) {
+func (r *Resolver) declareDeclSymbol(
+	scope *Scope,
+	declaration ast.Decl,
+) {
+	switch value :=
+		declaration.(type) {
 	case *ast.ConstDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolConst,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.ForeignValueDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolConst,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.StructDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolStruct,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.TaskDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolTask,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.ForeignTypeDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolForeignType,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.ForeignTaskDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolForeignTaskABI,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.EnumDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolEnum,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.UnionDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolUnion,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.InterfaceDecl:
-		sym := r.declareSymbol(
-			scope,
-			d.Name.Name,
-			SymbolInterface,
-			d.Name.Span(),
-			d,
-		)
-		if sym == nil {
+		symbol :=
+			r.declareSymbol(
+				scope,
+				value.Name.Name,
+				SymbolInterface,
+				value.Name.Span(),
+				value,
+			)
+
+		if symbol == nil {
 			return
 		}
 
-		for _, requirement := range d.Requirements {
+		for _, requirement := range value.Requirements {
 			if requirement == nil {
 				continue
 			}
@@ -571,72 +1344,106 @@ func (r *Resolver) declareDeclSymbol(scope *Scope, decl ast.Decl) {
 	case *ast.OverloadDecl:
 		r.declareSymbol(
 			scope,
-			d.Name,
+			value.Name,
 			SymbolOverload,
-			d.Span(),
-			d,
+			value.Span(),
+			value,
 		)
 
 	case *ast.DistinctDecl:
 		r.declareSymbol(
 			scope,
-			d.Name.Name,
+			value.Name.Name,
 			SymbolDistinct,
-			d.Name.Span(),
-			d,
+			value.Name.Span(),
+			value,
 		)
 
 	case *ast.DirectiveDecl:
-		// c :: @c_import { ... } is codegen metadata, not a visible
-		// Seal symbol.
-		return
+		/*
+			c :: @c_import { ... } is code-generation metadata, not a visible
+			Seal symbol.
+		*/
 
 	case *ast.ImplDecl:
-		// impl does not introduce a new symbol.
-		return
+		/*
+			An impl declaration does not introduce a lexical symbol.
+		*/
 	}
 }
 
-func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
-	switch d := decl.(type) {
+func (r *Resolver) resolveDecl(
+	scope *Scope,
+	declaration ast.Decl,
+) {
+	switch value :=
+		declaration.(type) {
 	case *ast.ConstDecl:
-		r.resolveExpr(scope, d.Value)
+		r.resolveExpr(
+			scope,
+			value.Value,
+		)
 
 	case *ast.ForeignValueDecl:
-		if d.Type != nil {
-			r.resolveType(scope, d.Type)
+		if value.Type != nil {
+			r.resolveType(
+				scope,
+				value.Type,
+			)
 		}
 
 	case *ast.ForeignTypeDecl,
 		*ast.ForeignTaskDecl:
-		// Their C token sequences are opaque to the resolver.
-		return
+		/*
+			Their C token sequences are opaque to the resolver.
+		*/
 
 	case *ast.StructDecl:
-		r.resolveStructDecl(scope, d)
+		r.resolveStructDecl(
+			scope,
+			value,
+		)
 
 	case *ast.TaskDecl:
-		r.resolveTaskDecl(scope, d)
+		r.resolveTaskDecl(
+			scope,
+			value,
+		)
 
 	case *ast.DistinctDecl:
-		r.resolveType(scope, d.Underlying)
+		r.resolveType(
+			scope,
+			value.Underlying,
+		)
 
 	case *ast.EnumDecl:
-		r.resolveEnumDecl(scope, d)
+		r.resolveEnumDecl(
+			scope,
+			value,
+		)
 
 	case *ast.UnionDecl:
-		for _, member := range d.Members {
-			r.resolveType(scope, member)
+		for _, member := range value.Members {
+			r.resolveType(
+				scope,
+				member,
+			)
 		}
 
 	case *ast.InterfaceDecl:
-		r.resolveInterfaceDecl(scope, d)
+		r.resolveInterfaceDecl(
+			scope,
+			value,
+		)
 
 	case *ast.ImplDecl:
-		r.resolveImplDecl(scope, d)
+		r.resolveImplDecl(
+			scope,
+			value,
+		)
 
 	case *ast.OverloadDecl:
-		for _, name := range d.Names {
+		for _, name := range value.Names {
 			r.resolveSymbolUse(
 				scope,
 				name.Name,
@@ -649,140 +1456,251 @@ func (r *Resolver) resolveDecl(scope *Scope, decl ast.Decl) {
 	}
 }
 
-func (r *Resolver) resolveStructDecl(parent *Scope, d *ast.StructDecl) {
-	scope := NewScope(ScopeDecl, parent)
-
-	r.declareGenericParams(scope, d.GenericParams)
-	r.resolveGenericParams(scope, d.GenericParams)
-
-	for _, field := range d.Fields {
-		r.resolveType(scope, field.Type)
-	}
-}
-
-func (r *Resolver) resolveEnumDecl(scope *Scope, d *ast.EnumDecl) {
-	if d == nil {
+func (r *Resolver) resolveStructDecl(
+	parent *Scope,
+	declaration *ast.StructDecl,
+) {
+	if declaration == nil {
 		return
 	}
 
-	if d.Underlying != nil {
-		r.resolveType(scope, d.Underlying)
+	scope :=
+		NewScope(
+			ScopeDecl,
+			parent,
+		)
+
+	r.recordScopeRegion(
+		declaration.Span(),
+		scope,
+	)
+
+	r.declareGenericParams(
+		scope,
+		declaration.GenericParams,
+	)
+
+	r.resolveGenericParams(
+		scope,
+		declaration.GenericParams,
+	)
+
+	for _, field := range declaration.Fields {
+		r.resolveType(
+			scope,
+			field.Type,
+		)
+	}
+}
+
+func (r *Resolver) resolveEnumDecl(
+	scope *Scope,
+	declaration *ast.EnumDecl,
+) {
+	if declaration == nil {
+		return
 	}
 
-	seen := map[string]source.Span{}
+	if declaration.Underlying != nil {
+		r.resolveType(
+			scope,
+			declaration.Underlying,
+		)
+	}
 
-	for _, variant := range d.Variants {
-		if prev, ok := seen[variant.Name]; ok {
+	seen :=
+		map[string]source.Span{}
+
+	for _, variant := range declaration.Variants {
+		if previous, found :=
+			seen[variant.Name]; found {
 			r.diags.Add(
 				variant.Span(),
 				fmt.Sprintf(
 					"duplicate enum variant %q, previous declaration at %s",
 					variant.Name,
-					prev.String(),
+					previous.String(),
 				),
 			)
+
 			continue
 		}
 
-		seen[variant.Name] = variant.Span()
+		seen[variant.Name] =
+			variant.Span()
 	}
 }
 
-func (r *Resolver) resolveInterfaceDecl(parent *Scope, d *ast.InterfaceDecl) {
-	scope := NewScope(ScopeDecl, parent)
+func (r *Resolver) resolveInterfaceDecl(
+	parent *Scope,
+	declaration *ast.InterfaceDecl,
+) {
+	if declaration == nil {
+		return
+	}
 
-	r.declareGenericParams(scope, d.GenericParams)
-	r.resolveGenericParams(scope, d.GenericParams)
+	scope :=
+		NewScope(
+			ScopeDecl,
+			parent,
+		)
 
-	seenRequirements := map[string]source.Span{}
+	r.recordScopeRegion(
+		declaration.Span(),
+		scope,
+	)
 
-	for _, req := range d.Requirements {
-		if req == nil {
+	r.declareGenericParams(
+		scope,
+		declaration.GenericParams,
+	)
+
+	r.resolveGenericParams(
+		scope,
+		declaration.GenericParams,
+	)
+
+	seenRequirements :=
+		map[string]source.Span{}
+
+	for _, requirement := range declaration.Requirements {
+		if requirement == nil {
 			continue
 		}
 
-		if previous, exists := seenRequirements[req.Name.Name]; exists {
+		if previous, found :=
+			seenRequirements[requirement.Name.Name]; found {
 			r.diags.Add(
-				req.Name.Span(),
+				requirement.Name.Span(),
 				fmt.Sprintf(
 					"duplicate interface requirement %q, previous declaration at %s",
-					req.Name.Name,
+					requirement.Name.Name,
 					previous.String(),
 				),
 			)
 		} else {
-			seenRequirements[req.Name.Name] = req.Name.Span()
+			seenRequirements[requirement.Name.Name] = requirement.Name.Span()
 		}
 
-		seenParams := map[string]source.Span{}
+		seenParams :=
+			map[string]source.Span{}
 
-		for _, param := range req.Params {
-			if param.Name.Name != "" && param.Name.Name != "_" {
-				if previous, exists := seenParams[param.Name.Name]; exists {
+		for _, parameter := range requirement.Params {
+			if parameter.Name.Name != "" &&
+				parameter.Name.Name != "_" {
+				if previous, found :=
+					seenParams[parameter.Name.Name]; found {
 					r.diags.Add(
-						param.Name.Span(),
+						parameter.Name.Span(),
 						fmt.Sprintf(
 							"duplicate interface requirement parameter %q, previous declaration at %s",
-							param.Name.Name,
+							parameter.Name.Name,
 							previous.String(),
 						),
 					)
 				} else {
-					seenParams[param.Name.Name] = param.Name.Span()
+					seenParams[parameter.Name.Name] = parameter.Name.Span()
 				}
 			}
 
-			if param.Type != nil {
-				r.resolveInterfaceRequirementType(scope, param.Type)
+			if parameter.Type != nil {
+				r.resolveInterfaceRequirementType(
+					scope,
+					parameter.Type,
+				)
 			}
 
-			if param.HasDefault {
+			if parameter.HasDefault {
 				r.diags.Add(
-					param.Name.Span(),
+					parameter.Name.Span(),
 					fmt.Sprintf(
 						"interface requirement parameter %q cannot have a default value",
-						param.Name.Name,
+						parameter.Name.Name,
 					),
 				)
 			}
 		}
 
-		for _, result := range req.Results {
+		for _, result := range requirement.Results {
 			if result != nil {
-				r.resolveInterfaceRequirementType(scope, result)
+				r.resolveInterfaceRequirementType(
+					scope,
+					result,
+				)
 			}
 		}
 	}
 }
 
-func (r *Resolver) resolveInterfaceRequirementType(scope *Scope, typ ast.Type) {
-	r.resolveTypeWithInterfaceSelf(scope, typ, true)
+func (r *Resolver) resolveInterfaceRequirementType(
+	scope *Scope,
+	typ ast.Type,
+) {
+	r.resolveTypeWithInterfaceSelf(
+		scope,
+		typ,
+		true,
+	)
 }
 
-func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
-	implScope := NewScope(ScopeDecl, parent)
-
-	r.declareGenericParams(implScope, d.GenericParams)
-	r.resolveGenericParams(implScope, d.GenericParams)
-
-	if d.Interface != nil {
-		r.resolveType(implScope, d.Interface)
+func (r *Resolver) resolveImplDecl(
+	parent *Scope,
+	declaration *ast.ImplDecl,
+) {
+	if declaration == nil {
+		return
 	}
 
-	if d.Target != nil {
-		r.resolveType(implScope, d.Target)
+	implScope :=
+		NewScope(
+			ScopeDecl,
+			parent,
+		)
+
+	r.recordScopeRegion(
+		declaration.Span(),
+		implScope,
+	)
+
+	r.declareGenericParams(
+		implScope,
+		declaration.GenericParams,
+	)
+
+	r.resolveGenericParams(
+		implScope,
+		declaration.GenericParams,
+	)
+
+	if declaration.Interface != nil {
+		r.resolveType(
+			implScope,
+			declaration.Interface,
+		)
 	}
 
-	if len(d.UsingPath) > 0 {
-		if len(d.Entries) > 0 {
+	if declaration.Target != nil {
+		r.resolveType(
+			implScope,
+			declaration.Target,
+		)
+	}
+
+	if len(
+		declaration.UsingPath,
+	) > 0 {
+		if len(
+			declaration.Entries,
+		) > 0 {
 			r.diags.Add(
-				d.Span(),
+				declaration.Span(),
 				"delegated impl cannot contain manual impl entries",
 			)
 		}
 
 		seenEmpty := false
-		for _, part := range d.UsingPath {
+
+		for _, part := range declaration.UsingPath {
 			if part.Name == "" {
 				seenEmpty = true
 				break
@@ -791,22 +1709,27 @@ func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
 
 		if seenEmpty {
 			r.diags.Add(
-				d.Span(),
+				declaration.Span(),
 				"using path contains an empty field name",
 			)
 		}
 
-		// Field names in a using path are not normal lexical symbols.
-		// Their existence and types are resolved by the checker from Target.
+		/*
+			Field names in a using path are not normal lexical symbols. Their
+			existence and types are resolved by the checker from Target.
+		*/
 		return
 	}
 
-	seenEntries := map[string]source.Span{}
+	seenEntries :=
+		map[string]source.Span{}
 
-	for i := range d.Entries {
-		entry := &d.Entries[i]
+	for index := range declaration.Entries {
+		entry :=
+			&declaration.Entries[index]
 
-		if previous, exists := seenEntries[entry.Name.Name]; exists {
+		if previous, found :=
+			seenEntries[entry.Name.Name]; found {
 			r.diags.Add(
 				entry.Name.Span(),
 				fmt.Sprintf(
@@ -819,7 +1742,8 @@ func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
 			seenEntries[entry.Name.Name] = entry.Name.Span()
 		}
 
-		if entry.Task != nil && entry.Alias != nil {
+		if entry.Task != nil &&
+			entry.Alias != nil {
 			r.diags.Add(
 				entry.Span(),
 				fmt.Sprintf(
@@ -827,10 +1751,12 @@ func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
 					entry.Name.Name,
 				),
 			)
+
 			continue
 		}
 
-		if entry.Task == nil && entry.Alias == nil {
+		if entry.Task == nil &&
+			entry.Alias == nil {
 			r.diags.Add(
 				entry.Span(),
 				fmt.Sprintf(
@@ -838,118 +1764,174 @@ func (r *Resolver) resolveImplDecl(parent *Scope, d *ast.ImplDecl) {
 					entry.Name.Name,
 				),
 			)
+
 			continue
 		}
 
 		if entry.Task != nil {
-			r.resolveTaskDecl(implScope, entry.Task)
+			r.resolveTaskDecl(
+				implScope,
+				entry.Task,
+			)
 		}
 
 		if entry.Alias != nil {
-			r.resolveExpr(implScope, entry.Alias)
+			r.resolveExpr(
+				implScope,
+				entry.Alias,
+			)
 		}
 	}
 }
 
 func (r *Resolver) resolveTaskDecl(
 	parent *Scope,
-	d *ast.TaskDecl,
+	declaration *ast.TaskDecl,
 ) {
-	genericScope := NewScope(
-		ScopeDecl,
-		parent,
+	if declaration == nil {
+		return
+	}
+
+	genericScope :=
+		NewScope(
+			ScopeDecl,
+			parent,
+		)
+
+	r.recordScopeRegion(
+		declaration.Span(),
+		genericScope,
 	)
 
 	r.declareGenericParams(
 		genericScope,
-		d.GenericParams,
+		declaration.GenericParams,
 	)
 
 	r.resolveGenericParams(
 		genericScope,
-		d.GenericParams,
+		declaration.GenericParams,
 	)
 
-	if d.ForeignABI != nil {
+	if declaration.ForeignABI != nil {
 		r.resolveExpr(
 			genericScope,
-			d.ForeignABI,
+			declaration.ForeignABI,
 		)
 	}
 
-	taskScope := NewScope(
-		ScopeTask,
-		genericScope,
-	)
-
-	taskScope.TaskID = r.nextTaskID
-	r.nextTaskID++
-
-	for _, param := range d.Params {
-		r.resolveType(
-			taskScope,
-			param.Type,
+	taskScope :=
+		NewScope(
+			ScopeTask,
+			genericScope,
 		)
 
-		if param.HasDefault {
+	taskScope.TaskID =
+		r.nextTaskID
+
+	r.nextTaskID++
+
+	for _, parameter := range declaration.Params {
+		r.resolveType(
+			taskScope,
+			parameter.Type,
+		)
+
+		if parameter.HasDefault {
 			r.resolveExpr(
 				genericScope,
-				param.Default,
+				parameter.Default,
 			)
 		}
 
 		r.declareSymbol(
 			taskScope,
-			param.Name.Name,
+			parameter.Name.Name,
 			SymbolParam,
-			param.Name.Span(),
+			parameter.Name.Span(),
 			nil,
 		)
 	}
 
-	for _, result := range d.Results {
+	for _, result := range declaration.Results {
 		r.resolveType(
 			taskScope,
 			result,
 		)
 	}
 
-	if d.Body != nil {
+	if declaration.Body != nil {
 		r.resolveBlockInScope(
-			d.Body,
+			declaration.Body,
 			taskScope,
 			false,
 		)
 	}
 }
 
-func (r *Resolver) resolveBlockInScope(block *ast.BlockStmt, parent *Scope, createChild bool) {
-	if block == nil {
+func (r *Resolver) resolveBlockInScope(
+	block *ast.BlockStmt,
+	parent *Scope,
+	createChild bool,
+) {
+	if block == nil ||
+		parent == nil {
 		return
 	}
 
 	scope := parent
+
 	if createChild {
-		scope = NewScope(ScopeBlock, parent)
+		scope =
+			NewScope(
+				ScopeBlock,
+				parent,
+			)
 	}
 
-	for _, stmt := range block.Stmts {
-		r.resolveStmt(scope, stmt)
+	r.recordScopeRegion(
+		block.Span(),
+		scope,
+	)
+
+	for _, statement := range block.Stmts {
+		r.resolveStmt(
+			scope,
+			statement,
+		)
 	}
 }
 
-func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
-	switch s := stmt.(type) {
+func (r *Resolver) resolveStmt(
+	scope *Scope,
+	statement ast.Stmt,
+) {
+	switch value :=
+		statement.(type) {
 	case *ast.DeclStmt:
-		r.declareDeclSymbol(scope, s.Decl)
-		r.resolveDecl(scope, s.Decl)
+		r.declareDeclSymbol(
+			scope,
+			value.Decl,
+		)
+
+		r.resolveDecl(
+			scope,
+			value.Decl,
+		)
 
 	case *ast.BlockStmt:
-		r.resolveBlockInScope(s, scope, true)
+		r.resolveBlockInScope(
+			value,
+			scope,
+			true,
+		)
 
 	case *ast.ReturnStmt:
-		for _, value := range s.Values {
-			r.resolveExpr(scope, value)
+		for _, result := range value.Values {
+			r.resolveExpr(
+				scope,
+				result,
+			)
 		}
 
 	case *ast.BreakStmt,
@@ -957,50 +1939,58 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 		return
 
 	case *ast.DeferStmt:
-		if s.Call != nil {
-			r.resolveExpr(scope, s.Call)
+		if value.Call != nil {
+			r.resolveExpr(
+				scope,
+				value.Call,
+			)
 		}
 
-		if s.Body != nil {
-			// A deferred block has its own local scope, but it may reference
-			// symbols visible at the defer declaration.
-			r.resolveBlockInScope(s.Body, scope, true)
+		if value.Body != nil {
+			/*
+				A deferred block has its own local scope, but it may reference
+				symbols visible at the defer declaration.
+			*/
+			r.resolveBlockInScope(
+				value.Body,
+				scope,
+				true,
+			)
 		}
 
 	case *ast.SealStmt:
-		r.resolveExpr(scope, s.Target)
+		r.resolveExpr(
+			scope,
+			value.Target,
+		)
 
 	case *ast.ExprStmt:
-		r.resolveExpr(scope, s.Expr)
+		r.resolveExpr(
+			scope,
+			value.Expr,
+		)
 
 	case *ast.MultiVarDeclStmt:
 		/*
-			The RHS is resolved before any newly declared names become visible.
+			The RHS is resolved before newly declared names become visible.
 
 			    left, right := Make(left)
-
-			The left used by Make(left) refers to the previously visible symbol,
-			not the left being declared by this statement.
 		*/
 		r.resolveExpr(
 			scope,
-			s.Value,
+			value.Value,
 		)
 
-		for _, name := range s.Names {
+		for _, name := range value.Names {
 			r.declareShortVar(
 				scope,
 				name,
-				s,
+				value,
 			)
 		}
 
 	case *ast.MultiAssignStmt:
-		/*
-			Multi-assignment introduces no symbols. Resolve each non-discard
-			target as an ordinary symbol use, then resolve the RHS call.
-		*/
-		for _, name := range s.Names {
+		for _, name := range value.Names {
 			if name.Name == "_" {
 				continue
 			}
@@ -1014,62 +2004,118 @@ func (r *Resolver) resolveStmt(scope *Scope, stmt ast.Stmt) {
 
 		r.resolveExpr(
 			scope,
-			s.Value,
+			value.Value,
 		)
 
 	case *ast.AssignStmt:
-		r.resolveExpr(scope, s.Left)
-		r.resolveExpr(scope, s.Right)
+		r.resolveExpr(
+			scope,
+			value.Left,
+		)
+
+		r.resolveExpr(
+			scope,
+			value.Right,
+		)
 
 	case *ast.VarDeclStmt:
-		if s.HasType {
-			r.resolveType(scope, s.Type)
+		if value.HasType {
+			r.resolveType(
+				scope,
+				value.Type,
+			)
 		}
 
-		if s.HasValue {
-			r.resolveExpr(scope, s.Value)
+		if value.HasValue {
+			r.resolveExpr(
+				scope,
+				value.Value,
+			)
 		}
 
 		r.declareSymbol(
 			scope,
-			s.Name.Name,
+			value.Name.Name,
 			SymbolVar,
-			s.Name.Span(),
+			value.Name.Span(),
 			nil,
 		)
 
 	case *ast.IfStmt:
-		r.resolveExpr(scope, s.Cond)
-		r.resolveBlockInScope(s.Then, scope, true)
+		r.resolveExpr(
+			scope,
+			value.Cond,
+		)
 
-		if s.Else != nil {
-			r.resolveStmt(scope, s.Else)
+		r.resolveBlockInScope(
+			value.Then,
+			scope,
+			true,
+		)
+
+		if value.Else != nil {
+			r.resolveStmt(
+				scope,
+				value.Else,
+			)
 		}
 
 	case *ast.ForStmt:
-		forScope := NewScope(ScopeBlock, scope)
+		forScope :=
+			NewScope(
+				ScopeBlock,
+				scope,
+			)
 
-		if s.Init != nil {
-			r.resolveStmt(forScope, s.Init)
+		r.recordScopeRegion(
+			value.Span(),
+			forScope,
+		)
+
+		if value.Init != nil {
+			r.resolveStmt(
+				forScope,
+				value.Init,
+			)
 		}
 
-		if s.Cond != nil {
-			r.resolveExpr(forScope, s.Cond)
+		if value.Cond != nil {
+			r.resolveExpr(
+				forScope,
+				value.Cond,
+			)
 		}
 
-		if s.Post != nil {
-			r.resolveStmt(forScope, s.Post)
+		if value.Post != nil {
+			r.resolveStmt(
+				forScope,
+				value.Post,
+			)
 		}
 
-		r.resolveBlockInScope(s.Body, forScope, true)
+		r.resolveBlockInScope(
+			value.Body,
+			forScope,
+			true,
+		)
 
 	case *ast.SwitchStmt:
-		r.resolveSwitchStmt(scope, s)
+		r.resolveSwitchStmt(
+			scope,
+			value,
+		)
 	}
 }
 
-func (r *Resolver) resolveType(scope *Scope, typ ast.Type) {
-	r.resolveTypeWithInterfaceSelf(scope, typ, false)
+func (r *Resolver) resolveType(
+	scope *Scope,
+	typ ast.Type,
+) {
+	r.resolveTypeWithInterfaceSelf(
+		scope,
+		typ,
+		false,
+	)
 }
 
 func (r *Resolver) resolveTypeWithInterfaceSelf(
@@ -1077,37 +2123,47 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 	typ ast.Type,
 	allowInterfaceSelf bool,
 ) {
-	switch t := typ.(type) {
+	switch value :=
+		typ.(type) {
 	case *ast.InterfaceSelfType:
 		if !allowInterfaceSelf {
 			r.diags.Add(
-				t.Span(),
+				value.Span(),
 				`"self" type is only available inside interface requirements`,
 			)
 		}
 
 	case *ast.NamedType:
-		if len(t.Parts) == 0 {
+		if len(
+			value.Parts,
+		) == 0 {
 			return
 		}
 
-		first := t.Parts[0]
+		first :=
+			value.Parts[0]
 
-		sym := r.resolveSymbolUse(
-			scope,
-			first.Name,
-			first.Span(),
-		)
-		if sym == nil {
+		symbol :=
+			r.resolveSymbolUse(
+				scope,
+				first.Name,
+				first.Span(),
+			)
+
+		if symbol == nil {
 			return
 		}
 
-		if len(t.Parts) == 1 {
-			if isTypeSymbolKind(sym.Kind) {
+		if len(
+			value.Parts,
+		) == 1 {
+			if isTypeSymbolKind(
+				symbol.Kind,
+			) {
 				return
 			}
 
-			if sym.Kind.IsRuntime() {
+			if symbol.Kind.IsRuntime() {
 				r.diags.Add(
 					first.Span(),
 					fmt.Sprintf(
@@ -1128,7 +2184,8 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 			return
 		}
 
-		if sym.Kind != SymbolPackage {
+		if symbol.Kind !=
+			SymbolPackage {
 			r.diags.Add(
 				first.Span(),
 				fmt.Sprintf(
@@ -1136,10 +2193,11 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 					first.Name,
 				),
 			)
+
 			return
 		}
 
-		if sym.Package == nil {
+		if symbol.Package == nil {
 			r.diags.Add(
 				first.Span(),
 				fmt.Sprintf(
@@ -1147,38 +2205,54 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 					first.Name,
 				),
 			)
+
 			return
 		}
 
-		if len(t.Parts) != 2 {
+		if len(
+			value.Parts,
+		) != 2 {
 			r.diags.Add(
-				t.Span(),
+				value.Span(),
 				"package-qualified types currently support exactly one package and one member",
 			)
+
 			return
 		}
 
-		memberName := t.Parts[1].Name
-		member := sym.Package.Symbols[memberName]
+		memberName :=
+			value.Parts[1].Name
+
+		member :=
+			symbol.Package.Symbols[memberName]
 
 		if member == nil {
 			r.diags.Add(
-				t.Parts[1].Span(),
+				value.Parts[1].Span(),
 				fmt.Sprintf(
 					"package %s has no type %q",
 					first.Name,
 					memberName,
 				),
 			)
+
 			return
 		}
 
-		if isTypeSymbolKind(member.Kind) {
+		r.recordPackageSymbolUse(
+			value.Parts[1].Span(),
+			symbol.Package,
+			member,
+		)
+
+		if isTypeSymbolKind(
+			member.Kind,
+		) {
 			return
 		}
 
 		r.diags.Add(
-			t.Parts[1].Span(),
+			value.Parts[1].Span(),
 			fmt.Sprintf(
 				"package symbol %s.%s is not a type",
 				first.Name,
@@ -1189,18 +2263,18 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 	case *ast.PointerType:
 		r.resolveTypeWithInterfaceSelf(
 			scope,
-			t.Elem,
+			value.Elem,
 			allowInterfaceSelf,
 		)
 
 	case *ast.GenericType:
 		r.resolveTypeWithInterfaceSelf(
 			scope,
-			t.Base,
+			value.Base,
 			allowInterfaceSelf,
 		)
 
-		for _, arg := range t.Args {
+		for _, arg := range value.Args {
 			r.resolveGenericArgWithInterfaceSelf(
 				scope,
 				arg,
@@ -1211,13 +2285,13 @@ func (r *Resolver) resolveTypeWithInterfaceSelf(
 	case *ast.InlineArrayType:
 		r.resolveTypeWithInterfaceSelf(
 			scope,
-			t.Elem,
+			value.Elem,
 			allowInterfaceSelf,
 		)
 
 		r.resolveExpr(
 			scope,
-			t.Length,
+			value.Length,
 		)
 	}
 }
@@ -1239,51 +2313,69 @@ func (r *Resolver) resolveGenericArgWithInterfaceSelf(
 
 	case ast.GenericArgExpr:
 		if arg.Expr != nil {
-			r.resolveExpr(scope, arg.Expr)
+			r.resolveExpr(
+				scope,
+				arg.Expr,
+			)
 		}
 	}
 }
 
-func (r *Resolver) resolveCallCallee(scope *Scope, callee ast.Expr) {
+func (r *Resolver) resolveCallCallee(
+	scope *Scope,
+	callee ast.Expr,
+) {
 	if callee == nil {
 		return
 	}
 
-	// Interface requirements are not ordinary lexical symbols.
-	//
-	//     Read(reader)
-	//
-	// If no ordinary symbol named Read exists but Read is a visible interface
-	// requirement, defer candidate selection to the checker.
-	if id, ok := callee.(*ast.IdentExpr); ok {
-		if scope.LookupVisible(id.Name.Name) == nil &&
-			scope.HasVisibleInterfaceRequirement(id.Name.Name) {
+	/*
+		Interface requirements are not ordinary lexical symbols.
+
+		    Read(reader)
+
+		If no ordinary symbol named Read exists but Read is a visible interface
+		requirement, defer candidate selection to the checker.
+	*/
+	if identifier, valid :=
+		callee.(*ast.IdentExpr); valid {
+		if scope.LookupVisible(
+			identifier.Name.Name,
+		) == nil &&
+			scope.HasVisibleInterfaceRequirement(
+				identifier.Name.Name,
+			) {
 			return
 		}
 	}
 
-	r.resolveExpr(scope, callee)
+	r.resolveExpr(
+		scope,
+		callee,
+	)
 }
 
 func (r *Resolver) resolveExpr(
 	scope *Scope,
-	expr ast.Expr,
+	expression ast.Expr,
 ) {
-	if expr == nil {
+	if expression == nil {
 		return
 	}
 
-	switch e := expr.(type) {
+	switch value :=
+		expression.(type) {
 	case *ast.IdentExpr:
 		r.resolveSymbolUse(
 			scope,
-			e.Name.Name,
-			e.Name.Span(),
+			value.Name.Name,
+			value.Name.Span(),
 		)
 
 	case *ast.DotIdentExpr:
-		// .None / .ErrorReading need type context.
-		// The type checker resolves these later.
+		/*
+			.None and .ErrorReading require checker type context.
+		*/
 
 	case *ast.IntLitExpr,
 		*ast.FloatLitExpr,
@@ -1297,113 +2389,125 @@ func (r *Resolver) resolveExpr(
 	case *ast.UnaryExpr:
 		r.resolveExpr(
 			scope,
-			e.Expr,
+			value.Expr,
 		)
 
 	case *ast.BinaryExpr:
 		r.resolveExpr(
 			scope,
-			e.Left,
+			value.Left,
 		)
 
 		r.resolveExpr(
 			scope,
-			e.Right,
+			value.Right,
 		)
 
 	case *ast.CallExpr:
 		r.resolveCallCallee(
 			scope,
-			e.Callee,
+			value.Callee,
 		)
 
-		for _, arg := range e.Args {
+		for _, argument := range value.Args {
 			r.resolveExpr(
 				scope,
-				arg,
+				argument,
 			)
 		}
 
 	case *ast.GenericExpr:
 		r.resolveExpr(
 			scope,
-			e.Base,
+			value.Base,
 		)
 
-		for _, arg := range e.Args {
+		for _, argument := range value.Args {
 			r.resolveGenericArg(
 				scope,
-				arg,
+				argument,
 			)
 		}
 
 	case *ast.TaskPointerExpr:
 		r.resolveExpr(
 			scope,
-			e.Task,
+			value.Task,
 		)
 
 	case *ast.InlineArrayExpr:
 		r.resolveType(
 			scope,
-			e.Elem,
+			value.Elem,
 		)
 
 		r.resolveExpr(
 			scope,
-			e.Length,
+			value.Length,
 		)
 
-		for _, value := range e.Values {
+		for _, item := range value.Values {
 			r.resolveExpr(
 				scope,
-				value,
+				item,
 			)
 		}
 
 	case *ast.SpreadExpr:
 		r.resolveExpr(
 			scope,
-			e.Expr,
+			value.Expr,
 		)
 
 	case *ast.SelectorExpr:
-		if id, ok := e.Left.(*ast.IdentExpr); ok {
-			sym := r.resolveSymbolUse(
-				scope,
-				id.Name.Name,
-				id.Name.Span(),
-			)
-			if sym == nil {
+		if identifier, valid :=
+			value.Left.(*ast.IdentExpr); valid {
+			symbol :=
+				r.resolveSymbolUse(
+					scope,
+					identifier.Name.Name,
+					identifier.Name.Span(),
+				)
+
+			if symbol == nil {
 				return
 			}
 
-			if sym.Kind == SymbolPackage {
-				if sym.Package == nil {
+			if symbol.Kind ==
+				SymbolPackage {
+				if symbol.Package == nil {
 					r.diags.Add(
-						id.Span(),
+						identifier.Span(),
 						fmt.Sprintf(
 							"package %q has no symbol table",
-							id.Name.Name,
+							identifier.Name.Name,
 						),
 					)
+
 					return
 				}
 
 				member :=
-					sym.Package.Symbols[e.Name.Name]
+					symbol.Package.Symbols[value.Name.Name]
 
 				if member == nil {
 					r.diags.Add(
-						e.Name.Span(),
+						value.Name.Span(),
 						fmt.Sprintf(
 							"package %s has no symbol %q",
-							id.Name.Name,
-							e.Name.Name,
+							identifier.Name.Name,
+							value.Name.Name,
 						),
 					)
+
 					return
 				}
+
+				r.recordPackageSymbolUse(
+					value.Name.Span(),
+					symbol.Package,
+					member,
+				)
 
 				return
 			}
@@ -1411,133 +2515,220 @@ func (r *Resolver) resolveExpr(
 
 		r.resolveExpr(
 			scope,
-			e.Left,
+			value.Left,
 		)
 
 	case *ast.IndexExpr:
 		r.resolveExpr(
 			scope,
-			e.Left,
+			value.Left,
 		)
 
 		r.resolveExpr(
 			scope,
-			e.Index,
+			value.Index,
 		)
 
 	case *ast.CompoundLiteralExpr:
 		r.resolveType(
 			scope,
-			e.Type,
+			value.Type,
 		)
 
-		for _, field := range e.Fields {
+		for _, field := range value.Fields {
 			r.resolveExpr(
 				scope,
 				field.Value,
 			)
 		}
 
-		for _, value := range e.Values {
+		for _, item := range value.Values {
 			r.resolveExpr(
 				scope,
-				value,
+				item,
 			)
 		}
 	}
 }
 
-func (r *Resolver) resolveSymbolUse(scope *Scope, name string, span source.Span) *Symbol {
-	sym := scope.LookupVisible(name)
-	if sym == nil {
-		r.diags.Add(span, fmt.Sprintf("undefined symbol %q", name))
+func (r *Resolver) resolveSymbolUse(
+	scope *Scope,
+	name string,
+	span source.Span,
+) *Symbol {
+	if scope == nil {
 		return nil
 	}
 
-	if sym.Kind.IsRuntime() && sym.TaskID != scope.TaskID {
+	symbol :=
+		scope.LookupVisible(
+			name,
+		)
+
+	if symbol == nil {
 		r.diags.Add(
 			span,
-			fmt.Sprintf("nested task cannot capture runtime symbol %q declared at %s", name, sym.Span.String()),
+			fmt.Sprintf(
+				"undefined symbol %q",
+				name,
+			),
 		)
-		return sym
+
+		return nil
 	}
 
-	return sym
+	r.recordSymbolUse(
+		span,
+		symbol,
+	)
+
+	if symbol.Kind.IsRuntime() &&
+		symbol.TaskID != scope.TaskID {
+		r.diags.Add(
+			span,
+			fmt.Sprintf(
+				"nested task cannot capture runtime symbol %q declared at %s",
+				name,
+				symbol.Span.String(),
+			),
+		)
+
+		return symbol
+	}
+
+	return symbol
 }
 
-func (r *Resolver) resolveSwitchStmt(scope *Scope, s *ast.SwitchStmt) {
-	r.resolveExpr(scope, s.Target)
+func (r *Resolver) resolveSwitchStmt(
+	scope *Scope,
+	statement *ast.SwitchStmt,
+) {
+	if statement == nil {
+		return
+	}
 
-	for _, swCase := range s.Cases {
-		caseScope := NewScope(ScopeBlock, scope)
+	r.resolveExpr(
+		scope,
+		statement.Target,
+	)
 
-		switch swCase.Kind {
+	for _, switchCase := range statement.Cases {
+		caseScope :=
+			NewScope(
+				ScopeBlock,
+				scope,
+			)
+
+		r.recordScopeRegion(
+			switchCase.Loc,
+			caseScope,
+		)
+
+		switch switchCase.Kind {
 		case ast.SwitchCaseUnionMember:
-			r.resolveType(scope, swCase.UnionMember)
+			r.resolveType(
+				scope,
+				switchCase.UnionMember,
+			)
 
-			if s.IsUnionSwitch && s.BindName.Name != "" {
-				r.declareSymbol(caseScope, s.BindName.Name, SymbolVar, s.BindName.Span(), s)
+			if statement.IsUnionSwitch &&
+				statement.BindName.Name != "" {
+				r.declareSymbol(
+					caseScope,
+					statement.BindName.Name,
+					SymbolVar,
+					statement.BindName.Span(),
+					statement,
+				)
 			}
 
 		case ast.SwitchCaseNil:
-			if s.IsUnionSwitch && s.BindName.Name != "" {
-				r.declareSymbol(caseScope, s.BindName.Name, SymbolVar, s.BindName.Span(), s)
+			if statement.IsUnionSwitch &&
+				statement.BindName.Name != "" {
+				r.declareSymbol(
+					caseScope,
+					statement.BindName.Name,
+					SymbolVar,
+					statement.BindName.Span(),
+					statement,
+				)
 			}
 
 		case ast.SwitchCaseExpr:
-			r.resolveExpr(scope, swCase.Expr)
+			r.resolveExpr(
+				scope,
+				switchCase.Expr,
+			)
 
 		case ast.SwitchCaseEnumVariant,
 			ast.SwitchCaseDefault:
-			// Resolved by type checker.
+			/*
+				Resolved by the checker.
+			*/
 		}
 
-		for _, stmt := range swCase.Body {
-			r.resolveStmt(caseScope, stmt)
+		for _, caseStatement := range switchCase.Body {
+			r.resolveStmt(
+				caseScope,
+				caseStatement,
+			)
 		}
 	}
 }
 
 func (r *Resolver) declarePackages() {
 	for name, pkg := range r.packages {
-		if name == "" || pkg == nil {
+		if name == "" ||
+			pkg == nil {
 			continue
 		}
 
-		r.global.Symbols[name] = &Symbol{
-			Name:    name,
-			Kind:    SymbolPackage,
-			Scope:   r.global,
-			Builtin: true,
-			Package: pkg,
-		}
+		r.global.Symbols[name] =
+			&Symbol{
+				Name:    name,
+				Kind:    SymbolPackage,
+				Scope:   r.global,
+				Builtin: true,
+				Package: pkg,
+			}
 
 		for requirementName := range pkg.InterfaceRequirements {
-			r.global.DeclareInterfaceRequirement(requirementName)
+			r.global.DeclareInterfaceRequirement(
+				requirementName,
+			)
 		}
 	}
 }
 
-func ExportPackage(name string, scope *Scope) *PackageInfo {
-	info := &PackageInfo{
-		Name:                  name,
-		Symbols:               map[string]*PackageSymbol{},
-		InterfaceRequirements: map[string]struct{}{},
-	}
+func ExportPackage(
+	name string,
+	scope *Scope,
+) *PackageInfo {
+	info :=
+		&PackageInfo{
+			Name: name,
+
+			Symbols: map[string]*PackageSymbol{},
+
+			InterfaceRequirements: map[string]struct{}{},
+		}
 
 	if scope == nil {
 		return info
 	}
 
-	for symbolName, sym := range scope.Symbols {
-		if sym == nil || sym.Builtin {
+	for symbolName, symbol := range scope.Symbols {
+		if symbol == nil ||
+			symbol.Builtin {
 			continue
 		}
 
-		if sym.Kind == SymbolInterface {
-			if decl, ok := sym.Node.(*ast.InterfaceDecl); ok &&
-				decl != nil {
-				for _, requirement := range decl.Requirements {
+		if symbol.Kind ==
+			SymbolInterface {
+			if declaration, valid :=
+				symbol.Node.(*ast.InterfaceDecl); valid &&
+				declaration != nil {
+				for _, requirement := range declaration.Requirements {
 					if requirement == nil ||
 						requirement.Name.Name == "" {
 						continue
@@ -1548,7 +2739,7 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 			}
 		}
 
-		switch sym.Kind {
+		switch symbol.Kind {
 		case SymbolConst,
 			SymbolTask,
 			SymbolStruct,
@@ -1560,24 +2751,36 @@ func ExportPackage(name string, scope *Scope) *PackageInfo {
 			SymbolOverload,
 			SymbolForeignType,
 			SymbolForeignTaskABI:
-			info.Symbols[symbolName] = &PackageSymbol{
-				Name: symbolName,
-				Kind: sym.Kind,
-				Span: sym.Span,
-			}
+			info.Symbols[symbolName] =
+				&PackageSymbol{
+					Name: symbolName,
+					Kind: symbol.Kind,
+					Span: symbol.Span,
+				}
 		}
 	}
 
 	return info
 }
 
-func DebugSummary(scope *Scope) string {
+func DebugSummary(
+	scope *Scope,
+) string {
+	if scope == nil {
+		return "global_symbols=0"
+	}
+
 	count := 0
-	for _, sym := range scope.Symbols {
-		if !sym.Builtin {
+
+	for _, symbol := range scope.Symbols {
+		if symbol != nil &&
+			!symbol.Builtin {
 			count++
 		}
 	}
 
-	return fmt.Sprintf("global_symbols=%d", count)
+	return fmt.Sprintf(
+		"global_symbols=%d",
+		count,
+	)
 }
