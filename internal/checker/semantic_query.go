@@ -589,3 +589,268 @@ func sameSourceFile(
 	return leftPath ==
 		rightPath
 }
+
+/*
+ExpectedTypeFor returns the contextual type supplied while checking expr.
+*/
+func (s SemanticInfo) ExpectedTypeFor(
+	expr ast.Expr,
+) (*Type, bool) {
+	if expr == nil {
+		return nil, false
+	}
+
+	typ, found := s.ExpectedExprTypes[expr]
+
+	return typ, found && typ != nil
+}
+
+/*
+ExpectedTypeAt returns the contextual type belonging to the smallest expression
+containing offset.
+
+This is used for contextual enum completion:
+
+	state Status = .
+	               ^
+*/
+func (s SemanticInfo) ExpectedTypeAt(
+	file *source.File,
+	offset int,
+) (
+	*Type,
+	ast.Expr,
+	bool,
+) {
+	if file == nil {
+		return nil, nil, false
+	}
+
+	offset = clampSourceOffset(
+		file,
+		offset,
+	)
+
+	if typ, expr, found :=
+		s.expectedTypeAt(
+			file,
+			offset,
+			false,
+		); found {
+		return typ, expr, true
+	}
+
+	return s.expectedTypeAt(
+		file,
+		offset,
+		true,
+	)
+}
+
+func (s SemanticInfo) expectedTypeAt(
+	file *source.File,
+	offset int,
+	includeEnd bool,
+) (
+	*Type,
+	ast.Expr,
+	bool,
+) {
+	var bestExpr ast.Expr
+	var bestType *Type
+
+	bestLength := int(^uint(0) >> 1)
+	bestStart := -1
+
+	for expr, typ := range s.ExpectedExprTypes {
+		if expr == nil ||
+			typ == nil {
+			continue
+		}
+
+		span := normalizedQuerySpan(
+			expr.Span(),
+		)
+
+		if !sameSourceFile(
+			span.File,
+			file,
+		) {
+			continue
+		}
+
+		contains := false
+
+		if includeEnd {
+			contains =
+				offset >= span.Start &&
+					offset <= span.End
+		} else {
+			contains =
+				offset >= span.Start &&
+					offset < span.End
+		}
+
+		if !contains {
+			continue
+		}
+
+		length :=
+			span.End -
+				span.Start
+
+		if bestExpr == nil ||
+			length < bestLength ||
+			(length == bestLength &&
+				span.Start > bestStart) {
+			bestExpr = expr
+			bestType = typ
+			bestLength = length
+			bestStart = span.Start
+		}
+	}
+
+	if bestExpr == nil ||
+		bestType == nil {
+		return nil, nil, false
+	}
+
+	return bestType,
+		bestExpr,
+		true
+}
+
+/*
+SelectorAt returns the smallest selector whose selected name contains offset.
+
+For:
+
+	value.field
+	      ^^^^^
+
+this returns the SelectorExpr only while the cursor is on field, not anywhere
+inside the receiver expression.
+*/
+func (s SemanticInfo) SelectorAt(
+	file *source.File,
+	offset int,
+) *ast.SelectorExpr {
+	if file == nil {
+		return nil
+	}
+
+	offset = clampSourceOffset(
+		file,
+		offset,
+	)
+
+	if selector :=
+		s.selectorAt(
+			file,
+			offset,
+			false,
+		); selector != nil {
+		return selector
+	}
+
+	return s.selectorAt(
+		file,
+		offset,
+		true,
+	)
+}
+
+func (s SemanticInfo) selectorAt(
+	file *source.File,
+	offset int,
+	includeEnd bool,
+) *ast.SelectorExpr {
+	var best *ast.SelectorExpr
+	bestLength := int(^uint(0) >> 1)
+
+	for expr := range s.ExprTypes {
+		selector, ok :=
+			expr.(*ast.SelectorExpr)
+
+		if !ok ||
+			selector == nil {
+			continue
+		}
+
+		nameSpan :=
+			normalizedQuerySpan(
+				selector.Name.Span(),
+			)
+
+		if !sameSourceFile(
+			nameSpan.File,
+			file,
+		) {
+			continue
+		}
+
+		contains := false
+
+		if includeEnd {
+			contains =
+				offset >= nameSpan.Start &&
+					offset <= nameSpan.End
+		} else {
+			contains =
+				offset >= nameSpan.Start &&
+					offset < nameSpan.End
+		}
+
+		if !contains {
+			continue
+		}
+
+		selectorSpan :=
+			normalizedQuerySpan(
+				selector.Span(),
+			)
+
+		length :=
+			selectorSpan.End -
+				selectorSpan.Start
+
+		if best == nil ||
+			length < bestLength {
+			best = selector
+			bestLength = length
+		}
+	}
+
+	return best
+}
+
+func (k SymbolKind) String() string {
+	switch k {
+	case SymbolConst:
+		return "constant"
+
+	case SymbolVar:
+		return "variable"
+
+	case SymbolParam:
+		return "parameter"
+
+	case SymbolType:
+		return "type"
+
+	case SymbolTask:
+		return "task"
+
+	case SymbolOverload:
+		return "overload"
+
+	case SymbolForeignTaskABI:
+		return "foreign task ABI"
+
+	case SymbolPackage:
+		return "package"
+
+	default:
+		return "symbol"
+	}
+}

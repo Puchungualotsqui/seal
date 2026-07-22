@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"seal/internal/ast"
 	"seal/internal/checker"
 	"seal/internal/diag"
 	"seal/internal/resolver"
@@ -347,6 +348,8 @@ func (s *Server) handleRequest(
 
 					DefinitionProvider: true,
 
+					HoverProvider: true,
+
 					CompletionProvider: &CompletionOptions{
 						ResolveProvider: false,
 
@@ -361,6 +364,44 @@ func (s *Server) handleRequest(
 					Version: s.version,
 				},
 			},
+		)
+
+	case methodHover:
+		params :=
+			HoverParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		hover, err :=
+			s.hover(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			hover,
 		)
 
 	case methodShutdown:
@@ -650,11 +691,14 @@ func (s *Server) definition(
 		return nil, nil
 	}
 
-	semantic :=
+	resolverSemantic :=
 		&packageSnapshot.Result.ResolverSemantic
 
+	/*
+		Ordinary lexical and package-qualified references remain resolver-owned.
+	*/
 	if use :=
-		semantic.UseAt(
+		resolverSemantic.UseAt(
 			file,
 			offset,
 		); use != nil &&
@@ -664,8 +708,37 @@ func (s *Server) definition(
 		)
 	}
 
+	/*
+		Struct fields are checker-owned because their meaning depends on the
+		resolved receiver type.
+	*/
+	checkerSemantic :=
+		packageSnapshot.Result.SemanticInfo
+
+	if selector :=
+		checkerSemantic.SelectorAt(
+			file,
+			offset,
+		); selector != nil {
+		field :=
+			checkerFieldForSelector(
+				checkerSemantic,
+				selector,
+			)
+
+		if field != nil &&
+			field.Span.File != nil {
+			return locationFromSpan(
+				field.Span,
+			)
+		}
+	}
+
+	/*
+		Invoking definition on a declaration returns that declaration.
+	*/
 	if definition :=
-		semantic.DefinitionAt(
+		resolverSemantic.DefinitionAt(
 			file,
 			offset,
 		); definition != nil &&
@@ -676,6 +749,297 @@ func (s *Server) definition(
 	}
 
 	return nil, nil
+}
+
+func (s *Server) hover(
+	params HoverParams,
+) (
+	*Hover,
+	error,
+) {
+	packageSnapshot,
+		file,
+		offset,
+		_,
+		err :=
+		s.resolveDocumentPosition(
+			params.TextDocument.URI,
+			params.Position,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if packageSnapshot == nil ||
+		file == nil {
+		return nil, nil
+	}
+
+	checkerSemantic :=
+		packageSnapshot.Result.SemanticInfo
+
+	checkerScope :=
+		packageSnapshot.Result.CheckerScope
+
+	/*
+		Field and package-member selectors need to be handled before generic
+		expression hover so the selected member name is displayed.
+	*/
+	if selector :=
+		checkerSemantic.SelectorAt(
+			file,
+			offset,
+		); selector != nil {
+		if field :=
+			checkerFieldForSelector(
+				checkerSemantic,
+				selector,
+			); field != nil {
+			typ := "<invalid>"
+
+			if field.Type != nil {
+				typ = field.Type.String()
+			}
+
+			return hoverFromText(
+				fmt.Sprintf(
+					"field %s: %s",
+					field.Name,
+					typ,
+				),
+				selector.Name.Span(),
+			), nil
+		}
+
+		if member, qualifiedName :=
+			checkerPackageMemberForSelector(
+				checkerScope,
+				selector,
+			); member != nil {
+			return hoverFromText(
+				checkerSymbolHoverText(
+					member,
+					qualifiedName,
+				),
+				selector.Name.Span(),
+			), nil
+		}
+	}
+
+	/*
+		Contextual enum literals retain TypeEnumLiteral as their expression
+		type, so use ExpectedExprTypes to recover the containing enum.
+	*/
+	if expr :=
+		checkerSemantic.ExprAt(
+			file,
+			offset,
+		); expr != nil {
+		if enumLiteral, ok :=
+			expr.(*ast.DotIdentExpr); ok {
+			if expectedType, found :=
+				checkerSemantic.ExpectedTypeFor(
+					expr,
+				); found {
+				if variant :=
+					checkerEnumVariant(
+						expectedType,
+						enumLiteral.Name.Name,
+					); variant != nil {
+					return hoverFromText(
+						fmt.Sprintf(
+							"enum variant %s.%s",
+							expectedType.String(),
+							variant.Name,
+						),
+						enumLiteral.Name.Span(),
+					), nil
+				}
+			}
+		}
+	}
+
+	/*
+		Use resolver navigation to map a symbol use back to its checker
+		declaration and type.
+	*/
+	resolverSemantic :=
+		&packageSnapshot.Result.ResolverSemantic
+
+	if use := resolverSemantic.UseAt(file, offset); use != nil {
+		if checkerScope != nil {
+			if symbol := checkerScope.FindSymbolBySpan(use.Definition); symbol != nil {
+				hoverSpan := source.Span{
+					File:  file,
+					Start: offset,
+					End:   offset,
+				}
+
+				/*
+					For ordinary expression identifiers, ExprAt normally returns the
+					exact IdentExpr under the cursor, giving hover a proper range.
+				*/
+				if expr := checkerSemantic.ExprAt(file, offset); expr != nil {
+					hoverSpan = expr.Span()
+				}
+
+				return hoverFromText(
+					checkerSymbolHoverText(symbol, ""),
+					hoverSpan,
+				), nil
+			}
+		}
+	}
+
+	/*
+		Hover directly on a declaration.
+	*/
+	if checkerScope != nil {
+		if symbol :=
+			checkerScope.SymbolAt(
+				file,
+				offset,
+			); symbol != nil {
+			return hoverFromText(
+				checkerSymbolHoverText(
+					symbol,
+					"",
+				),
+				symbol.Span,
+			), nil
+		}
+	}
+
+	/*
+		Fallback: display the type of the smallest checked expression under the
+		cursor.
+	*/
+	if typ, expr, found :=
+		checkerSemantic.TypeAt(
+			file,
+			offset,
+		); found &&
+		typ != nil &&
+		typ.Kind != checker.TypeInvalid {
+		return hoverFromText(
+			"type: "+typ.String(),
+			expr.Span(),
+		), nil
+	}
+
+	return nil, nil
+}
+
+func checkerSymbolHoverText(
+	symbol *checker.Symbol,
+	displayName string,
+) string {
+	if symbol == nil {
+		return ""
+	}
+
+	name := displayName
+
+	if name == "" {
+		name = symbol.Name
+	}
+
+	switch symbol.Kind {
+	case checker.SymbolPackage:
+		return "package " + name
+
+	case checker.SymbolType:
+		if symbol.Type == nil {
+			return "type " + name
+		}
+
+		if symbol.Type.Kind ==
+			checker.TypeDistinct &&
+			symbol.Type.Underlying != nil {
+			return fmt.Sprintf(
+				"distinct %s: %s",
+				name,
+				symbol.Type.Underlying.String(),
+			)
+		}
+
+		return "type " + name
+
+	case checker.SymbolTask:
+		if symbol.Type == nil {
+			return "task " + name
+		}
+
+		return fmt.Sprintf(
+			"%s :: %s",
+			name,
+			symbol.Type.String(),
+		)
+
+	case checker.SymbolOverload:
+		return "overload " + name
+
+	case checker.SymbolForeignTaskABI:
+		return "foreign task ABI " + name
+
+	case checker.SymbolConst,
+		checker.SymbolVar,
+		checker.SymbolParam:
+		if symbol.Type == nil {
+			return fmt.Sprintf(
+				"%s %s",
+				symbol.Kind.String(),
+				name,
+			)
+		}
+
+		return fmt.Sprintf(
+			"%s %s: %s",
+			symbol.Kind.String(),
+			name,
+			symbol.Type.String(),
+		)
+
+	default:
+		if symbol.Type != nil {
+			return fmt.Sprintf(
+				"%s: %s",
+				name,
+				symbol.Type.String(),
+			)
+		}
+
+		return name
+	}
+}
+
+func hoverFromText(
+	text string,
+	span source.Span,
+) *Hover {
+	hover :=
+		&Hover{
+			Contents: MarkupContent{
+				Kind: "markdown",
+
+				Value: "```seal\n" +
+					text +
+					"\n```",
+			},
+		}
+
+	if span.File != nil {
+		protocolRange :=
+			protocolRangeFromSpan(
+				span,
+			)
+
+		hover.Range =
+			&protocolRange
+	}
+
+	return hover
 }
 
 /*
@@ -741,9 +1105,6 @@ func (s *Server) completion(
 	if context.AfterDot {
 		/*
 			First interpret a simple identifier receiver as a package.
-
-			    io.
-			    collections.Arr
 		*/
 		if context.PackageName != "" {
 			symbol :=
@@ -797,54 +1158,67 @@ func (s *Server) completion(
 			}
 		}
 
-		/*
-			The receiver may be any checked expression:
-
-			    value.
-			    pointer.
-			    call().
-			    list[index].
-			    object.child.
-
-			Completion is often requested while the selector itself is
-			incomplete, so locate the checked expression immediately before
-			the dot instead of requiring a complete SelectorExpr.
-		*/
 		checkerSemantic :=
 			packageSnapshot.Result.SemanticInfo
 
+		/*
+			Try an ordinary selector receiver:
+
+				value.
+				pointer.
+				call().
+				items[index].
+		*/
 		receiverType,
 			receiverExpr,
-			found :=
+			receiverFound :=
 			checkerSemantic.TypeEndingAtOrBefore(
 				file,
 				context.DotOffset,
 			)
 
-		if !found ||
-			receiverExpr == nil {
-			return empty, nil
+		if receiverFound &&
+			receiverExpr != nil &&
+			onlyWhitespaceBetween(
+				file.Text,
+				receiverExpr.Span().End,
+				context.DotOffset,
+			) {
+			items :=
+				selectorFieldCompletionItems(
+					receiverType,
+				)
+
+			return CompletionList{
+				IsIncomplete: false,
+
+				Items: items,
+			}, nil
 		}
 
-		receiverSpan :=
-			receiverExpr.Span()
+		/*
+			No receiver was found, so this can be a contextual enum literal:
 
-		if !onlyWhitespaceBetween(
-			file.Text,
-			receiverSpan.End,
-			context.DotOffset,
-		) {
+				state Status = .
+				state = .
+				return .
+		*/
+		expectedType,
+			_,
+			expectedFound :=
+			checkerSemantic.ExpectedTypeAt(
+				file,
+				context.DotOffset,
+			)
+
+		if !expectedFound {
 			return empty, nil
 		}
 
 		items :=
-			selectorFieldCompletionItems(
-				receiverType,
+			enumCompletionItems(
+				expectedType,
 			)
-
-		if len(items) == 0 {
-			return empty, nil
-		}
 
 		return CompletionList{
 			IsIncomplete: false,
@@ -934,6 +1308,61 @@ func (s *Server) completion(
 		IsIncomplete: false,
 		Items:        items,
 	}, nil
+}
+
+func enumCompletionItems(
+	typ *checker.Type,
+) []CompletionItem {
+	if typ == nil ||
+		typ.Kind != checker.TypeEnum {
+		return []CompletionItem{}
+	}
+
+	items :=
+		make(
+			[]CompletionItem,
+			0,
+			len(typ.Variants),
+		)
+
+	seen :=
+		map[string]bool{}
+
+	for _, variant := range typ.Variants {
+		if variant.Name == "" ||
+			seen[variant.Name] {
+			continue
+		}
+
+		seen[variant.Name] = true
+
+		items =
+			append(
+				items,
+				CompletionItem{
+					Label: variant.Name,
+
+					Kind: CompletionItemEnumMember,
+
+					Detail: "variant of " +
+						typ.String(),
+
+					SortText: completionSortText(
+						variant.Name,
+					),
+
+					FilterText: variant.Name,
+
+					InsertText: variant.Name,
+				},
+			)
+	}
+
+	sortCompletionItems(
+		items,
+	)
+
+	return items
 }
 
 func (s *Server) resolveDocumentPosition(
@@ -1515,6 +1944,100 @@ func completionSortText(
 
 	return group +
 		strings.ToLower(label)
+}
+
+func checkerFieldForSelector(
+	semantic checker.SemanticInfo,
+	selector *ast.SelectorExpr,
+) *checker.FieldInfo {
+	if selector == nil ||
+		selector.Left == nil {
+		return nil
+	}
+
+	receiverType :=
+		semantic.ExprTypes[selector.Left]
+
+	container :=
+		selectorFieldContainerType(
+			receiverType,
+		)
+
+	if container == nil {
+		return nil
+	}
+
+	for i := range container.Fields {
+		if container.Fields[i].Name ==
+			selector.Name.Name {
+			return &container.Fields[i]
+		}
+	}
+
+	return nil
+}
+
+func checkerPackageMemberForSelector(
+	scope *checker.Scope,
+	selector *ast.SelectorExpr,
+) (
+	*checker.Symbol,
+	string,
+) {
+	if scope == nil ||
+		selector == nil {
+		return nil, ""
+	}
+
+	packageIdent, ok :=
+		selector.Left.(*ast.IdentExpr)
+
+	if !ok {
+		return nil, ""
+	}
+
+	packageSymbol :=
+		scope.Lookup(
+			packageIdent.Name.Name,
+		)
+
+	if packageSymbol == nil ||
+		packageSymbol.Kind !=
+			checker.SymbolPackage ||
+		packageSymbol.Package == nil {
+		return nil, ""
+	}
+
+	member :=
+		packageSymbol.Package.Symbols[selector.Name.Name]
+
+	if member == nil {
+		return nil, ""
+	}
+
+	return member,
+		packageIdent.Name.Name +
+			"." +
+			selector.Name.Name
+}
+
+func checkerEnumVariant(
+	typ *checker.Type,
+	name string,
+) *checker.EnumVariantInfo {
+	if typ == nil ||
+		typ.Kind != checker.TypeEnum {
+		return nil
+	}
+
+	for i := range typ.Variants {
+		if typ.Variants[i].Name ==
+			name {
+			return &typ.Variants[i]
+		}
+	}
+
+	return nil
 }
 
 func sortCompletionItems(

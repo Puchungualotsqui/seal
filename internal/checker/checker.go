@@ -682,29 +682,23 @@ type MultiVarDeclResolution struct {
 
 type SemanticInfo struct {
 	// ExprTypes contains the checker-resolved type of every expression.
-	//
-	// C codegen must prefer this information over attempting to infer the
-	// expression type again.
 	ExprTypes map[ast.Expr]*Type
+
+	// ExpectedExprTypes records contextual types supplied while checking an
+	// expression. It is primarily used by editor features for contextual enum
+	// literals such as:
+	//
+	//     state Status = .Ready
+	//     state = .Ready
+	ExpectedExprTypes map[ast.Expr]*Type
 
 	IndexResolutions map[*ast.IndexExpr]IndexResolution
 	LenResolutions   map[*ast.CallExpr]LenResolution
 
 	GenericOverloadCalls map[*ast.GenericExpr]GenericOverloadCallResolution
 
-	// MultiVarDeclResolutions records how every name in:
-	//
-	//     value, valid := Read()
-	//
-	// must be lowered. Each name independently declares, assigns, discards,
-	// or is invalid.
 	MultiVarDeclResolutions map[*ast.MultiVarDeclStmt]MultiVarDeclResolution
 
-	// InterfaceConversions records successful:
-	//
-	//     cast<SomeInterface>(&value)
-	//
-	// conversions. The key is the GenericExpr used as the call callee.
 	InterfaceConversions   map[*ast.GenericExpr]InterfaceConversionResolution
 	TaskPointerResolutions map[*ast.TaskPointerExpr]TaskPointerResolution
 }
@@ -714,6 +708,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		ExprTypes: make(
 			map[ast.Expr]*Type,
 			len(c.exprTypes),
+		),
+		ExpectedExprTypes: make(
+			map[ast.Expr]*Type,
+			len(c.expectedExprTypes),
 		),
 		IndexResolutions: make(
 			map[*ast.IndexExpr]IndexResolution,
@@ -743,6 +741,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 
 	for expr, typ := range c.exprTypes {
 		info.ExprTypes[expr] = typ
+	}
+
+	for expr, typ := range c.expectedExprTypes {
+		info.ExpectedExprTypes[expr] = typ
 	}
 
 	for expr, resolution := range c.indexResolutions {
@@ -892,7 +894,8 @@ type Checker struct {
 	preparingOverloads map[*ast.OverloadDecl]bool
 	preparedOverloads  map[*ast.OverloadDecl]bool
 
-	exprTypes map[ast.Expr]*Type
+	exprTypes         map[ast.Expr]*Type
+	expectedExprTypes map[ast.Expr]*Type
 
 	indexResolutions map[*ast.IndexExpr]IndexResolution
 	lenResolutions   map[*ast.CallExpr]LenResolution
@@ -940,7 +943,8 @@ func NewWithPackagesAndOptions(
 		preparingOverloads: map[*ast.OverloadDecl]bool{},
 		preparedOverloads:  map[*ast.OverloadDecl]bool{},
 
-		exprTypes: map[ast.Expr]*Type{},
+		exprTypes:         map[ast.Expr]*Type{},
+		expectedExprTypes: map[ast.Expr]*Type{},
 
 		indexResolutions: map[*ast.IndexExpr]IndexResolution{},
 		lenResolutions:   map[*ast.CallExpr]LenResolution{},
@@ -8296,9 +8300,10 @@ func (c *Checker) checkReturnStmt(
 	}
 
 	for i, value := range s.Values {
-		got := c.checkExpr(
+		got := c.checkExprWithExpected(
 			scope,
 			value,
+			expected[i],
 		)
 
 		c.checkAssignable(
@@ -8395,9 +8400,10 @@ func (c *Checker) checkAssignStmt(
 		s.Left,
 	)
 
-	rightType := c.checkExpr(
+	rightType := c.checkExprWithExpected(
 		scope,
 		s.Right,
+		leftType,
 	)
 
 	if leftType != nil &&
@@ -9589,9 +9595,15 @@ func (c *Checker) checkExprWithExpected(
 	expr ast.Expr,
 	expected *Type,
 ) *Type {
-	_ = expected
+	if expr != nil &&
+		expected != nil {
+		c.expectedExprTypes[expr] = expected
+	}
 
-	return c.checkExpr(scope, expr)
+	return c.checkExpr(
+		scope,
+		expr,
+	)
 }
 
 func (c *Checker) checkUnaryExpr(
@@ -12509,31 +12521,74 @@ func (c *Checker) checkCompoundLiteralExpr(scope *Scope, e *ast.CompoundLiteralE
 
 	if len(e.Fields) > 0 {
 		for _, field := range e.Fields {
-			fieldType := c.lookupField(litType, field.Name.Name)
+			fieldType := c.lookupField(
+				litType,
+				field.Name.Name,
+			)
+
 			if fieldType == nil {
-				c.diags.Add(field.Name.Span(), fmt.Sprintf("type %s has no field %q", litType.String(), field.Name.Name))
-				c.checkExpr(scope, field.Value)
+				c.diags.Add(
+					field.Name.Span(),
+					fmt.Sprintf(
+						"type %s has no field %q",
+						litType.String(),
+						field.Name.Name,
+					),
+				)
+
+				c.checkExpr(
+					scope,
+					field.Value,
+				)
+
 				continue
 			}
 
-			valueType := c.checkExpr(scope, field.Value)
-			c.checkAssignable(fieldType, valueType, field.Value.Span())
+			valueType := c.checkExprWithExpected(
+				scope,
+				field.Value,
+				fieldType,
+			)
+
+			c.checkAssignable(
+				fieldType,
+				valueType,
+				field.Value.Span(),
+			)
 		}
 	}
 
 	if len(e.Values) > 0 {
 		if len(e.Values) > len(litType.Fields) {
-			c.diags.Add(e.Span(), fmt.Sprintf("too many values in %s literal", litType.String()))
+			c.diags.Add(
+				e.Span(),
+				fmt.Sprintf(
+					"too many values in %s literal",
+					litType.String(),
+				),
+			)
 		}
 
 		count := len(e.Values)
+
 		if count > len(litType.Fields) {
 			count = len(litType.Fields)
 		}
 
 		for i := 0; i < count; i++ {
-			valueType := c.checkExpr(scope, e.Values[i])
-			c.checkAssignable(litType.Fields[i].Type, valueType, e.Values[i].Span())
+			fieldType := litType.Fields[i].Type
+
+			valueType := c.checkExprWithExpected(
+				scope,
+				e.Values[i],
+				fieldType,
+			)
+
+			c.checkAssignable(
+				fieldType,
+				valueType,
+				e.Values[i].Span(),
+			)
 		}
 	}
 

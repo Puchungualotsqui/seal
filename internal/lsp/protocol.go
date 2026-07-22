@@ -23,6 +23,7 @@ const (
 
 	methodDefinition = "textDocument/definition"
 	methodCompletion = "textDocument/completion"
+	methodHover      = "textDocument/hover"
 
 	methodPublishDiagnostics = "textDocument/publishDiagnostics"
 
@@ -97,8 +98,22 @@ type ServerCapabilities struct {
 	TextDocumentSync TextDocumentSyncOptions `json:"textDocumentSync"`
 
 	DefinitionProvider bool `json:"definitionProvider,omitempty"`
+	HoverProvider      bool `json:"hoverProvider,omitempty"`
 
 	CompletionProvider *CompletionOptions `json:"completionProvider,omitempty"`
+}
+
+type HoverParams = TextDocumentPositionParams
+
+type MarkupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type Hover struct {
+	Contents MarkupContent `json:"contents"`
+
+	Range *Range `json:"range,omitempty"`
 }
 
 type CompletionOptions struct {
