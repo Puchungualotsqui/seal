@@ -10,8 +10,12 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"seal/internal/diag"
+	"seal/internal/resolver"
+	"seal/internal/source"
 )
 
 type incomingMessage struct {
@@ -72,8 +76,7 @@ func NewServer(
 	transport *Transport,
 	options ServerOptions,
 ) *Server {
-	logger :=
-		options.Logger
+	logger := options.Logger
 
 	if logger == nil {
 		logger =
@@ -84,31 +87,25 @@ func NewServer(
 			)
 	}
 
-	name :=
-		options.Name
+	name := options.Name
 
 	if name == "" {
-		name =
-			"Seal Language Server"
+		name = "Seal Language Server"
 	}
 
-	version :=
-		options.Version
+	version := options.Version
 
 	if version == "" {
-		version =
-			"0.1.0"
+		version = "0.1.0"
 	}
 
 	return &Server{
 		transport: transport,
-
-		logger: logger,
+		logger:    logger,
 
 		defaultRoot: options.DefaultRoot,
 
-		name: name,
-
+		name:    name,
 		version: version,
 
 		publishedDiagnostics: map[string]struct{}{},
@@ -137,8 +134,7 @@ func (s *Server) Serve(
 	}
 
 	for {
-		if err :=
-			ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 
@@ -146,10 +142,7 @@ func (s *Server) Serve(
 			s.transport.ReadMessage()
 
 		if err != nil {
-			if errors.Is(
-				err,
-				io.EOF,
-			) {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 
@@ -197,23 +190,18 @@ func (s *Server) handlePayload(
 		return s.sendError(
 			json.RawMessage("null"),
 			&ResponseError{
-				Code: errorCodeParseError,
-
+				Code:    errorCodeParseError,
 				Message: "Parse error",
 			},
 		)
 	}
 
-	if message.JSONRPC !=
-		jsonRPCVersion {
-		if hasRequestID(
-			message.ID,
-		) {
+	if message.JSONRPC != jsonRPCVersion {
+		if hasRequestID(message.ID) {
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeInvalidRequest,
-
+					Code:    errorCodeInvalidRequest,
 					Message: "Invalid Request",
 				},
 			)
@@ -222,17 +210,12 @@ func (s *Server) handlePayload(
 		return nil
 	}
 
-	if strings.TrimSpace(
-		message.Method,
-	) == "" {
-		if hasRequestID(
-			message.ID,
-		) {
+	if strings.TrimSpace(message.Method) == "" {
+		if hasRequestID(message.ID) {
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeInvalidRequest,
-
+					Code:    errorCodeInvalidRequest,
 					Message: "Invalid Request",
 				},
 			)
@@ -245,9 +228,7 @@ func (s *Server) handlePayload(
 		return nil
 	}
 
-	if hasRequestID(
-		message.ID,
-	) {
+	if hasRequestID(message.ID) {
 		return s.handleRequest(
 			ctx,
 			message,
@@ -268,9 +249,19 @@ func (s *Server) handleRequest(
 		return s.sendError(
 			message.ID,
 			&ResponseError{
-				Code: errorCodeInvalidRequest,
-
+				Code:    errorCodeInvalidRequest,
 				Message: "server has already shut down",
+			},
+		)
+	}
+
+	if message.Method != methodInitialize &&
+		!s.initialized {
+		return s.sendError(
+			message.ID,
+			&ResponseError{
+				Code:    errorCodeServerNotInitialized,
+				Message: "Server not initialized",
 			},
 		)
 	}
@@ -281,8 +272,7 @@ func (s *Server) handleRequest(
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeInvalidRequest,
-
+					Code:    errorCodeInvalidRequest,
 					Message: "server is already initialized",
 				},
 			)
@@ -299,8 +289,7 @@ func (s *Server) handleRequest(
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeInvalidParams,
-
+					Code:    errorCodeInvalidParams,
 					Message: err.Error(),
 				},
 			)
@@ -316,8 +305,7 @@ func (s *Server) handleRequest(
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeInvalidParams,
-
+					Code:    errorCodeInvalidParams,
 					Message: err.Error(),
 				},
 			)
@@ -331,7 +319,6 @@ func (s *Server) handleRequest(
 				message.ID,
 				&ResponseError{
 					Code: errorCodeInternalError,
-
 					Message: fmt.Sprintf(
 						"initializing Seal workspace: %v",
 						err,
@@ -340,11 +327,8 @@ func (s *Server) handleRequest(
 			)
 		}
 
-		s.workspace =
-			workspace
-
-		s.initialized =
-			true
+		s.workspace = workspace
+		s.initialized = true
 
 		return s.sendResult(
 			message.ID,
@@ -354,60 +338,119 @@ func (s *Server) handleRequest(
 
 					TextDocumentSync: TextDocumentSyncOptions{
 						OpenClose: true,
-
-						Change: textDocumentSyncFull,
-
+						Change:    textDocumentSyncFull,
 						Save: &SaveOptions{
 							IncludeText: false,
+						},
+					},
+
+					DefinitionProvider: true,
+
+					CompletionProvider: &CompletionOptions{
+						ResolveProvider: false,
+
+						TriggerCharacters: []string{
+							".",
 						},
 					},
 				},
 
 				ServerInfo: &ServerInfo{
-					Name: s.name,
-
+					Name:    s.name,
 					Version: s.version,
 				},
 			},
 		)
 
 	case methodShutdown:
-		if !s.initialized {
-			return s.sendError(
-				message.ID,
-				&ResponseError{
-					Code: errorCodeServerNotInitialized,
-
-					Message: "Server not initialized",
-				},
-			)
-		}
-
-		s.shutdown =
-			true
+		s.shutdown = true
 
 		return s.sendResult(
 			message.ID,
 			nil,
 		)
 
-	default:
-		if !s.initialized {
+	case methodDefinition:
+		params :=
+			DefinitionParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
 			return s.sendError(
 				message.ID,
 				&ResponseError{
-					Code: errorCodeServerNotInitialized,
-
-					Message: "Server not initialized",
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
 				},
 			)
 		}
 
+		location, err :=
+			s.definition(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			location,
+		)
+
+	case methodCompletion:
+		params :=
+			CompletionParams{}
+
+		if err :=
+			decodeParams(
+				message.Params,
+				&params,
+			); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		completion, err :=
+			s.completion(
+				params,
+			)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			completion,
+		)
+
+	default:
 		return s.sendError(
 			message.ID,
 			&ResponseError{
 				Code: errorCodeMethodNotFound,
-
 				Message: fmt.Sprintf(
 					"method %q is not supported",
 					message.Method,
@@ -421,8 +464,7 @@ func (s *Server) handleNotification(
 	ctx context.Context,
 	message incomingMessage,
 ) error {
-	if message.Method ==
-		methodExit {
+	if message.Method == methodExit {
 		exitCode := 1
 
 		if s.shutdown {
@@ -449,9 +491,7 @@ func (s *Server) handleNotification(
 
 	switch message.Method {
 	case methodInitialized:
-		return s.analyzeAndPublish(
-			ctx,
-		)
+		return s.analyzeAndPublish(ctx)
 
 	case methodDidOpen:
 		params :=
@@ -489,9 +529,7 @@ func (s *Server) handleNotification(
 			return err
 		}
 
-		return s.analyzeAndPublish(
-			ctx,
-		)
+		return s.analyzeAndPublish(ctx)
 
 	case methodDidChange:
 		params :=
@@ -505,9 +543,7 @@ func (s *Server) handleNotification(
 			return err
 		}
 
-		if len(
-			params.ContentChanges,
-		) == 0 {
+		if len(params.ContentChanges) == 0 {
 			return nil
 		}
 
@@ -535,9 +571,7 @@ func (s *Server) handleNotification(
 			return err
 		}
 
-		return s.analyzeAndPublish(
-			ctx,
-		)
+		return s.analyzeAndPublish(ctx)
 
 	case methodDidSave:
 		params :=
@@ -551,9 +585,7 @@ func (s *Server) handleNotification(
 			return err
 		}
 
-		return s.analyzeAndPublish(
-			ctx,
-		)
+		return s.analyzeAndPublish(ctx)
 
 	case methodDidClose:
 		params :=
@@ -571,9 +603,7 @@ func (s *Server) handleNotification(
 			params.TextDocument.URI,
 		)
 
-		return s.analyzeAndPublish(
-			ctx,
-		)
+		return s.analyzeAndPublish(ctx)
 
 	case methodCancelRequest,
 		methodSetTrace:
@@ -585,6 +615,699 @@ func (s *Server) handleNotification(
 		*/
 		return nil
 	}
+}
+
+/*
+definition resolves both symbol uses and declaration names.
+
+For a declaration name, definition returns the declaration itself. This makes
+the behavior predictable when the command is invoked on either side of a
+reference.
+*/
+func (s *Server) definition(
+	params DefinitionParams,
+) (
+	*Location,
+	error,
+) {
+	packageSnapshot,
+		file,
+		offset,
+		_,
+		err :=
+		s.resolveDocumentPosition(
+			params.TextDocument.URI,
+			params.Position,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if packageSnapshot == nil ||
+		file == nil {
+		return nil, nil
+	}
+
+	semantic :=
+		&packageSnapshot.Result.ResolverSemantic
+
+	if use :=
+		semantic.UseAt(
+			file,
+			offset,
+		); use != nil &&
+		use.Definition.File != nil {
+		return locationFromSpan(
+			use.Definition,
+		)
+	}
+
+	if definition :=
+		semantic.DefinitionAt(
+			file,
+			offset,
+		); definition != nil &&
+		definition.Span.File != nil {
+		return locationFromSpan(
+			definition.Span,
+		)
+	}
+
+	return nil, nil
+}
+
+/*
+completion returns package members after packageName. and otherwise returns all
+lexically visible symbols.
+
+The client performs prefix and fuzzy filtering using FilterText. Sending all
+visible symbols provides better results than strict server-side prefix
+filtering.
+*/
+func (s *Server) completion(
+	params CompletionParams,
+) (
+	CompletionList,
+	error,
+) {
+	empty :=
+		CompletionList{
+			IsIncomplete: false,
+			Items:        []CompletionItem{},
+		}
+
+	packageSnapshot,
+		file,
+		offset,
+		_,
+		err :=
+		s.resolveDocumentPosition(
+			params.TextDocument.URI,
+			params.Position,
+		)
+
+	if err != nil {
+		return empty, err
+	}
+
+	if packageSnapshot == nil ||
+		file == nil {
+		return empty, nil
+	}
+
+	semantic :=
+		&packageSnapshot.Result.ResolverSemantic
+
+	scope :=
+		semantic.ScopeAt(
+			file,
+			offset,
+		)
+
+	if scope == nil {
+		return empty, nil
+	}
+
+	context :=
+		completionContextAt(
+			file.Text,
+			offset,
+		)
+
+	if context.AfterDot {
+		if context.PackageName == "" {
+			return empty, nil
+		}
+
+		symbol :=
+			scope.LookupVisible(
+				context.PackageName,
+			)
+
+		if symbol == nil ||
+			symbol.Kind != resolver.SymbolPackage ||
+			symbol.Package == nil {
+			/*
+				Fields and methods on ordinary runtime values require checker
+				type information and will be added in a later layer.
+			*/
+			return empty, nil
+		}
+
+		items :=
+			make(
+				[]CompletionItem,
+				0,
+				len(symbol.Package.Symbols),
+			)
+
+		for _, member := range symbol.Package.Symbols {
+			if member == nil ||
+				member.Name == "" {
+				continue
+			}
+
+			items =
+				append(
+					items,
+					makeCompletionItem(
+						member.Name,
+						member.Kind,
+						fmt.Sprintf(
+							"%s from package %s",
+							member.Kind.String(),
+							symbol.Package.Name,
+						),
+					),
+				)
+		}
+
+		sortCompletionItems(items)
+
+		return CompletionList{
+			IsIncomplete: false,
+			Items:        items,
+		}, nil
+	}
+
+	visible :=
+		scope.VisibleSymbols()
+
+	items :=
+		make(
+			[]CompletionItem,
+			0,
+			len(visible),
+		)
+
+	seen :=
+		map[string]bool{}
+
+	for _, symbol := range visible {
+		if symbol == nil ||
+			symbol.Name == "" ||
+			seen[symbol.Name] {
+			continue
+		}
+
+		seen[symbol.Name] = true
+
+		detail :=
+			symbol.Kind.String()
+
+		if symbol.Builtin {
+			detail =
+				"builtin " +
+					detail
+		}
+
+		items =
+			append(
+				items,
+				makeCompletionItem(
+					symbol.Name,
+					symbol.Kind,
+					detail,
+				),
+			)
+	}
+
+	/*
+		Interface requirements are callable names but are deliberately stored
+		outside the ordinary lexical symbol table.
+	*/
+	for _, name := range scope.VisibleInterfaceRequirements() {
+		if name == "" ||
+			seen[name] {
+			continue
+		}
+
+		seen[name] = true
+
+		items =
+			append(
+				items,
+				CompletionItem{
+					Label: name,
+
+					Kind: CompletionItemFunction,
+
+					Detail: "interface requirement",
+
+					SortText: completionSortText(name),
+
+					FilterText: name,
+
+					InsertText: name,
+				},
+			)
+	}
+
+	sortCompletionItems(items)
+
+	return CompletionList{
+		IsIncomplete: false,
+		Items:        items,
+	}, nil
+}
+
+func (s *Server) resolveDocumentPosition(
+	uri string,
+	position Position,
+) (
+	*PackageSnapshot,
+	*source.File,
+	int,
+	string,
+	error,
+) {
+	if s.workspace == nil {
+		return nil,
+			nil,
+			0,
+			"",
+			fmt.Errorf(
+				"workspace is not initialized",
+			)
+	}
+
+	path, err :=
+		FileURIToPath(uri)
+
+	if err != nil {
+		return nil,
+			nil,
+			0,
+			"",
+			err
+	}
+
+	snapshot :=
+		s.workspace.Snapshot()
+
+	if snapshot == nil {
+		return nil,
+			nil,
+			0,
+			path,
+			nil
+	}
+
+	packageSnapshot :=
+		snapshot.PackageForPath(path)
+
+	if packageSnapshot == nil {
+		return nil,
+			nil,
+			0,
+			path,
+			nil
+	}
+
+	file :=
+		sourceFileForPath(
+			packageSnapshot,
+			path,
+		)
+
+	if file == nil {
+		return packageSnapshot,
+			nil,
+			0,
+			path,
+			nil
+	}
+
+	offset :=
+		file.OffsetFromLSPPosition(
+			source.LSPPosition{
+				Line: position.Line,
+
+				Character: position.Character,
+			},
+		)
+
+	return packageSnapshot,
+		file,
+		offset,
+		path,
+		nil
+}
+
+func sourceFileForPath(
+	packageSnapshot *PackageSnapshot,
+	path string,
+) *source.File {
+	if packageSnapshot == nil {
+		return nil
+	}
+
+	requestedKey, err :=
+		canonicalPath(path)
+
+	if err != nil {
+		return nil
+	}
+
+	for _, parsedFile := range packageSnapshot.Result.Files {
+		if parsedFile == nil ||
+			parsedFile.Source == nil {
+			continue
+		}
+
+		candidateKey, err :=
+			canonicalPath(
+				parsedFile.Source.Path,
+			)
+
+		if err != nil {
+			continue
+		}
+
+		if candidateKey == requestedKey {
+			return parsedFile.Source
+		}
+	}
+
+	return nil
+}
+
+func locationFromSpan(
+	span source.Span,
+) (
+	*Location,
+	error,
+) {
+	if span.File == nil {
+		return nil, nil
+	}
+
+	uri, err :=
+		PathToFileURI(
+			span.File.Path,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &Location{
+		URI: uri,
+
+		Range: protocolRangeFromSpan(
+			span,
+		),
+	}, nil
+}
+
+func protocolRangeFromSpan(
+	span source.Span,
+) Range {
+	lspRange :=
+		span.LSPRange()
+
+	return Range{
+		Start: Position{
+			Line: lspRange.Start.Line,
+
+			Character: lspRange.Start.Character,
+		},
+
+		End: Position{
+			Line: lspRange.End.Line,
+
+			Character: lspRange.End.Character,
+		},
+	}
+}
+
+type completionContext struct {
+	AfterDot    bool
+	PackageName string
+}
+
+/*
+completionContextAt recognizes:
+
+	package.
+	package.Member
+	package . Member
+
+The parser is not used because completion is often requested while the current
+expression is syntactically incomplete.
+*/
+func completionContextAt(
+	text string,
+	offset int,
+) completionContext {
+	if offset < 0 {
+		offset = 0
+	}
+
+	if offset > len(text) {
+		offset = len(text)
+	}
+
+	prefixStart :=
+		identifierStart(
+			text,
+			offset,
+		)
+
+	cursor :=
+		skipWhitespaceBackward(
+			text,
+			prefixStart,
+		)
+
+	if cursor == 0 {
+		return completionContext{}
+	}
+
+	value, width :=
+		utf8.DecodeLastRuneInString(
+			text[:cursor],
+		)
+
+	if value != '.' {
+		return completionContext{}
+	}
+
+	cursor -= width
+
+	cursor =
+		skipWhitespaceBackward(
+			text,
+			cursor,
+		)
+
+	packageStart :=
+		identifierStart(
+			text,
+			cursor,
+		)
+
+	if packageStart == cursor {
+		return completionContext{
+			AfterDot: true,
+		}
+	}
+
+	return completionContext{
+		AfterDot: true,
+
+		PackageName: text[packageStart:cursor],
+	}
+}
+
+func identifierStart(
+	text string,
+	offset int,
+) int {
+	if offset < 0 {
+		return 0
+	}
+
+	if offset > len(text) {
+		offset = len(text)
+	}
+
+	for offset > 0 {
+		value, width :=
+			utf8.DecodeLastRuneInString(
+				text[:offset],
+			)
+
+		if width <= 0 ||
+			!isIdentifierRune(value) {
+			break
+		}
+
+		offset -= width
+	}
+
+	return offset
+}
+
+func skipWhitespaceBackward(
+	text string,
+	offset int,
+) int {
+	if offset < 0 {
+		return 0
+	}
+
+	if offset > len(text) {
+		offset = len(text)
+	}
+
+	for offset > 0 {
+		value, width :=
+			utf8.DecodeLastRuneInString(
+				text[:offset],
+			)
+
+		if width <= 0 ||
+			!unicode.IsSpace(value) {
+			break
+		}
+
+		offset -= width
+	}
+
+	return offset
+}
+
+func isIdentifierRune(
+	value rune,
+) bool {
+	return value == '_' ||
+		unicode.IsLetter(value) ||
+		unicode.IsDigit(value)
+}
+
+func makeCompletionItem(
+	name string,
+	kind resolver.SymbolKind,
+	detail string,
+) CompletionItem {
+	return CompletionItem{
+		Label: name,
+
+		Kind: completionItemKind(
+			kind,
+		),
+
+		Detail: detail,
+
+		SortText: completionSortText(
+			name,
+		),
+
+		FilterText: name,
+
+		InsertText: name,
+	}
+}
+
+func completionItemKind(
+	kind resolver.SymbolKind,
+) CompletionItemKind {
+	switch kind {
+	case resolver.SymbolPackage:
+		return CompletionItemModule
+
+	case resolver.SymbolConst:
+		return CompletionItemConstant
+
+	case resolver.SymbolVar,
+		resolver.SymbolParam:
+		return CompletionItemVariable
+
+	case resolver.SymbolTask,
+		resolver.SymbolOverload,
+		resolver.SymbolForeignTaskABI,
+		resolver.SymbolBuiltinTask:
+		return CompletionItemFunction
+
+	case resolver.SymbolStruct:
+		return CompletionItemStruct
+
+	case resolver.SymbolEnum:
+		return CompletionItemEnum
+
+	case resolver.SymbolInterface:
+		return CompletionItemInterface
+
+	case resolver.SymbolBitSet:
+		return CompletionItemEnum
+
+	case resolver.SymbolDistinct,
+		resolver.SymbolUnion,
+		resolver.SymbolForeignType,
+		resolver.SymbolBuiltinType:
+		return CompletionItemClass
+
+	case resolver.SymbolGenericType,
+		resolver.SymbolGenericEnum,
+		resolver.SymbolGenericUnion,
+		resolver.SymbolGenericTask:
+		return CompletionItemTypeParameter
+
+	case resolver.SymbolGenericValue:
+		return CompletionItemValue
+
+	default:
+		return CompletionItemText
+	}
+}
+
+/*
+completionSortText groups names beginning with "_" after ordinary identifiers.
+
+Examples:
+
+	Alpha      -> 0:alpha
+	Print      -> 0:print
+	_internal  -> 1:_internal
+	__builtin  -> 1:__builtin
+*/
+func completionSortText(
+	label string,
+) string {
+	group := "0:"
+
+	if strings.HasPrefix(
+		label,
+		"_",
+	) {
+		group = "1:"
+	}
+
+	return group +
+		strings.ToLower(label)
+}
+
+func sortCompletionItems(
+	items []CompletionItem,
+) {
+	sort.SliceStable(
+		items,
+		func(
+			left int,
+			right int,
+		) bool {
+			if items[left].SortText !=
+				items[right].SortText {
+				return items[left].SortText <
+					items[right].SortText
+			}
+
+			return items[left].Label <
+				items[right].Label
+		},
+	)
 }
 
 func (s *Server) analyzeAndPublish(
@@ -837,11 +1560,7 @@ func (s *Server) publishSnapshotDiagnostics(
 func convertDiagnostic(
 	diagnostic diag.Diagnostic,
 ) ProtocolDiagnostic {
-	lspRange :=
-		diagnostic.Span.LSPRange()
-
-	severity :=
-		1
+	severity := 1
 
 	switch diagnostic.Severity {
 	case diag.SeverityWarning:
@@ -859,19 +1578,9 @@ func convertDiagnostic(
 	}
 
 	return ProtocolDiagnostic{
-		Range: Range{
-			Start: Position{
-				Line: lspRange.Start.Line,
-
-				Character: lspRange.Start.Character,
-			},
-
-			End: Position{
-				Line: lspRange.End.Line,
-
-				Character: lspRange.End.Character,
-			},
-		},
+		Range: protocolRangeFromSpan(
+			diagnostic.Span,
+		),
 
 		Severity: severity,
 
@@ -1007,8 +1716,7 @@ func resolveInitializeRoot(
 			return "", err
 		}
 
-		return path,
-			nil
+		return path, nil
 	}
 
 	if params.RootURI != nil &&
@@ -1024,15 +1732,11 @@ func resolveInitializeRoot(
 		strings.TrimSpace(
 			*params.RootPath,
 		) != "" {
-		return *params.RootPath,
-			nil
+		return *params.RootPath, nil
 	}
 
-	if strings.TrimSpace(
-		fallback,
-	) != "" {
-		return fallback,
-			nil
+	if strings.TrimSpace(fallback) != "" {
+		return fallback, nil
 	}
 
 	return "", fmt.Errorf(

@@ -21,6 +21,9 @@ const (
 	methodDidSave   = "textDocument/didSave"
 	methodDidClose  = "textDocument/didClose"
 
+	methodDefinition = "textDocument/definition"
+	methodCompletion = "textDocument/completion"
+
 	methodPublishDiagnostics = "textDocument/publishDiagnostics"
 
 	methodCancelRequest = "$/cancelRequest"
@@ -28,12 +31,11 @@ const (
 )
 
 const (
-	errorCodeParseError     = -32700
-	errorCodeInvalidRequest = -32600
-	errorCodeMethodNotFound = -32601
-	errorCodeInvalidParams  = -32602
-	errorCodeInternalError  = -32603
-
+	errorCodeParseError           = -32700
+	errorCodeInvalidRequest       = -32600
+	errorCodeMethodNotFound       = -32601
+	errorCodeInvalidParams        = -32602
+	errorCodeInternalError        = -32603
 	errorCodeServerNotInitialized = -32002
 )
 
@@ -51,6 +53,11 @@ type Position struct {
 type Range struct {
 	Start Position `json:"start"`
 	End   Position `json:"end"`
+}
+
+type Location struct {
+	URI   string `json:"uri"`
+	Range Range  `json:"range"`
 }
 
 type ClientInfo struct {
@@ -85,8 +92,19 @@ type ServerInfo struct {
 }
 
 type ServerCapabilities struct {
-	PositionEncoding string                  `json:"positionEncoding,omitempty"`
+	PositionEncoding string `json:"positionEncoding,omitempty"`
+
 	TextDocumentSync TextDocumentSyncOptions `json:"textDocumentSync"`
+
+	DefinitionProvider bool `json:"definitionProvider,omitempty"`
+
+	CompletionProvider *CompletionOptions `json:"completionProvider,omitempty"`
+}
+
+type CompletionOptions struct {
+	ResolveProvider bool `json:"resolveProvider,omitempty"`
+
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 }
 
 type TextDocumentSyncOptions struct {
@@ -114,6 +132,15 @@ type TextDocumentItem struct {
 	Version    int    `json:"version"`
 	Text       string `json:"text"`
 }
+
+type TextDocumentPositionParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+}
+
+type DefinitionParams = TextDocumentPositionParams
+
+type CompletionParams = TextDocumentPositionParams
 
 type DidOpenTextDocumentParams struct {
 	TextDocument TextDocumentItem `json:"textDocument"`
@@ -168,24 +195,72 @@ type ProtocolDiagnostic struct {
 	Message string `json:"message"`
 }
 
+type CompletionItemKind int
+
+const (
+	CompletionItemText          CompletionItemKind = 1
+	CompletionItemMethod        CompletionItemKind = 2
+	CompletionItemFunction      CompletionItemKind = 3
+	CompletionItemConstructor   CompletionItemKind = 4
+	CompletionItemField         CompletionItemKind = 5
+	CompletionItemVariable      CompletionItemKind = 6
+	CompletionItemClass         CompletionItemKind = 7
+	CompletionItemInterface     CompletionItemKind = 8
+	CompletionItemModule        CompletionItemKind = 9
+	CompletionItemProperty      CompletionItemKind = 10
+	CompletionItemUnit          CompletionItemKind = 11
+	CompletionItemValue         CompletionItemKind = 12
+	CompletionItemEnum          CompletionItemKind = 13
+	CompletionItemKeyword       CompletionItemKind = 14
+	CompletionItemSnippet       CompletionItemKind = 15
+	CompletionItemColor         CompletionItemKind = 16
+	CompletionItemFile          CompletionItemKind = 17
+	CompletionItemReference     CompletionItemKind = 18
+	CompletionItemFolder        CompletionItemKind = 19
+	CompletionItemEnumMember    CompletionItemKind = 20
+	CompletionItemConstant      CompletionItemKind = 21
+	CompletionItemStruct        CompletionItemKind = 22
+	CompletionItemEvent         CompletionItemKind = 23
+	CompletionItemOperator      CompletionItemKind = 24
+	CompletionItemTypeParameter CompletionItemKind = 25
+)
+
+type CompletionList struct {
+	IsIncomplete bool             `json:"isIncomplete"`
+	Items        []CompletionItem `json:"items"`
+}
+
+type CompletionItem struct {
+	Label string `json:"label"`
+
+	Kind CompletionItemKind `json:"kind,omitempty"`
+
+	Detail string `json:"detail,omitempty"`
+
+	/*
+		SortText controls the initial client ordering.
+
+		The Seal server prefixes ordinary names with "0:" and underscore names
+		with "1:" so names beginning with "_" appear after ordinary symbols.
+	*/
+	SortText string `json:"sortText,omitempty"`
+
+	FilterText string `json:"filterText,omitempty"`
+	InsertText string `json:"insertText,omitempty"`
+}
+
 type ResponseError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
 
-func FileURIToPath(
-	value string,
-) (string, error) {
+func FileURIToPath(value string) (string, error) {
 	if strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf(
-			"file URI cannot be empty",
-		)
+		return "", fmt.Errorf("file URI cannot be empty")
 	}
 
-	parsed, err :=
-		url.Parse(value)
-
+	parsed, err := url.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf(
 			"parsing file URI %q: %w",
@@ -205,18 +280,13 @@ func FileURIToPath(
 
 	if runtime.GOOS == "windows" {
 		if parsed.Host != "" &&
-			!strings.EqualFold(
-				parsed.Host,
-				"localhost",
-			) {
+			!strings.EqualFold(parsed.Host, "localhost") {
 			uncPath :=
 				`\\` +
 					parsed.Host +
 					filepath.FromSlash(path)
 
-			return filepath.Clean(
-				uncPath,
-			), nil
+			return filepath.Clean(uncPath), nil
 		}
 
 		/*
@@ -236,8 +306,7 @@ func FileURIToPath(
 				path
 	}
 
-	path =
-		filepath.FromSlash(path)
+	path = filepath.FromSlash(path)
 
 	if path == "" {
 		return "", fmt.Errorf(
@@ -246,49 +315,29 @@ func FileURIToPath(
 		)
 	}
 
-	absolutePath, err :=
-		filepath.Abs(path)
-
+	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Clean(
-		absolutePath,
-	), nil
+	return filepath.Clean(absolutePath), nil
 }
 
-func PathToFileURI(
-	path string,
-) (string, error) {
+func PathToFileURI(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf(
-			"path cannot be empty",
-		)
+		return "", fmt.Errorf("path cannot be empty")
 	}
 
-	absolutePath, err :=
-		filepath.Abs(path)
-
+	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
 
-	absolutePath =
-		filepath.Clean(
-			absolutePath,
-		)
-
-	slashPath :=
-		filepath.ToSlash(
-			absolutePath,
-		)
+	absolutePath = filepath.Clean(absolutePath)
+	slashPath := filepath.ToSlash(absolutePath)
 
 	if runtime.GOOS == "windows" {
-		if strings.HasPrefix(
-			slashPath,
-			"//",
-		) {
+		if strings.HasPrefix(slashPath, "//") {
 			withoutPrefix :=
 				strings.TrimPrefix(
 					slashPath,
