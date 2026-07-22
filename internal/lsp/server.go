@@ -1009,6 +1009,50 @@ func (s *Server) hover(
 		packageSnapshot.Result.CheckerScope
 
 	/*
+		Task calls have a checker-owned CallResolution containing the selected
+		task, overload, generic specialization, and package-qualified name.
+
+		Handle the callable name before selector and expression hover. Without
+		this, a void-returning call such as fmt.Println falls through to the
+		generic expression fallback and displays only "type: void".
+
+		Restrict this to the callable name span. Hovering an argument should
+		still show information about that argument instead of the enclosing
+		call.
+	*/
+	if call :=
+		checkerSemantic.CallAt(
+			file,
+			offset,
+		); call != nil {
+		calleeSpan :=
+			callCalleeHoverSpan(
+				call.Callee,
+			)
+
+		if spanContainsNavigationOffset(
+			calleeSpan,
+			file,
+			offset,
+		) {
+			if resolution, found :=
+				checkerSemantic.CallResolutionFor(
+					call,
+				); found {
+				if callHover :=
+					hoverFromCallResolution(
+						call,
+						resolution,
+						calleeSpan,
+					); callHover != nil {
+					return callHover,
+						nil
+				}
+			}
+		}
+	}
+
+	/*
 		Field and package-member selectors need to be handled before generic
 		expression hover so the selected member name is displayed.
 	*/
@@ -1151,6 +1195,117 @@ func (s *Server) hover(
 	}
 
 	return nil, nil
+}
+
+func hoverFromCallResolution(
+	call *ast.CallExpr,
+	resolution checker.CallResolution,
+	span source.Span,
+) *Hover {
+	if call == nil {
+		return nil
+	}
+
+	candidates :=
+		signatureCandidatesForResolution(
+			call,
+			resolution,
+		)
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	labels :=
+		make(
+			[]string,
+			0,
+			len(candidates),
+		)
+
+	seen :=
+		map[string]bool{}
+
+	for _, candidate := range candidates {
+		if candidate.TaskType == nil ||
+			candidate.TaskType.Kind != checker.TypeTask {
+			continue
+		}
+
+		signature :=
+			makeSignatureInformation(
+				candidate,
+				0,
+				false,
+			)
+
+		if signature.Label == "" ||
+			seen[signature.Label] {
+			continue
+		}
+
+		seen[signature.Label] =
+			true
+
+		labels =
+			append(
+				labels,
+				signature.Label,
+			)
+	}
+
+	if len(labels) == 0 {
+		return nil
+	}
+
+	return hoverFromText(
+		strings.Join(
+			labels,
+			"\n",
+		),
+		span,
+	)
+}
+
+/*
+callCalleeHoverSpan returns only the callable identifier's span.
+
+For:
+
+	fmt.Println(...)
+
+the hover target is Println rather than the complete fmt.Println selector.
+This preserves package hover when the cursor is over fmt.
+
+For generic calls:
+
+	Parse<int>(...)
+
+the target remains the underlying Parse identifier.
+*/
+func callCalleeHoverSpan(
+	expr ast.Expr,
+) source.Span {
+	if expr == nil {
+		return source.Span{}
+	}
+
+	switch callee :=
+		expr.(type) {
+	case *ast.IdentExpr:
+		return callee.Name.Span()
+
+	case *ast.SelectorExpr:
+		return callee.Name.Span()
+
+	case *ast.GenericExpr:
+		return callCalleeHoverSpan(
+			callee.Base,
+		)
+
+	default:
+		return expr.Span()
+	}
 }
 
 func checkerSymbolHoverText(
@@ -2107,8 +2262,12 @@ func makeSignatureInformation(
 			len(taskType.Params),
 		)
 
-	taskDecl, _ :=
-		candidate.Symbol.Node.(*ast.TaskDecl)
+	var taskDecl *ast.TaskDecl
+
+	if candidate.Symbol != nil {
+		taskDecl, _ =
+			candidate.Symbol.Node.(*ast.TaskDecl)
+	}
 
 	for i, typ := range taskType.Params {
 		typeName := "<invalid>"
