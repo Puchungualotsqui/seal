@@ -2,8 +2,8 @@
 Floating-point conversion uses a small native bridge so parsing and
 formatting follow the platform's correctly rounded conversion routines.
 
-The bridge always uses the C numeric locale, independently of the
-process locale.
+Conversions use the C numeric locale independently of the active
+process locale, except for the documented TinyCC Windows fallback.
 */
 
 _F32TextLength ::
@@ -32,25 +32,55 @@ _WriteF64Text ::
         value f64,
     ) int
 
-_F32TextIsValid ::
-    @trusted_pure
-    extern("seal_strconv_f32_text_is_valid")
-    task(value string) bool
+/*
+The parsing bridge returns the IEEE-754 representation of the parsed
+value.
 
-_F64TextIsValid ::
-    @trusted_pure
-    extern("seal_strconv_f64_text_is_valid")
-    task(value string) bool
+A reserved quiet-NaN payload represents failure. Valid NaN inputs are
+canonicalized to a different payload by the native bridge.
+*/
 
-_ParseF32Value ::
+_ParseF32Bits ::
     @trusted_pure
-    extern("seal_strconv_parse_f32_value")
-    task(value string) f32
+    extern("seal_strconv_parse_f32_bits")
+    task(value string) u32
 
-_ParseF64Value ::
+_ParseF64Bits ::
     @trusted_pure
-    extern("seal_strconv_parse_f64_value")
-    task(value string) f64
+    extern("seal_strconv_parse_f64_bits")
+    task(value string) u64
+
+_F32FromBits ::
+    @trusted_pure
+    extern("seal_strconv_f32_from_bits")
+    task(bits u32) f32
+
+_F64FromBits ::
+    @trusted_pure
+    extern("seal_strconv_f64_from_bits")
+    task(bits u64) f64
+
+_F32InvalidBits :: pure task() u32 {
+    /*
+    IEEE-754 quiet NaN with payload 1:
+
+        0x7fc00001
+    */
+    return cast<u32>(
+        2143289345,
+    )
+}
+
+_F64InvalidBits :: pure task() u64 {
+    /*
+    IEEE-754 quiet NaN with payload 1:
+
+        0x7ff8000000000001
+    */
+    return cast<u64>(
+        9221120237041090561,
+    )
+}
 
 /*
 FormatF32 creates a round-trip-safe textual representation of value.
@@ -69,7 +99,9 @@ FormatF32 :: task(
     allocator mem.Allocator,
     value f32,
 ) strings.OwnedString {
-    length := _F32TextLength(value)
+    length := _F32TextLength(
+        value,
+    )
 
     if length < 0 {
         panic(
@@ -77,19 +109,26 @@ FormatF32 :: task(
         )
     }
 
-    byteLength := cast<uint>(length)
-    allocationSize := byteLength + 1
+    byteLength :=
+        cast<uint>(
+            length,
+        )
 
-    if allocationSize <= byteLength {
+    allocationSize :=
+        byteLength + 1
+
+    if allocationSize <=
+        byteLength {
         panic(
             "strconv.FormatF32: allocation size overflow",
         )
     }
 
-    destination := mem.AllocWith(
-        allocator,
-        allocationSize,
-    )
+    destination :=
+        mem.AllocWith(
+            allocator,
+            allocationSize,
+        )
 
     if destination == nil {
         return strings.OwnedString{
@@ -120,12 +159,17 @@ FormatF32 :: task(
 FormatF64 creates a round-trip-safe textual representation of value.
 
 Finite values use up to seventeen significant decimal digits.
+
+Special values and negative zero use the same canonical spelling as
+FormatF32.
 */
 FormatF64 :: task(
     allocator mem.Allocator,
     value f64,
 ) strings.OwnedString {
-    length := _F64TextLength(value)
+    length := _F64TextLength(
+        value,
+    )
 
     if length < 0 {
         panic(
@@ -133,19 +177,26 @@ FormatF64 :: task(
         )
     }
 
-    byteLength := cast<uint>(length)
-    allocationSize := byteLength + 1
+    byteLength :=
+        cast<uint>(
+            length,
+        )
 
-    if allocationSize <= byteLength {
+    allocationSize :=
+        byteLength + 1
+
+    if allocationSize <=
+        byteLength {
         panic(
             "strconv.FormatF64: allocation size overflow",
         )
     }
 
-    destination := mem.AllocWith(
-        allocator,
-        allocationSize,
-    )
+    destination :=
+        mem.AllocWith(
+            allocator,
+            allocationSize,
+        )
 
     if destination == nil {
         return strings.OwnedString{
@@ -185,37 +236,60 @@ Accepted finite forms include:
     1e3
     -1.25E-4
 
-The exact lowercase special values "nan", "inf", and "-inf" are also
-accepted. A leading plus sign is accepted for special values.
+The exact lowercase special values are also accepted:
 
-Whitespace, hexadecimal floats, locale-specific decimal separators, and
-trailing characters are rejected.
+    nan
+    +nan
+    -nan
+    inf
+    +inf
+    -inf
+
+Whitespace, hexadecimal floats, locale-specific decimal separators,
+embedded null bytes, and trailing characters are rejected.
 
 Range overflow and underflow are rejected.
+
+When false is returned, the accompanying value is zero and must not be
+treated as a successfully parsed value.
 */
 ParseF32 :: pure task(
     value string,
 ) f32, bool {
-    if !_F32TextIsValid(value) {
-        empty: f32
+    bits :=
+        _ParseF32Bits(
+            value,
+        )
 
-        return empty, false
+    if bits ==
+        _F32InvalidBits() {
+        return cast<f32>(0),
+            false
     }
 
-    return _ParseF32Value(value), true
+    return _F32FromBits(
+        bits,
+    ), true
 }
 
 /*
-ParseF64 has the same syntax and failure rules as ParseF32.
+ParseF64 has the same grammar and failure rules as ParseF32.
 */
 ParseF64 :: pure task(
     value string,
 ) f64, bool {
-    if !_F64TextIsValid(value) {
-        empty: f64
+    bits :=
+        _ParseF64Bits(
+            value,
+        )
 
-        return empty, false
+    if bits ==
+        _F64InvalidBits() {
+        return cast<f64>(0),
+            false
     }
 
-    return _ParseF64Value(value), true
+    return _F64FromBits(
+        bits,
+    ), true
 }

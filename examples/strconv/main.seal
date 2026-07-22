@@ -370,7 +370,199 @@ TestIntegerRoundTrips :: task(
     assert(parsedUnsigned == unsignedValue)
 }
 
-TestFloatParsing :: task() {
+TestF32Parsing :: task() {
+    integer, integerValid :=
+        strconv.ParseF32("12")
+
+    assert(integerValid)
+    assert(integer == cast<f32>(12))
+
+    negative, negativeValid :=
+        strconv.ParseF32("-12.5")
+
+    assert(negativeValid)
+    assert(
+        negative ==
+            cast<f32>(-12.5),
+    )
+
+    positiveSign, positiveSignValid :=
+        strconv.ParseF32("+12.5")
+
+    assert(positiveSignValid)
+    assert(
+        positiveSign ==
+            cast<f32>(12.5),
+    )
+
+    leadingDot, leadingDotValid :=
+        strconv.ParseF32(".5")
+
+    assert(leadingDotValid)
+    assert(
+        leadingDot ==
+            cast<f32>(0.5),
+    )
+
+    trailingDot, trailingDotValid :=
+        strconv.ParseF32("5.")
+
+    assert(trailingDotValid)
+    assert(
+        trailingDot ==
+            cast<f32>(5),
+    )
+
+    exponent, exponentValid :=
+        strconv.ParseF32("1.25e3")
+
+    assert(exponentValid)
+    assert(
+        exponent ==
+            cast<f32>(1250),
+    )
+
+    smallExponent, smallExponentValid :=
+        strconv.ParseF32("-2.5E-2")
+
+    assert(smallExponentValid)
+    assert(
+        smallExponent ==
+            cast<f32>(-0.025),
+    )
+
+    zero, zeroValid :=
+        strconv.ParseF32("0")
+
+    assert(zeroValid)
+    assert(zero == cast<f32>(0))
+
+    negativeZero, negativeZeroValid :=
+        strconv.ParseF32("-0")
+
+    assert(negativeZeroValid)
+    assert(
+        negativeZero ==
+            cast<f32>(0),
+    )
+
+    _, emptyInvalid :=
+        strconv.ParseF32("")
+
+    assert(!emptyInvalid)
+
+    _, whitespaceBeforeInvalid :=
+        strconv.ParseF32(" 1.5")
+
+    assert(!whitespaceBeforeInvalid)
+
+    _, whitespaceAfterInvalid :=
+        strconv.ParseF32("1.5 ")
+
+    assert(!whitespaceAfterInvalid)
+
+    _, trailingInvalid :=
+        strconv.ParseF32("1.5x")
+
+    assert(!trailingInvalid)
+
+    _, missingExponent :=
+        strconv.ParseF32("1e")
+
+    assert(!missingExponent)
+
+    _, missingSignedExponent :=
+        strconv.ParseF32("1e-")
+
+    assert(!missingSignedExponent)
+
+    _, loneDot :=
+        strconv.ParseF32(".")
+
+    assert(!loneDot)
+
+    _, lonePlus :=
+        strconv.ParseF32("+")
+
+    assert(!lonePlus)
+
+    _, loneMinus :=
+        strconv.ParseF32("-")
+
+    assert(!loneMinus)
+
+    _, hexadecimalInvalid :=
+        strconv.ParseF32("0x1p2")
+
+    assert(!hexadecimalInvalid)
+
+    _, commaInvalid :=
+        strconv.ParseF32("1,5")
+
+    assert(!commaInvalid)
+
+    _, uppercaseNanInvalid :=
+        strconv.ParseF32("NaN")
+
+    assert(!uppercaseNanInvalid)
+
+    _, uppercaseInfinityInvalid :=
+        strconv.ParseF32("INF")
+
+    assert(!uppercaseInfinityInvalid)
+
+    _, infinityWordInvalid :=
+        strconv.ParseF32("infinity")
+
+    assert(!infinityWordInvalid)
+
+    _, nanPayloadInvalid :=
+        strconv.ParseF32("nan(1)")
+
+    assert(!nanPayloadInvalid)
+
+    _, overflowInvalid :=
+        strconv.ParseF32("1e9999")
+
+    assert(!overflowInvalid)
+
+    _, underflowInvalid :=
+        strconv.ParseF32("1e-9999")
+
+    assert(!underflowInvalid)
+
+    _, nanValid :=
+        strconv.ParseF32("nan")
+
+    assert(nanValid)
+
+    _, positiveNanValid :=
+        strconv.ParseF32("+nan")
+
+    assert(positiveNanValid)
+
+    _, negativeNanValid :=
+        strconv.ParseF32("-nan")
+
+    assert(negativeNanValid)
+
+    _, infinityValid :=
+        strconv.ParseF32("inf")
+
+    assert(infinityValid)
+
+    _, positiveInfinityValid :=
+        strconv.ParseF32("+inf")
+
+    assert(positiveInfinityValid)
+
+    _, negativeInfinityValid :=
+        strconv.ParseF32("-inf")
+
+    assert(negativeInfinityValid)
+}
+
+TestF64Parsing :: task() {
     integer, integerValid :=
         strconv.ParseF64("12")
 
@@ -382,6 +574,12 @@ TestFloatParsing :: task() {
 
     assert(decimalValid)
     assert(decimal == -12.5)
+
+    positiveSign, positiveSignValid :=
+        strconv.ParseF64("+12.5")
+
+    assert(positiveSignValid)
+    assert(positiveSign == 12.5)
 
     leadingDot, leadingDotValid :=
         strconv.ParseF64(".5")
@@ -401,21 +599,49 @@ TestFloatParsing :: task() {
     assert(exponentValid)
     assert(exponent == 1250.0)
 
+    positiveExponent, positiveExponentValid :=
+        strconv.ParseF64("1e+3")
+
+    assert(positiveExponentValid)
+    assert(positiveExponent == 1000.0)
+
     smallExponent, smallExponentValid :=
         strconv.ParseF64("-2.5E-2")
 
     assert(smallExponentValid)
     assert(smallExponent == -0.025)
 
+    zero, zeroValid :=
+        strconv.ParseF64("0")
+
+    assert(zeroValid)
+    assert(zero == 0.0)
+
+    negativeZero, negativeZeroValid :=
+        strconv.ParseF64("-0")
+
+    assert(negativeZeroValid)
+    assert(negativeZero == 0.0)
+
     _, emptyInvalid :=
         strconv.ParseF64("")
 
     assert(!emptyInvalid)
 
-    _, whitespaceInvalid :=
+    _, whitespaceBeforeInvalid :=
         strconv.ParseF64(" 1.5")
 
-    assert(!whitespaceInvalid)
+    assert(!whitespaceBeforeInvalid)
+
+    _, whitespaceAfterInvalid :=
+        strconv.ParseF64("1.5 ")
+
+    assert(!whitespaceAfterInvalid)
+
+    _, newlineInvalid :=
+        strconv.ParseF64("1.5\n")
+
+    assert(!newlineInvalid)
 
     _, trailingInvalid :=
         strconv.ParseF64("1.5x")
@@ -427,35 +653,120 @@ TestFloatParsing :: task() {
 
     assert(!missingExponent)
 
+    _, missingPositiveExponent :=
+        strconv.ParseF64("1e+")
+
+    assert(!missingPositiveExponent)
+
+    _, missingNegativeExponent :=
+        strconv.ParseF64("1e-")
+
+    assert(!missingNegativeExponent)
+
     _, loneDot :=
         strconv.ParseF64(".")
 
     assert(!loneDot)
+
+    _, signedDot :=
+        strconv.ParseF64("-.")
+
+    assert(!signedDot)
+
+    _, lonePlus :=
+        strconv.ParseF64("+")
+
+    assert(!lonePlus)
+
+    _, loneMinus :=
+        strconv.ParseF64("-")
+
+    assert(!loneMinus)
 
     _, hexadecimalInvalid :=
         strconv.ParseF64("0x1p2")
 
     assert(!hexadecimalInvalid)
 
+    _, commaInvalid :=
+        strconv.ParseF64("1,5")
+
+    assert(!commaInvalid)
+
+    _, multipleDotsInvalid :=
+        strconv.ParseF64("1.2.3")
+
+    assert(!multipleDotsInvalid)
+
+    _, multipleSignsInvalid :=
+        strconv.ParseF64("--1")
+
+    assert(!multipleSignsInvalid)
+
+    _, uppercaseNanInvalid :=
+        strconv.ParseF64("NaN")
+
+    assert(!uppercaseNanInvalid)
+
+    _, uppercaseInfinityInvalid :=
+        strconv.ParseF64("INF")
+
+    assert(!uppercaseInfinityInvalid)
+
+    _, infinityWordInvalid :=
+        strconv.ParseF64("infinity")
+
+    assert(!infinityWordInvalid)
+
+    _, nanPayloadInvalid :=
+        strconv.ParseF64("nan(1)")
+
+    assert(!nanPayloadInvalid)
+
     _, overflowInvalid :=
         strconv.ParseF64("1e9999")
 
     assert(!overflowInvalid)
+
+    _, negativeOverflowInvalid :=
+        strconv.ParseF64("-1e9999")
+
+    assert(!negativeOverflowInvalid)
 
     _, underflowInvalid :=
         strconv.ParseF64("1e-9999")
 
     assert(!underflowInvalid)
 
+    _, negativeUnderflowInvalid :=
+        strconv.ParseF64("-1e-9999")
+
+    assert(!negativeUnderflowInvalid)
+
     _, nanValid :=
         strconv.ParseF64("nan")
 
     assert(nanValid)
 
+    _, positiveNanValid :=
+        strconv.ParseF64("+nan")
+
+    assert(positiveNanValid)
+
+    _, negativeNanValid :=
+        strconv.ParseF64("-nan")
+
+    assert(negativeNanValid)
+
     _, infinityValid :=
         strconv.ParseF64("inf")
 
     assert(infinityValid)
+
+    _, positiveInfinityValid :=
+        strconv.ParseF64("+inf")
+
+    assert(positiveInfinityValid)
 
     _, negativeInfinityValid :=
         strconv.ParseF64("-inf")
@@ -463,11 +774,211 @@ TestFloatParsing :: task() {
     assert(negativeInfinityValid)
 }
 
+TestFloatFormatting :: task(
+    allocator mem.Allocator,
+    deallocator mem.Deallocator,
+) {
+    zero32 := strconv.FormatF32(
+        allocator,
+        cast<f32>(0),
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &zero32,
+    )
+
+    assert(
+        strings.View(&zero32) ==
+            "0",
+    )
+
+    negativeZero32 := strconv.FormatF32(
+        allocator,
+        cast<f32>(-0.0),
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZero32,
+    )
+
+    assert(
+        strings.View(
+            &negativeZero32,
+        ) == "-0",
+    )
+
+    zero64 := strconv.FormatF64(
+        allocator,
+        0.0,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &zero64,
+    )
+
+    assert(
+        strings.View(&zero64) ==
+            "0",
+    )
+
+    negativeZero64 := strconv.FormatF64(
+        allocator,
+        -0.0,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZero64,
+    )
+
+    assert(
+        strings.View(
+            &negativeZero64,
+        ) == "-0",
+    )
+
+    nan32, nan32Valid :=
+        strconv.ParseF32("nan")
+
+    assert(nan32Valid)
+
+    nan32Text := strconv.FormatF32(
+        allocator,
+        nan32,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &nan32Text,
+    )
+
+    assert(
+        strings.View(&nan32Text) ==
+            "nan",
+    )
+
+    positiveInfinity32,
+    positiveInfinity32Valid :=
+        strconv.ParseF32("inf")
+
+    assert(positiveInfinity32Valid)
+
+    positiveInfinity32Text :=
+        strconv.FormatF32(
+            allocator,
+            positiveInfinity32,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &positiveInfinity32Text,
+    )
+
+    assert(
+        strings.View(
+            &positiveInfinity32Text,
+        ) == "inf",
+    )
+
+    negativeInfinity32,
+    negativeInfinity32Valid :=
+        strconv.ParseF32("-inf")
+
+    assert(negativeInfinity32Valid)
+
+    negativeInfinity32Text :=
+        strconv.FormatF32(
+            allocator,
+            negativeInfinity32,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeInfinity32Text,
+    )
+
+    assert(
+        strings.View(
+            &negativeInfinity32Text,
+        ) == "-inf",
+    )
+
+    nan64, nan64Valid :=
+        strconv.ParseF64("nan")
+
+    assert(nan64Valid)
+
+    nan64Text := strconv.FormatF64(
+        allocator,
+        nan64,
+    )
+
+    defer strings.Destroy(
+        deallocator,
+        &nan64Text,
+    )
+
+    assert(
+        strings.View(&nan64Text) ==
+            "nan",
+    )
+
+    positiveInfinity64,
+    positiveInfinity64Valid :=
+        strconv.ParseF64("inf")
+
+    assert(positiveInfinity64Valid)
+
+    positiveInfinity64Text :=
+        strconv.FormatF64(
+            allocator,
+            positiveInfinity64,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &positiveInfinity64Text,
+    )
+
+    assert(
+        strings.View(
+            &positiveInfinity64Text,
+        ) == "inf",
+    )
+
+    negativeInfinity64,
+    negativeInfinity64Valid :=
+        strconv.ParseF64("-inf")
+
+    assert(negativeInfinity64Valid)
+
+    negativeInfinity64Text :=
+        strconv.FormatF64(
+            allocator,
+            negativeInfinity64,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeInfinity64Text,
+    )
+
+    assert(
+        strings.View(
+            &negativeInfinity64Text,
+        ) == "-inf",
+    )
+}
+
 TestFloatRoundTrips :: task(
     allocator mem.Allocator,
     deallocator mem.Deallocator,
 ) {
-    value32: f32 = 12345.125
+    value32: f32 =
+        12345.125
 
     text32 := strconv.FormatF32(
         allocator,
@@ -486,6 +997,35 @@ TestFloatRoundTrips :: task(
 
     assert(valid32)
     assert(parsed32 == value32)
+
+    negativeValue32: f32 =
+        -0.0003125
+
+    negativeText32 :=
+        strconv.FormatF32(
+            allocator,
+            negativeValue32,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeText32,
+    )
+
+    parsedNegative32,
+    negativeValid32 :=
+        strconv.ParseF32(
+            strings.View(
+                &negativeText32,
+            ),
+        )
+
+    assert(negativeValid32)
+
+    assert(
+        parsedNegative32 ==
+            negativeValue32,
+    )
 
     value64: f64 =
         123456789.12345679
@@ -508,36 +1048,143 @@ TestFloatRoundTrips :: task(
     assert(valid64)
     assert(parsed64 == value64)
 
-    negativeZero: f64 = -0.0
+    smallValue64: f64 =
+        0.000000000123456789
 
-    negativeZeroText :=
+    smallText64 :=
         strconv.FormatF64(
             allocator,
-            negativeZero,
+            smallValue64,
         )
 
     defer strings.Destroy(
         deallocator,
-        &negativeZeroText,
+        &smallText64,
+    )
+
+    parsedSmall64,
+    smallValid64 :=
+        strconv.ParseF64(
+            strings.View(
+                &smallText64,
+            ),
+        )
+
+    assert(smallValid64)
+
+    assert(
+        parsedSmall64 ==
+            smallValue64,
+    )
+
+    negativeZero32: f32 =
+        -0.0
+
+    negativeZeroText32 :=
+        strconv.FormatF32(
+            allocator,
+            negativeZero32,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZeroText32,
     )
 
     assert(
         strings.View(
-            &negativeZeroText,
+            &negativeZeroText32,
+        ) == "-0",
+    )
+
+    parsedNegativeZero32,
+    negativeZeroValid32 :=
+        strconv.ParseF32(
+            strings.View(
+                &negativeZeroText32,
+            ),
+        )
+
+    assert(negativeZeroValid32)
+
+    negativeZeroRoundTripText32 :=
+        strconv.FormatF32(
+            allocator,
+            parsedNegativeZero32,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZeroRoundTripText32,
+    )
+
+    assert(
+        strings.View(
+            &negativeZeroRoundTripText32,
+        ) == "-0",
+    )
+
+    negativeZero64: f64 =
+        -0.0
+
+    negativeZeroText64 :=
+        strconv.FormatF64(
+            allocator,
+            negativeZero64,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZeroText64,
+    )
+
+    assert(
+        strings.View(
+            &negativeZeroText64,
+        ) == "-0",
+    )
+
+    parsedNegativeZero64,
+    negativeZeroValid64 :=
+        strconv.ParseF64(
+            strings.View(
+                &negativeZeroText64,
+            ),
+        )
+
+    assert(negativeZeroValid64)
+
+    negativeZeroRoundTripText64 :=
+        strconv.FormatF64(
+            allocator,
+            parsedNegativeZero64,
+        )
+
+    defer strings.Destroy(
+        deallocator,
+        &negativeZeroRoundTripText64,
+    )
+
+    assert(
+        strings.View(
+            &negativeZeroRoundTripText64,
         ) == "-0",
     )
 }
 
 Main :: task() {
-    cAllocator := mem.NewCAllocator()
+    cAllocator :=
+        mem.NewCAllocator()
 
-    allocator := cast<mem.Allocator>(
-        &cAllocator,
-    )
+    allocator :=
+        cast<mem.Allocator>(
+            &cAllocator,
+        )
 
-    deallocator := cast<mem.Deallocator>(
-        &cAllocator,
-    )
+    deallocator :=
+        cast<mem.Deallocator>(
+            &cAllocator,
+        )
 
     TestBool(
         allocator,
@@ -556,7 +1203,13 @@ Main :: task() {
         deallocator,
     )
 
-    TestFloatParsing()
+    TestF32Parsing()
+    TestF64Parsing()
+
+    TestFloatFormatting(
+        allocator,
+        deallocator,
+    )
 
     TestFloatRoundTrips(
         allocator,
