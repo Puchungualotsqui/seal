@@ -701,6 +701,8 @@ type SemanticInfo struct {
 
 	InterfaceConversions   map[*ast.GenericExpr]InterfaceConversionResolution
 	TaskPointerResolutions map[*ast.TaskPointerExpr]TaskPointerResolution
+
+	CallResolutions map[*ast.CallExpr]CallResolution
 }
 
 func (c *Checker) SemanticInfo() SemanticInfo {
@@ -736,6 +738,10 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		TaskPointerResolutions: make(
 			map[*ast.TaskPointerExpr]TaskPointerResolution,
 			len(c.taskPointerResolutions),
+		),
+		CallResolutions: make(
+			map[*ast.CallExpr]CallResolution,
+			len(c.callResolutions),
 		),
 	}
 
@@ -789,7 +795,101 @@ func (c *Checker) SemanticInfo() SemanticInfo {
 		info.TaskPointerResolutions[expr] = cloned
 	}
 
+	for call, resolution := range c.callResolutions {
+		cloned := resolution
+		cloned.Candidates = append(
+			[]*Symbol(nil),
+			resolution.Candidates...,
+		)
+
+		info.CallResolutions[call] = cloned
+	}
+
 	return info
+}
+
+func (c *Checker) recordCallResolution(
+	call *ast.CallExpr,
+	resolution CallResolution,
+) {
+	if call == nil {
+		return
+	}
+
+	resolution.Candidates = append(
+		[]*Symbol(nil),
+		resolution.Candidates...,
+	)
+
+	c.callResolutions[call] = resolution
+
+	c.recordExpectedTaskArgumentTypes(
+		call.Args,
+		resolution.TaskType,
+	)
+}
+
+func (c *Checker) recordExpectedTaskArgumentTypes(
+	args []ast.Expr,
+	taskType *Type,
+) {
+	if taskType == nil ||
+		taskType.Kind != TypeTask ||
+		len(taskType.Params) == 0 {
+		return
+	}
+
+	isVariadic :=
+		taskType.IsVariadic ||
+			taskTypeHasVariadicParam(taskType)
+
+	fixedCount := len(taskType.Params)
+
+	if isVariadic {
+		fixedCount--
+	}
+
+	for i, arg := range args {
+		if arg == nil {
+			continue
+		}
+
+		var expected *Type
+
+		switch {
+		case i < fixedCount:
+			expected = taskType.Params[i]
+
+		case isVariadic:
+			expected = taskType.Params[len(taskType.Params)-1]
+
+		case i < len(taskType.Params):
+			expected = taskType.Params[i]
+		}
+
+		if expected == nil {
+			continue
+		}
+
+		spread, isSpread := arg.(*ast.SpreadExpr)
+
+		if !isSpread {
+			c.expectedExprTypes[arg] = expected
+			continue
+		}
+
+		variadicExpected := &Type{
+			Kind: TypeVariadic,
+			Name: "..." + expected.String(),
+			Elem: expected,
+		}
+
+		c.expectedExprTypes[arg] = variadicExpected
+
+		if spread.Expr != nil {
+			c.expectedExprTypes[spread.Expr] = variadicExpected
+		}
+	}
 }
 
 type IndexResolution struct {
@@ -915,6 +1015,8 @@ type Checker struct {
 
 	impls      []*ImplInfo
 	implByDecl map[*ast.ImplDecl]*ImplInfo
+
+	callResolutions map[*ast.CallExpr]CallResolution
 }
 
 func New(diags *diag.Reporter) *Checker {
@@ -960,6 +1062,8 @@ func NewWithPackagesAndOptions(
 		options:       options,
 		packageScopes: map[string]*Scope{},
 		implByDecl:    map[*ast.ImplDecl]*ImplInfo{},
+
+		callResolutions: map[*ast.CallExpr]CallResolution{},
 	}
 
 	c.global = NewScope(nil)
@@ -10358,6 +10462,49 @@ func (c *Checker) checkInterfaceDispatchCallResultTypes(
 		return nil, false
 	}
 
+	params := append(
+		[]*Type(nil),
+		req.Params...,
+	)
+
+	/*
+		The source-level first argument is the interface wrapper, not the internal
+		*self implementation receiver.
+	*/
+	if len(params) > 0 {
+		params[0] = ifaceType
+	}
+
+	isVariadic := false
+
+	for _, variadic := range req.ParamIsVariadic {
+		if variadic {
+			isVariadic = true
+			break
+		}
+	}
+
+	taskType := &Type{
+		Kind:            TypeTask,
+		Name:            req.Name,
+		Params:          params,
+		Results:         append([]*Type(nil), req.Results...),
+		RequiredParams:  len(params),
+		ParamIsVariadic: append([]bool(nil), req.ParamIsVariadic...),
+		IsVariadic:      isVariadic,
+		IsPure:          req.IsPure,
+		IsTrustedPure:   req.IsTrustedPure,
+	}
+
+	c.recordCallResolution(
+		e,
+		CallResolution{
+			Kind:     CallResolutionInterface,
+			Name:     req.Name,
+			TaskType: taskType,
+		},
+	)
+
 	if len(argTypes) != len(req.Params) {
 		c.diags.Add(
 			e.Span(),
@@ -10429,6 +10576,7 @@ func (c *Checker) checkCallResultTypes(
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		return c.checkGenericCallResultTypes(
 			scope,
+			e,
 			gen,
 			nil,
 			nil,
@@ -10549,7 +10697,9 @@ func (c *Checker) checkCallResultTypes(
 		switch sym.Kind {
 		case SymbolTask:
 			return c.checkDirectTaskCallResultTypes(
+				e,
 				sym,
+				"",
 				argTypes,
 				argSpans,
 				e.Span(),
@@ -10557,7 +10707,9 @@ func (c *Checker) checkCallResultTypes(
 
 		case SymbolOverload:
 			return c.checkOverloadCallResultTypes(
+				e,
 				sym,
+				"",
 				argTypes,
 				argSpans,
 				e.Span(),
@@ -10586,6 +10738,7 @@ func (c *Checker) checkCallResultTypes(
 			if pkgSym != nil &&
 				pkgSym.Kind == SymbolPackage {
 				return c.checkPackageCallResultTypes(
+					e,
 					pkgSym,
 					selector,
 					argTypes,
@@ -10614,6 +10767,15 @@ func (c *Checker) checkCallResultTypes(
 		}
 	}
 
+	c.recordCallResolution(
+		e,
+		CallResolution{
+			Kind:     CallResolutionTaskValue,
+			Name:     exprDisplay(e.Callee),
+			TaskType: calleeType,
+		},
+	)
+
 	c.checkTaskTypeCallArguments(
 		calleeType,
 		argTypes,
@@ -10624,8 +10786,24 @@ func (c *Checker) checkCallResultTypes(
 	return calleeType.Results
 }
 
-func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTypes []*Type, argSpans []source.Span, args []ast.Expr, span source.Span) *Type {
-	results := c.checkGenericCallResultTypes(scope, gen, argTypes, argSpans, args, span)
+func (c *Checker) checkGenericCallExpr(
+	scope *Scope,
+	call *ast.CallExpr,
+	gen *ast.GenericExpr,
+	argTypes []*Type,
+	argSpans []source.Span,
+	args []ast.Expr,
+	span source.Span,
+) *Type {
+	results := c.checkGenericCallResultTypes(
+		scope,
+		call,
+		gen,
+		argTypes,
+		argSpans,
+		args,
+		span,
+	)
 
 	if len(results) == 0 {
 		return VoidType
@@ -10641,6 +10819,7 @@ func (c *Checker) checkGenericCallExpr(scope *Scope, gen *ast.GenericExpr, argTy
 
 func (c *Checker) checkGenericOverloadCallResultTypes(
 	scope *Scope,
+	call *ast.CallExpr,
 	gen *ast.GenericExpr,
 	sym *Symbol,
 	packageName string,
@@ -10749,11 +10928,24 @@ func (c *Checker) checkGenericOverloadCallResultTypes(
 			GenericArguments: genericArguments,
 		}
 
+	c.recordCallResolution(
+		call,
+		CallResolution{
+			Kind:        CallResolutionGenericOverload,
+			Name:        info.Name,
+			Candidate:   result.Candidate,
+			TaskType:    result.TaskType,
+			PackageName: packageName,
+			Candidates:  info.Candidates,
+		},
+	)
+
 	return result.TaskType.Results
 }
 
 func (c *Checker) checkGenericCallResultTypes(
 	scope *Scope,
+	call *ast.CallExpr,
 	gen *ast.GenericExpr,
 	argTypes []*Type,
 	argSpans []source.Span,
@@ -10797,6 +10989,7 @@ func (c *Checker) checkGenericCallResultTypes(
 	case SymbolOverload:
 		return c.checkGenericOverloadCallResultTypes(
 			scope,
+			call,
 			gen,
 			sym,
 			packageName,
@@ -10881,6 +11074,17 @@ func (c *Checker) checkGenericCallResultTypes(
 			gen.Span(),
 		)
 	}
+
+	c.recordCallResolution(
+		call,
+		CallResolution{
+			Kind:        CallResolutionGenericTask,
+			Name:        sym.Name,
+			Candidate:   sym,
+			TaskType:    instantiated,
+			PackageName: packageName,
+		},
+	)
 
 	c.checkGenericTaskCallArguments(
 		scope,
@@ -11139,6 +11343,7 @@ func (c *Checker) checkCallExpr(
 	if gen, ok := e.Callee.(*ast.GenericExpr); ok {
 		return c.checkGenericCallExpr(
 			scope,
+			e,
 			gen,
 			nil,
 			nil,
@@ -11245,7 +11450,9 @@ func (c *Checker) checkCallExpr(
 		switch sym.Kind {
 		case SymbolTask:
 			return c.checkDirectTaskCall(
+				e,
 				sym,
+				"",
 				argTypes,
 				argSpans,
 				e.Span(),
@@ -11253,7 +11460,9 @@ func (c *Checker) checkCallExpr(
 
 		case SymbolOverload:
 			return c.checkOverloadCall(
+				e,
 				sym,
+				"",
 				argTypes,
 				argSpans,
 				e.Span(),
@@ -11277,6 +11486,7 @@ func (c *Checker) checkCallExpr(
 			if pkgSym != nil &&
 				pkgSym.Kind == SymbolPackage {
 				return c.checkPackageCall(
+					e,
 					pkgSym,
 					selector,
 					argTypes,
@@ -11302,6 +11512,15 @@ func (c *Checker) checkCallExpr(
 		)
 		return InvalidType
 	}
+
+	c.recordCallResolution(
+		e,
+		CallResolution{
+			Kind:     CallResolutionTaskValue,
+			Name:     exprDisplay(e.Callee),
+			TaskType: calleeType,
+		},
+	)
 
 	return c.checkTaskTypeCall(
 		calleeType,
@@ -11335,7 +11554,14 @@ func (c *Checker) checkPanicCall(args []ast.Expr, argTypes []*Type, span source.
 	return VoidType
 }
 
-func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+func (c *Checker) checkPackageCall(
+	call *ast.CallExpr,
+	pkgSym *Symbol,
+	selector *ast.SelectorExpr,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) *Type {
 	if pkgSym.Package == nil {
 		c.diags.Add(selector.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
 		return InvalidType
@@ -11351,10 +11577,24 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 
 	switch member.Kind {
 	case SymbolTask:
-		return c.checkDirectTaskCall(member, argTypes, argSpans, span)
+		return c.checkDirectTaskCall(
+			call,
+			member,
+			pkgSym.Name,
+			argTypes,
+			argSpans,
+			span,
+		)
 
 	case SymbolOverload:
-		return c.checkOverloadCall(member, argTypes, argSpans, span)
+		return c.checkOverloadCall(
+			call,
+			member,
+			pkgSym.Name,
+			argTypes,
+			argSpans,
+			span,
+		)
 
 	default:
 		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package symbol %s.%s is not callable", pkgSym.Name, selector.Name.Name))
@@ -11362,20 +11602,58 @@ func (c *Checker) checkPackageCall(pkgSym *Symbol, selector *ast.SelectorExpr, a
 	}
 }
 
-func (c *Checker) checkDirectTaskCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+func (c *Checker) checkDirectTaskCall(
+	call *ast.CallExpr,
+	sym *Symbol,
+	packageName string,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) *Type {
 	c.ensureTaskSymbolPrepared(nil, sym)
 
-	if sym.Type == nil || sym.Type.Kind != TypeTask {
-		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
+	if sym.Type == nil ||
+		sym.Type.Kind != TypeTask {
+		c.diags.Add(
+			sym.Span,
+			fmt.Sprintf(
+				"symbol %q is not a valid task",
+				sym.Name,
+			),
+		)
+
 		return InvalidType
 	}
+
+	c.recordCallResolution(
+		call,
+		CallResolution{
+			Kind:        CallResolutionDirectTask,
+			Name:        sym.Name,
+			Candidate:   sym,
+			TaskType:    sym.Type,
+			PackageName: packageName,
+		},
+	)
 
 	if len(sym.Type.GenericParams) > 0 {
-		c.diags.Add(span, fmt.Sprintf("generic task %q requires generic arguments", sym.Name))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"generic task %q requires generic arguments",
+				sym.Name,
+			),
+		)
+
 		return InvalidType
 	}
 
-	return c.checkTaskTypeCall(sym.Type, argTypes, argSpans, span)
+	return c.checkTaskTypeCall(
+		sym.Type,
+		argTypes,
+		argSpans,
+		span,
+	)
 }
 
 func (c *Checker) checkTaskTypeCall(taskType *Type, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
@@ -12130,34 +12408,92 @@ func (c *Checker) checkLenCall(
 	)
 }
 
-func (c *Checker) checkOverloadCall(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) *Type {
+func (c *Checker) checkOverloadCall(
+	call *ast.CallExpr,
+	sym *Symbol,
+	packageName string,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) *Type {
 	c.ensureOverloadSymbolPrepared(nil, sym)
 
 	info := sym.Overload
+
 	if info == nil {
-		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
+		c.diags.Add(
+			sym.Span,
+			fmt.Sprintf(
+				"symbol %q is not a valid overload",
+				sym.Name,
+			),
+		)
+
 		return InvalidType
 	}
 
-	result := c.resolveOverload(info, argTypes)
+	baseResolution := CallResolution{
+		Kind:        CallResolutionOverload,
+		Name:        info.Name,
+		PackageName: packageName,
+		Candidates:  info.Candidates,
+	}
+
+	result := c.resolveOverload(
+		info,
+		argTypes,
+	)
 
 	if !result.Matched {
+		c.recordCallResolution(
+			call,
+			baseResolution,
+		)
+
 		c.diags.Add(
 			span,
-			fmt.Sprintf("no overload of %q matches argument types (%s)", info.Name, c.formatTypes(argTypes)),
+			fmt.Sprintf(
+				"no overload of %q matches argument types (%s)",
+				info.Name,
+				c.formatTypes(argTypes),
+			),
 		)
+
 		return InvalidType
 	}
 
 	if result.Ambiguous {
+		c.recordCallResolution(
+			call,
+			baseResolution,
+		)
+
 		c.diags.Add(
 			span,
-			fmt.Sprintf("ambiguous overload call %q with argument types (%s)", info.Name, c.formatTypes(argTypes)),
+			fmt.Sprintf(
+				"ambiguous overload call %q with argument types (%s)",
+				info.Name,
+				c.formatTypes(argTypes),
+			),
 		)
+
 		return InvalidType
 	}
 
-	return c.checkTaskTypeCall(result.Candidate.Type, argTypes, argSpans, span)
+	baseResolution.Candidate = result.Candidate
+	baseResolution.TaskType = result.Candidate.Type
+
+	c.recordCallResolution(
+		call,
+		baseResolution,
+	)
+
+	return c.checkTaskTypeCall(
+		result.Candidate.Type,
+		argTypes,
+		argSpans,
+		span,
+	)
 }
 
 func (c *Checker) checkSelectorExpr(
@@ -14971,6 +15307,35 @@ func cloneBigInt(
 	}
 
 	return new(big.Int).Set(value)
+}
+
+type CallResolutionKind int
+
+const (
+	CallResolutionInvalid CallResolutionKind = iota
+	CallResolutionDirectTask
+	CallResolutionOverload
+	CallResolutionGenericTask
+	CallResolutionGenericOverload
+	CallResolutionInterface
+	CallResolutionTaskValue
+)
+
+type CallResolution struct {
+	Kind CallResolutionKind
+
+	// Name is the source-level callable name. For an overload, this is the
+	// overload name rather than the selected implementation task name.
+	Name string
+
+	Candidate *Symbol
+	TaskType  *Type
+
+	PackageName string
+
+	// Candidates is populated for overload calls, including calls that could
+	// not yet select one candidate while the user is typing.
+	Candidates []*Symbol
 }
 
 func untypedIntConstantType(
@@ -18178,24 +18543,70 @@ func (c *Checker) checkAssertCall(args []ast.Expr, argTypes []*Type, span source
 	return VoidType
 }
 
-func (c *Checker) checkDirectTaskCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+func (c *Checker) checkDirectTaskCallResultTypes(
+	call *ast.CallExpr,
+	sym *Symbol,
+	packageName string,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) []*Type {
 	c.ensureTaskSymbolPrepared(nil, sym)
 
-	if sym.Type == nil || sym.Type.Kind != TypeTask {
-		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid task", sym.Name))
+	if sym.Type == nil ||
+		sym.Type.Kind != TypeTask {
+		c.diags.Add(
+			sym.Span,
+			fmt.Sprintf(
+				"symbol %q is not a valid task",
+				sym.Name,
+			),
+		)
+
 		return []*Type{InvalidType}
 	}
+
+	c.recordCallResolution(
+		call,
+		CallResolution{
+			Kind:        CallResolutionDirectTask,
+			Name:        sym.Name,
+			Candidate:   sym,
+			TaskType:    sym.Type,
+			PackageName: packageName,
+		},
+	)
 
 	if len(sym.Type.GenericParams) > 0 {
-		c.diags.Add(span, fmt.Sprintf("generic task %q requires generic arguments", sym.Name))
+		c.diags.Add(
+			span,
+			fmt.Sprintf(
+				"generic task %q requires generic arguments",
+				sym.Name,
+			),
+		)
+
 		return []*Type{InvalidType}
 	}
 
-	c.checkTaskTypeCallArguments(sym.Type, argTypes, argSpans, span)
+	c.checkTaskTypeCallArguments(
+		sym.Type,
+		argTypes,
+		argSpans,
+		span,
+	)
+
 	return sym.Type.Results
 }
 
-func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.SelectorExpr, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+func (c *Checker) checkPackageCallResultTypes(
+	call *ast.CallExpr,
+	pkgSym *Symbol,
+	selector *ast.SelectorExpr,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) []*Type {
 	if pkgSym.Package == nil {
 		c.diags.Add(selector.Left.Span(), fmt.Sprintf("package %q has no symbol table", pkgSym.Name))
 		return []*Type{InvalidType}
@@ -18211,10 +18622,24 @@ func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.Sele
 
 	switch member.Kind {
 	case SymbolTask:
-		return c.checkDirectTaskCallResultTypes(member, argTypes, argSpans, span)
+		return c.checkDirectTaskCallResultTypes(
+			call,
+			member,
+			pkgSym.Name,
+			argTypes,
+			argSpans,
+			span,
+		)
 
 	case SymbolOverload:
-		return c.checkOverloadCallResultTypes(member, argTypes, argSpans, span)
+		return c.checkOverloadCallResultTypes(
+			call,
+			member,
+			pkgSym.Name,
+			argTypes,
+			argSpans,
+			span,
+		)
 
 	default:
 		c.diags.Add(selector.Name.Span(), fmt.Sprintf("package symbol %s.%s is not callable", pkgSym.Name, selector.Name.Name))
@@ -18222,34 +18647,93 @@ func (c *Checker) checkPackageCallResultTypes(pkgSym *Symbol, selector *ast.Sele
 	}
 }
 
-func (c *Checker) checkOverloadCallResultTypes(sym *Symbol, argTypes []*Type, argSpans []source.Span, span source.Span) []*Type {
+func (c *Checker) checkOverloadCallResultTypes(
+	call *ast.CallExpr,
+	sym *Symbol,
+	packageName string,
+	argTypes []*Type,
+	argSpans []source.Span,
+	span source.Span,
+) []*Type {
 	c.ensureOverloadSymbolPrepared(nil, sym)
 
 	info := sym.Overload
+
 	if info == nil {
-		c.diags.Add(sym.Span, fmt.Sprintf("symbol %q is not a valid overload", sym.Name))
+		c.diags.Add(
+			sym.Span,
+			fmt.Sprintf(
+				"symbol %q is not a valid overload",
+				sym.Name,
+			),
+		)
+
 		return []*Type{InvalidType}
 	}
 
-	result := c.resolveOverload(info, argTypes)
+	baseResolution := CallResolution{
+		Kind:        CallResolutionOverload,
+		Name:        info.Name,
+		PackageName: packageName,
+		Candidates:  info.Candidates,
+	}
+
+	result := c.resolveOverload(
+		info,
+		argTypes,
+	)
 
 	if !result.Matched {
+		c.recordCallResolution(
+			call,
+			baseResolution,
+		)
+
 		c.diags.Add(
 			span,
-			fmt.Sprintf("no overload of %q matches argument types (%s)", info.Name, c.formatTypes(argTypes)),
+			fmt.Sprintf(
+				"no overload of %q matches argument types (%s)",
+				info.Name,
+				c.formatTypes(argTypes),
+			),
 		)
+
 		return []*Type{InvalidType}
 	}
 
 	if result.Ambiguous {
+		c.recordCallResolution(
+			call,
+			baseResolution,
+		)
+
 		c.diags.Add(
 			span,
-			fmt.Sprintf("ambiguous overload call %q with argument types (%s)", info.Name, c.formatTypes(argTypes)),
+			fmt.Sprintf(
+				"ambiguous overload call %q with argument types (%s)",
+				info.Name,
+				c.formatTypes(argTypes),
+			),
 		)
+
 		return []*Type{InvalidType}
 	}
 
-	c.checkTaskTypeCallArguments(result.Candidate.Type, argTypes, argSpans, span)
+	baseResolution.Candidate = result.Candidate
+	baseResolution.TaskType = result.Candidate.Type
+
+	c.recordCallResolution(
+		call,
+		baseResolution,
+	)
+
+	c.checkTaskTypeCallArguments(
+		result.Candidate.Type,
+		argTypes,
+		argSpans,
+		span,
+	)
+
 	return result.Candidate.Type.Results
 }
 

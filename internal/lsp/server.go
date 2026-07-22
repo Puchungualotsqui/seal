@@ -357,6 +357,17 @@ func (s *Server) handleRequest(
 							".",
 						},
 					},
+
+					SignatureHelpProvider: &SignatureHelpOptions{
+						TriggerCharacters: []string{
+							"(",
+							",",
+						},
+
+						RetriggerCharacters: []string{
+							",",
+						},
+					},
 				},
 
 				ServerInfo: &ServerInfo{
@@ -364,6 +375,36 @@ func (s *Server) handleRequest(
 					Version: s.version,
 				},
 			},
+		)
+
+	case methodSignatureHelp:
+		params := SignatureHelpParams{}
+
+		if err := decodeParams(message.Params, &params); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		help, err := s.signatureHelp(params)
+
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(
+			message.ID,
+			help,
 		)
 
 	case methodHover:
@@ -1547,6 +1588,633 @@ type completionContext struct {
 
 	// DotOffset is the byte offset of the selector dot.
 	DotOffset int
+}
+
+type signatureCandidate struct {
+	Symbol   *checker.Symbol
+	TaskType *checker.Type
+	Name     string
+}
+
+func (s *Server) signatureHelp(
+	params SignatureHelpParams,
+) (*SignatureHelp, error) {
+	packageSnapshot, file, offset, _, err :=
+		s.resolveDocumentPosition(
+			params.TextDocument.URI,
+			params.Position,
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if packageSnapshot == nil || file == nil {
+		return nil, nil
+	}
+
+	semantic := packageSnapshot.Result.SemanticInfo
+
+	call := semantic.CallAt(file, offset)
+
+	if call == nil {
+		return nil, nil
+	}
+
+	resolution, found :=
+		semantic.CallResolutionFor(call)
+
+	if !found {
+		return nil, nil
+	}
+
+	candidates :=
+		signatureCandidatesForResolution(
+			call,
+			resolution,
+		)
+
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	activeArgument :=
+		activeCallArgument(
+			call,
+			file,
+			offset,
+		)
+
+	activeSignature :=
+		activeSignatureForResolution(
+			candidates,
+			resolution,
+		)
+
+	signatures := make(
+		[]SignatureInformation,
+		0,
+		len(candidates),
+	)
+
+	for _, candidate := range candidates {
+		activeParameter, hasActiveParameter :=
+			activeTaskParameter(
+				candidate.TaskType,
+				activeArgument,
+			)
+
+		signature :=
+			makeSignatureInformation(
+				candidate,
+				activeParameter,
+				hasActiveParameter,
+			)
+
+		signatures = append(
+			signatures,
+			signature,
+		)
+	}
+
+	help := &SignatureHelp{
+		Signatures: signatures,
+	}
+
+	if activeSignature >= 0 {
+		help.ActiveSignature =
+			intPointer(activeSignature)
+	}
+
+	if activeSignature >= 0 &&
+		activeSignature < len(candidates) {
+		if activeParameter, ok :=
+			activeTaskParameter(
+				candidates[activeSignature].TaskType,
+				activeArgument,
+			); ok {
+			help.ActiveParameter =
+				intPointer(activeParameter)
+		}
+	}
+
+	return help, nil
+}
+
+func signatureCandidatesForResolution(
+	call *ast.CallExpr,
+	resolution checker.CallResolution,
+) []signatureCandidate {
+	name :=
+		resolution.Name
+
+	if name == "" {
+		name =
+			callCalleeName(
+				call.Callee,
+			)
+	}
+
+	if resolution.PackageName != "" &&
+		name != "" &&
+		!strings.Contains(name, ".") {
+		name =
+			resolution.PackageName +
+				"." +
+				name
+	}
+
+	/*
+		A successfully selected generic overload has a specialized task type.
+		Show that specialization rather than its unspecialized candidates.
+	*/
+	if resolution.Kind ==
+		checker.CallResolutionGenericOverload &&
+		resolution.TaskType != nil {
+		return []signatureCandidate{
+			{
+				Symbol: resolution.Candidate,
+
+				TaskType: resolution.TaskType,
+
+				Name: name,
+			},
+		}
+	}
+
+	if resolution.Kind ==
+		checker.CallResolutionOverload &&
+		len(resolution.Candidates) > 0 {
+		var candidates []signatureCandidate
+
+		for _, symbol := range resolution.Candidates {
+			if symbol == nil ||
+				symbol.Type == nil ||
+				symbol.Type.Kind != checker.TypeTask {
+				continue
+			}
+
+			candidates = append(
+				candidates,
+				signatureCandidate{
+					Symbol: symbol,
+
+					TaskType: symbol.Type,
+
+					Name: name,
+				},
+			)
+		}
+
+		return candidates
+	}
+
+	if resolution.TaskType == nil ||
+		resolution.TaskType.Kind != checker.TypeTask {
+		/*
+			An unresolved overload still has useful candidate signatures.
+		*/
+		var candidates []signatureCandidate
+
+		for _, symbol := range resolution.Candidates {
+			if symbol == nil ||
+				symbol.Type == nil ||
+				symbol.Type.Kind != checker.TypeTask {
+				continue
+			}
+
+			candidates = append(
+				candidates,
+				signatureCandidate{
+					Symbol: symbol,
+
+					TaskType: symbol.Type,
+
+					Name: name,
+				},
+			)
+		}
+
+		return candidates
+	}
+
+	return []signatureCandidate{
+		{
+			Symbol: resolution.Candidate,
+
+			TaskType: resolution.TaskType,
+
+			Name: name,
+		},
+	}
+}
+
+func activeSignatureForResolution(
+	candidates []signatureCandidate,
+	resolution checker.CallResolution,
+) int {
+	if len(candidates) == 0 {
+		return -1
+	}
+
+	if resolution.Candidate == nil {
+		return 0
+	}
+
+	for i, candidate := range candidates {
+		if candidate.Symbol ==
+			resolution.Candidate {
+			return i
+		}
+
+		if candidate.Symbol == nil {
+			continue
+		}
+
+		if candidate.Symbol.Name ==
+			resolution.Candidate.Name &&
+			candidate.Symbol.Span.Start ==
+				resolution.Candidate.Span.Start &&
+			candidate.Symbol.Span.End ==
+				resolution.Candidate.Span.End {
+			return i
+		}
+	}
+
+	return 0
+}
+
+func activeTaskParameter(
+	taskType *checker.Type,
+	activeArgument int,
+) (int, bool) {
+	if taskType == nil ||
+		taskType.Kind != checker.TypeTask ||
+		len(taskType.Params) == 0 {
+		return 0, false
+	}
+
+	if activeArgument < 0 {
+		activeArgument = 0
+	}
+
+	isVariadic :=
+		taskType.IsVariadic
+
+	if !isVariadic {
+		for _, variadic := range taskType.ParamIsVariadic {
+			if variadic {
+				isVariadic = true
+				break
+			}
+		}
+	}
+
+	if isVariadic &&
+		activeArgument >=
+			len(taskType.Params)-1 {
+		return len(taskType.Params) - 1,
+			true
+	}
+
+	if activeArgument >=
+		len(taskType.Params) {
+		return len(taskType.Params) - 1,
+			true
+	}
+
+	return activeArgument, true
+}
+
+func makeSignatureInformation(
+	candidate signatureCandidate,
+	activeParameter int,
+	hasActiveParameter bool,
+) SignatureInformation {
+	taskType := candidate.TaskType
+	name := candidate.Name
+
+	if name == "" && candidate.Symbol != nil {
+		name = candidate.Symbol.Name
+	}
+
+	if name == "" && taskType != nil {
+		name = taskType.Name
+	}
+
+	if name == "" {
+		name = "<task>"
+	}
+
+	name =
+		signatureGenericName(
+			name,
+			taskType,
+		)
+
+	parameterLabels :=
+		make(
+			[]string,
+			0,
+			len(taskType.Params),
+		)
+
+	parameters :=
+		make(
+			[]ParameterInformation,
+			0,
+			len(taskType.Params),
+		)
+
+	taskDecl, _ :=
+		candidate.Symbol.Node.(*ast.TaskDecl)
+
+	for i, typ := range taskType.Params {
+		typeName := "<invalid>"
+
+		if typ != nil {
+			typeName = typ.String()
+		}
+
+		variadic :=
+			taskType.IsVariadic &&
+				i ==
+					len(taskType.Params)-1
+
+		if i < len(taskType.ParamIsVariadic) &&
+			taskType.ParamIsVariadic[i] {
+			variadic = true
+		}
+
+		if variadic {
+			typeName = "..." + typeName
+		}
+
+		parameterName := ""
+
+		if taskDecl != nil &&
+			i < len(taskDecl.Params) {
+			parameterName =
+				taskDecl.Params[i].Name.Name
+		}
+
+		label := typeName
+
+		if parameterName != "" {
+			label =
+				parameterName +
+					" " +
+					typeName
+		}
+
+		if i < len(taskType.ParamHasDefault) &&
+			taskType.ParamHasDefault[i] {
+			label += " = default"
+		}
+
+		parameterLabels = append(
+			parameterLabels,
+			label,
+		)
+
+		parameters = append(
+			parameters,
+			ParameterInformation{
+				Label: label,
+			},
+		)
+	}
+
+	label :=
+		name +
+			"(" +
+			strings.Join(
+				parameterLabels,
+				", ",
+			) +
+			")" +
+			signatureResultSuffix(
+				taskType,
+			)
+
+	signature :=
+		SignatureInformation{
+			Label: label,
+
+			Parameters: parameters,
+		}
+
+	if hasActiveParameter {
+		signature.ActiveParameter =
+			intPointer(activeParameter)
+	}
+
+	return signature
+}
+
+func signatureGenericName(
+	name string,
+	taskType *checker.Type,
+) string {
+	if taskType == nil ||
+		len(taskType.GenericParams) == 0 ||
+		strings.Contains(name, "<") {
+		return name
+	}
+
+	var params []string
+
+	for _, param := range taskType.GenericParams {
+		if param.Name.Name == "" {
+			continue
+		}
+
+		params = append(
+			params,
+			param.Name.Name,
+		)
+	}
+
+	if len(params) == 0 {
+		return name
+	}
+
+	return name +
+		"<" +
+		strings.Join(params, ", ") +
+		">"
+}
+
+func signatureResultSuffix(
+	taskType *checker.Type,
+) string {
+	if taskType == nil ||
+		len(taskType.Results) == 0 {
+		return ""
+	}
+
+	results :=
+		make(
+			[]string,
+			0,
+			len(taskType.Results),
+		)
+
+	for _, result := range taskType.Results {
+		if result == nil {
+			results = append(
+				results,
+				"<invalid>",
+			)
+			continue
+		}
+
+		results = append(
+			results,
+			result.String(),
+		)
+	}
+
+	if len(results) == 1 {
+		return " " + results[0]
+	}
+
+	return " (" +
+		strings.Join(results, ", ") +
+		")"
+}
+
+func callCalleeName(
+	expr ast.Expr,
+) string {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name.Name
+
+	case *ast.SelectorExpr:
+		left :=
+			callCalleeName(
+				e.Left,
+			)
+
+		if left == "" {
+			return e.Name.Name
+		}
+
+		return left +
+			"." +
+			e.Name.Name
+
+	case *ast.GenericExpr:
+		return callCalleeName(
+			e.Base,
+		)
+	}
+
+	return ""
+}
+
+func activeCallArgument(
+	call *ast.CallExpr,
+	file *source.File,
+	offset int,
+) int {
+	if call == nil ||
+		file == nil {
+		return 0
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+
+	if offset > len(file.Text) {
+		offset = len(file.Text)
+	}
+
+	if len(call.Args) == 0 {
+		return 0
+	}
+
+	for i, arg := range call.Args {
+		if arg == nil {
+			continue
+		}
+
+		span := arg.Span()
+
+		if offset < span.Start {
+			if i == 0 {
+				return 0
+			}
+
+			previousEnd :=
+				call.Args[i-1].Span().End
+
+			if sourceContainsComma(
+				file.Text,
+				previousEnd,
+				offset,
+			) {
+				return i
+			}
+
+			return i - 1
+		}
+
+		if offset <= span.End {
+			return i
+		}
+	}
+
+	lastIndex :=
+		len(call.Args) - 1
+
+	lastEnd :=
+		call.Args[lastIndex].Span().End
+
+	if sourceContainsComma(
+		file.Text,
+		lastEnd,
+		offset,
+	) {
+		return len(call.Args)
+	}
+
+	return lastIndex
+}
+
+func sourceContainsComma(
+	text string,
+	start int,
+	end int,
+) bool {
+	if start < 0 {
+		start = 0
+	}
+
+	if end < start {
+		return false
+	}
+
+	if start > len(text) {
+		start = len(text)
+	}
+
+	if end > len(text) {
+		end = len(text)
+	}
+
+	return strings.Contains(
+		text[start:end],
+		",",
+	)
+}
+
+func intPointer(
+	value int,
+) *int {
+	return &value
 }
 
 /*

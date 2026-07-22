@@ -854,3 +854,78 @@ func (k SymbolKind) String() string {
 		return "symbol"
 	}
 }
+
+func (s SemanticInfo) CallResolutionFor(
+	call *ast.CallExpr,
+) (CallResolution, bool) {
+	if call == nil {
+		return CallResolution{}, false
+	}
+
+	resolution, found := s.CallResolutions[call]
+	return resolution, found
+}
+
+/*
+CallAt returns the smallest resolved call containing the cursor.
+*/
+func (s SemanticInfo) CallAt(
+	file *source.File,
+	offset int,
+) *ast.CallExpr {
+	if file == nil {
+		return nil
+	}
+
+	offset = clampSourceOffset(file, offset)
+
+	if call := s.callAt(file, offset, false); call != nil {
+		return call
+	}
+
+	return s.callAt(file, offset, true)
+}
+
+func (s SemanticInfo) callAt(
+	file *source.File,
+	offset int,
+	includeEnd bool,
+) *ast.CallExpr {
+	var best *ast.CallExpr
+	bestWidth := int(^uint(0) >> 1)
+	bestStart := -1
+
+	for call := range s.CallResolutions {
+		if call == nil {
+			continue
+		}
+
+		span := normalizedQuerySpan(call.Span())
+
+		if !sameSourceFile(span.File, file) {
+			continue
+		}
+
+		contains := offset >= span.Start && offset < span.End
+
+		if includeEnd {
+			contains = offset >= span.Start && offset <= span.End
+		}
+
+		if !contains {
+			continue
+		}
+
+		width := span.End - span.Start
+
+		if best == nil ||
+			width < bestWidth ||
+			(width == bestWidth && span.Start > bestStart) {
+			best = call
+			bestWidth = width
+			bestStart = span.Start
+		}
+	}
+
+	return best
+}

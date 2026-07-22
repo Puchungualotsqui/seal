@@ -29,6 +29,8 @@ const (
 
 	methodCancelRequest = "$/cancelRequest"
 	methodSetTrace      = "$/setTrace"
+
+	methodSignatureHelp = "textDocument/signatureHelp"
 )
 
 const (
@@ -101,6 +103,8 @@ type ServerCapabilities struct {
 	HoverProvider      bool `json:"hoverProvider,omitempty"`
 
 	CompletionProvider *CompletionOptions `json:"completionProvider,omitempty"`
+
+	SignatureHelpProvider *SignatureHelpOptions `json:"signatureHelpProvider,omitempty"`
 }
 
 type HoverParams = TextDocumentPositionParams
@@ -120,6 +124,32 @@ type CompletionOptions struct {
 	ResolveProvider bool `json:"resolveProvider,omitempty"`
 
 	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
+}
+
+type SignatureHelpOptions struct {
+	TriggerCharacters   []string `json:"triggerCharacters,omitempty"`
+	RetriggerCharacters []string `json:"retriggerCharacters,omitempty"`
+}
+
+type SignatureHelpParams = TextDocumentPositionParams
+
+type SignatureHelp struct {
+	Signatures []SignatureInformation `json:"signatures"`
+
+	ActiveSignature *int `json:"activeSignature,omitempty"`
+	ActiveParameter *int `json:"activeParameter,omitempty"`
+}
+
+type SignatureInformation struct {
+	Label string `json:"label"`
+
+	Parameters []ParameterInformation `json:"parameters,omitempty"`
+
+	ActiveParameter *int `json:"activeParameter,omitempty"`
+}
+
+type ParameterInformation struct {
+	Label string `json:"label"`
 }
 
 type TextDocumentSyncOptions struct {
