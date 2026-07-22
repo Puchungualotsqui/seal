@@ -345,6 +345,35 @@ func (w *Workspace) refreshPackages(
 		unowned open document is analyzed as a standalone synthetic package.
 	*/
 	if !hasManifest {
+		packages :=
+			map[string]*build.Package{}
+
+		/*
+			Standalone workspaces have no application manifest, but they still
+			load installed standard-library packages.
+		*/
+		if err :=
+			build.DiscoverStdPackagesInto(
+				packages,
+				startDirectory,
+			); err != nil {
+			return err
+		}
+
+		order, err :=
+			allPackageBuildOrder(
+				packages,
+			)
+
+		if err != nil {
+			return err
+		}
+
+		reverseDependencies :=
+			buildReverseDependencies(
+				packages,
+			)
+
 		w.mu.Lock()
 		defer w.mu.Unlock()
 
@@ -352,13 +381,13 @@ func (w *Workspace) refreshPackages(
 			startDirectory
 
 		w.packages =
-			map[string]*build.Package{}
+			packages
 
 		w.order =
-			nil
+			order
 
 		w.reverseDependencies =
-			map[string][]string{}
+			reverseDependencies
 
 		w.workspaceRevision++
 
@@ -755,6 +784,8 @@ func (w *Workspace) Analyze(
 			snapshot,
 			documents,
 			packages,
+			currentResolverExports,
+			currentCheckerExports,
 		); err != nil {
 		return nil,
 			err
@@ -793,6 +824,8 @@ func analyzeStandaloneDocuments(
 	snapshot *WorkspaceSnapshot,
 	documents DocumentSnapshot,
 	packages map[string]*build.Package,
+	resolverDependencies map[string]*resolver.PackageInfo,
+	checkerDependencies map[string]*checker.PackageInfo,
 ) error {
 	if snapshot == nil {
 		return fmt.Errorf(
@@ -829,8 +862,8 @@ func analyzeStandaloneDocuments(
 						GenericConstraintMaxDepth: standaloneGenericConstraintMaxDepth,
 					},
 				},
-				nil,
-				nil,
+				resolverDependencies,
+				checkerDependencies,
 			)
 
 		snapshotKey, err :=

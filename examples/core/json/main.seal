@@ -1117,7 +1117,7 @@ Main :: task() {
         os.ReadFile(
             allocator,
             deallocator,
-            "examples/core/json/test.json",
+            "test.json",
         )
 
     RequireOSError(

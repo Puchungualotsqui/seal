@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -274,65 +275,190 @@ func discoverPackagesIntoWithSeenPaths(packages map[string]*Package, root string
 	})
 }
 
-func StdPackageRoots(workspaceRoot string) []string {
+func StdPackageRoots(
+	workspaceRoot string,
+) []string {
 	var roots []string
 	seen := map[string]bool{}
 
 	add := func(path string) {
-		if path == "" {
+		if strings.TrimSpace(path) == "" {
 			return
 		}
 
-		abs, err := filepath.Abs(path)
+		absolutePath, err :=
+			filepath.Abs(
+				path,
+			)
+
 		if err != nil {
 			return
 		}
 
-		if seen[abs] {
+		absolutePath =
+			filepath.Clean(
+				absolutePath,
+			)
+
+		key :=
+			absolutePath
+
+		if runtime.GOOS == "windows" {
+			key =
+				strings.ToLower(
+					key,
+				)
+		}
+
+		if seen[key] {
 			return
 		}
 
-		seen[abs] = true
-		roots = append(roots, abs)
+		seen[key] = true
+
+		roots =
+			append(
+				roots,
+				absolutePath,
+			)
 	}
 
-	if explicit := os.Getenv("SEAL_STD_PATH"); explicit != "" {
-		for _, part := range filepath.SplitList(explicit) {
+	/*
+		Explicit override. Multiple roots are permitted using the operating
+		system's PATH separator.
+	*/
+	if explicit :=
+		os.Getenv(
+			"SEAL_STD_PATH",
+		); explicit != "" {
+		for _, part := range filepath.SplitList(
+			explicit,
+		) {
 			add(part)
 		}
 
 		return roots
 	}
 
-	// If the workspace has its own std directory, prefer it.
-	workspaceStd := filepath.Join(workspaceRoot, "std")
-	if dirExists(workspaceStd) {
-		add(workspaceStd)
-		return roots
-	}
+	/*
+		A workspace-local standard library overrides the installed copy. This
+		is useful while developing the compiler and standard library together.
+	*/
+	if strings.TrimSpace(
+		workspaceRoot,
+	) != "" {
+		workspaceStd :=
+			filepath.Join(
+				workspaceRoot,
+				"std",
+			)
 
-	// Installed layout:
-	//   bin/sealc
-	//   std/mem
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		add(filepath.Join(exeDir, "std"))
-		add(filepath.Join(exeDir, "..", "std"))
-	}
+		if dirExists(
+			workspaceStd,
+		) {
+			add(workspaceStd)
 
-	// Development convenience when running from the compiler repository.
-	if cwd, err := os.Getwd(); err == nil {
-		for current := cwd; ; current = filepath.Dir(current) {
-			add(filepath.Join(current, "std"))
-
-			parent := filepath.Dir(current)
-			if parent == current {
-				break
-			}
+			return roots
 		}
 	}
 
+	/*
+		Standard installed location:
+
+			Windows: C:\Users\name\.seal\std
+			Unix:   /home/name/.seal/std
+
+		SEAL_HOME may override the .seal directory.
+	*/
+	if sealHome, err :=
+		SealHome(); err == nil {
+		add(
+			filepath.Join(
+				sealHome,
+				"std",
+			),
+		)
+	}
+
+	/*
+		Portable installed layouts:
+
+			bin/sealc
+			std/base
+			std/core
+
+		or:
+
+			sealc
+			std/base
+			std/core
+	*/
+	if executable, err :=
+		os.Executable(); err == nil {
+		executableDirectory :=
+			filepath.Dir(
+				executable,
+			)
+
+		add(
+			filepath.Join(
+				executableDirectory,
+				"std",
+			),
+		)
+
+		add(
+			filepath.Join(
+				executableDirectory,
+				"..",
+				"std",
+			),
+		)
+	}
+
 	return roots
+}
+
+func SealHome() (
+	string,
+	error,
+) {
+	if explicit :=
+		strings.TrimSpace(
+			os.Getenv(
+				"SEAL_HOME",
+			),
+		); explicit != "" {
+		absolutePath, err :=
+			filepath.Abs(
+				explicit,
+			)
+
+		if err != nil {
+			return "",
+				err
+		}
+
+		return filepath.Clean(
+			absolutePath,
+		), nil
+	}
+
+	homeDirectory, err :=
+		os.UserHomeDir()
+
+	if err != nil {
+		return "",
+			fmt.Errorf(
+				"determining Seal home directory: %w",
+				err,
+			)
+	}
+
+	return filepath.Join(
+		homeDirectory,
+		".seal",
+	), nil
 }
 
 func discoverPackagesInto(packages map[string]*Package, root string) error {
