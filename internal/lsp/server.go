@@ -16,6 +16,7 @@ import (
 	"seal/internal/ast"
 	"seal/internal/checker"
 	"seal/internal/diag"
+	"seal/internal/formatter"
 	"seal/internal/resolver"
 	"seal/internal/source"
 )
@@ -346,9 +347,9 @@ func (s *Server) handleRequest(
 						},
 					},
 
-					DefinitionProvider: true,
-
-					HoverProvider: true,
+					DefinitionProvider:         true,
+					HoverProvider:              true,
+					DocumentFormattingProvider: true,
 
 					CompletionProvider: &CompletionOptions{
 						ResolveProvider: false,
@@ -376,6 +377,32 @@ func (s *Server) handleRequest(
 				},
 			},
 		)
+
+	case methodFormatting:
+		params := DocumentFormattingParams{}
+
+		if err := decodeParams(message.Params, &params); err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInvalidParams,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		edits, err := s.documentFormatting(params)
+		if err != nil {
+			return s.sendError(
+				message.ID,
+				&ResponseError{
+					Code:    errorCodeInternalError,
+					Message: err.Error(),
+				},
+			)
+		}
+
+		return s.sendResult(message.ID, edits)
 
 	case methodSignatureHelp:
 		params := SignatureHelpParams{}
@@ -3161,4 +3188,52 @@ func resolveInitializeRoot(
 	return "", fmt.Errorf(
 		"initialize request did not provide a workspace root",
 	)
+}
+
+func (s *Server) documentFormatting(
+	params DocumentFormattingParams,
+) ([]TextEdit, error) {
+	/*
+		Use the existing document-position resolver so the formatter receives
+		the current editor overlay rather than an older disk version.
+
+		The formatter itself does not depend on successful parsing or type
+		checking.
+	*/
+	_, file, _, _, err := s.resolveDocumentPosition(
+		params.TextDocument.URI,
+		Position{},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if file == nil {
+		return []TextEdit{}, nil
+	}
+
+	formatted := formatter.Format(
+		file.Text,
+		formatter.Options{
+			TabSize:      params.Options.TabSize,
+			InsertSpaces: params.Options.InsertSpaces,
+		},
+	)
+
+	if formatted == file.Text {
+		return []TextEdit{}, nil
+	}
+
+	fullDocument := source.Span{
+		File:  file,
+		Start: 0,
+		End:   len(file.Text),
+	}
+
+	return []TextEdit{
+		{
+			Range:   protocolRangeFromSpan(fullDocument),
+			NewText: formatted,
+		},
+	}, nil
 }

@@ -31,6 +31,8 @@ const (
 	methodSetTrace      = "$/setTrace"
 
 	methodSignatureHelp = "textDocument/signatureHelp"
+
+	methodFormatting = "textDocument/formatting"
 )
 
 const (
@@ -99,12 +101,30 @@ type ServerCapabilities struct {
 
 	TextDocumentSync TextDocumentSyncOptions `json:"textDocumentSync"`
 
-	DefinitionProvider bool `json:"definitionProvider,omitempty"`
-	HoverProvider      bool `json:"hoverProvider,omitempty"`
+	DefinitionProvider         bool                  `json:"definitionProvider,omitempty"`
+	HoverProvider              bool                  `json:"hoverProvider,omitempty"`
+	DocumentFormattingProvider bool                  `json:"documentFormattingProvider,omitempty"`
+	CompletionProvider         *CompletionOptions    `json:"completionProvider,omitempty"`
+	SignatureHelpProvider      *SignatureHelpOptions `json:"signatureHelpProvider,omitempty"`
+}
 
-	CompletionProvider *CompletionOptions `json:"completionProvider,omitempty"`
+type DocumentFormattingParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Options      FormattingOptions      `json:"options"`
+}
 
-	SignatureHelpProvider *SignatureHelpOptions `json:"signatureHelpProvider,omitempty"`
+type FormattingOptions struct {
+	TabSize      int  `json:"tabSize"`
+	InsertSpaces bool `json:"insertSpaces"`
+
+	TrimTrailingWhitespace *bool `json:"trimTrailingWhitespace,omitempty"`
+	InsertFinalNewline     *bool `json:"insertFinalNewline,omitempty"`
+	TrimFinalNewlines      *bool `json:"trimFinalNewlines,omitempty"`
+}
+
+type TextEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
 }
 
 type HoverParams = TextDocumentPositionParams
