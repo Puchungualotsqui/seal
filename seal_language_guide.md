@@ -43,12 +43,12 @@
 35. [Compile-time constraint evaluation](#35-compile-time-constraint-evaluation)
 36. [Built-in and intrinsic tasks](#36-built-in-and-intrinsic-tasks)
 37. [C interoperability](#37-c-interoperability)
-38. [Foreign ABI directives](#38-foreign-abi-directives)
-39. [Build output and C compilation](#38-build-output-and-c-compilation)
-40. [Cross-package generic specialization](#39-cross-package-generic-specialization)
-41. [Current limitations and evolving areas](#40-current-limitations-and-evolving-areas)
-42. [Complete multi-package example](#41-complete-multi-package-example)
-43. [Syntax cheat sheet](#42-syntax-cheat-sheet)
+38. [Build output and C compilation](#38-build-output-and-c-compilation)
+39. [Foreign ABI directives](#39-foreign-abi-directives)
+40. [Cross-package generic specialization](#40-cross-package-generic-specialization)
+41. [Current limitations and evolving areas](#41-current-limitations-and-evolving-areas)
+42. [Complete multi-package example](#42-complete-multi-package-example)
+43. [Syntax cheat sheet](#43-syntax-cheat-sheet)
 
 ---
 
@@ -297,10 +297,22 @@ kind = "executable"
 |---|---:|---:|---|
 | `name` | string | required | Unique package name |
 | `version` | string | `"0.1.0"` | Local package version |
-| `kind` | string | `"library"` | `"library"` or `"executable"` |
-| `dependencies` | array | empty | Other package names and optional versions |
+| `kind` | string | `"library"` | `"executable"`, `"library"`, or `"shared_library"` |
+| `dependencies` | array | empty | Other package names and optional exact versions |
 
-Dependencies may be short strings:
+The legacy value:
+
+```toml
+kind = "static_library"
+```
+
+is accepted as an alias of:
+
+```toml
+kind = "library"
+```
+
+Only the root package produces the final artifact. Dependency packages contribute their generated and native source units directly to the root build; their own `kind` does not force creation of an intermediate library.
 
 ```toml
 dependencies = [
@@ -374,7 +386,7 @@ include_dirs = [
 | `defines`       | string array |      empty | Converted to `-D...`                                                      |
 | `target`        |       string |       `""` | Compilation target; handled automatically for supported compiler profiles |
 | `standard`      |       string |    `"c11"` | C language standard                                                       |
-| `linkage`       |       string | `"static"` | Requested linkage mode                                                    |
+| `linkage`       |       string | `"static"` | Retained configuration field; final artifact selection is controlled by `package.kind` |
 
 These common fields provide the base configuration before compiler profiles are applied.
 
@@ -442,20 +454,27 @@ Supported compiler-profile fields are:
 
 `compiler.default` cannot select an executable path. It supplies fallback settings shared by compiler profiles.
 
+`[build]` and `[compiler.*]` belong to the root build and select the toolchain used for the final artifact. Dependency packages do not override the selected compiler, compiler path, C standard, target, or compiler profile.
+
+Native requirements that must travel with a dependency belong under `[native]`, described below.
 #### Configuration precedence
 
 Compiler configuration is resolved in this order:
 
 ```text
-built-in defaults
+command-line compiler override, when present
     ↓
-[build] common settings
+otherwise [build].compiler
+    ↓
+otherwise cc
+    ↓
+built-in and [build] settings
     ↓
 [compiler.default]
     ↓
 [compiler.<selected compiler>]
     ↓
-temporary command-line compiler selection
+transitive [native] requirements
 ```
 
 A named compiler profile replaces any field it explicitly defines. Fields it omits continue to inherit from the preceding configuration layer.
@@ -613,6 +632,87 @@ sealc build ./ -compiler gcc
 ```
 
 The GCC build receives the `compiler.gcc` profile while the package configuration remains unchanged.
+
+### 5.3 Native build contributions
+
+A package may contribute native C sources and native compilation requirements:
+
+```toml
+[native]
+sources = [
+    "native.c",
+    "vendor/library/src/core.c",
+    "vendor/library/src/*.c",
+]
+
+include_dirs = [
+    "vendor/library/include",
+]
+
+library_dirs = []
+libraries = []
+defines = []
+c_flags = []
+link_flags = []
+```
+
+Native paths are resolved relative to the package containing the `seal.toml`.
+
+`sources` accepts explicit paths and ordinary filesystem glob patterns. Missing explicit files and patterns that match no files are build errors.
+
+Automatic `.c` discovery still skips `vendor/`. Files inside skipped directories must be selected explicitly through `native.sources`.
+
+Platform-specific additions use:
+
+```toml
+[native.windows]
+libraries = [
+    "user32",
+]
+
+[native.linux]
+libraries = [
+    "m",
+    "pthread",
+]
+
+[native.macos]
+link_flags = [
+    "-framework",
+    "Cocoa",
+]
+
+[native.freebsd]
+libraries = [
+    "m",
+]
+```
+
+Each platform section supports the same fields as `[native]`:
+
+```text
+sources
+include_dirs
+library_dirs
+libraries
+defines
+c_flags
+link_flags
+```
+
+The selected platform comes from the configured target when it identifies a supported operating system; otherwise, the host operating system is used.
+
+Native contributions are transitive and additive across the dependency graph. This allows an application to declare only:
+
+```toml
+dependencies = [
+    "raylib",
+]
+```
+
+while the `raylib` package supplies its own source paths, include directories, preprocessor definitions, and platform libraries.
+
+The root package still controls the compiler through `[build]` and `[compiler.*]`.
 
 
 ### 5.4 General check-policy keys
@@ -3485,9 +3585,9 @@ view := cast<cstring>(destination, writtenLength)
 
 ### 37.7 Native C source files
 
-Every `.c` file found under a package root is included in the final executable compilation.
+Ordinary `.c` files found beneath a package root are compiled with the package.
 
-Directories skipped during native C discovery include:
+Automatic native-source discovery skips:
 
 ```text
 .git
@@ -3496,70 +3596,65 @@ build
 vendor
 ```
 
-This permits a package layout such as:
+A package may explicitly include files from skipped directories through `seal.toml`:
 
-```text
-native/
-├── seal.toml
-├── bindings.seal
-└── implementation.c
+```toml
+[native]
+sources = [
+    "native.c",
+    "vendor/library/src/core.c",
+    "vendor/library/src/*.c",
+]
 ```
 
-### 37.8 Include and link configuration
+Explicit native paths are package-relative. This is the preferred mechanism for vendored C libraries.
 
-Common include and link settings may be placed under `[build]`:
+### 37.8 Native include and link requirements
+
+A dependency package should place requirements that must travel transitively under `[native]`:
+
+```toml
+[native]
+include_dirs = [
+    "vendor/library/include",
+]
+
+defines = [
+    "LIBRARY_FEATURE=1",
+]
+
+[native.linux]
+libraries = [
+    "m",
+    "pthread",
+]
+```
+
+The consuming package does not repeat those paths or libraries:
+
+```toml
+[package]
+name = "app"
+kind = "executable"
+dependencies = [
+    "library",
+]
+```
+
+Root-specific toolchain preferences remain under `[build]` and `[compiler.*]`:
 
 ```toml
 [build]
-include_dirs = [
-    "include",
-]
-
-library_dirs = [
-    "lib",
-]
-
-libraries = [
-    "m",
-]
-
-defines = [
-    "FEATURE_X=1",
-]
-
-c_flags = [
-    "-Wall",
-]
-
-link_flags = [
-    "-static",
-]
-```
-
-These fields may also be supplied through compiler profiles:
-
-```toml
-[compiler.default]
-include_dirs = [
-    "include",
-]
-
-defines = [
-    "FEATURE_X=1",
-]
+compiler = "gcc"
 
 [compiler.gcc]
 c_flags = [
     "-Wall",
     "-Wextra",
 ]
-
-link_flags = [
-    "-static",
-]
 ```
 
-Compiler-profile fields override matching common fields when their profile is selected.
+Dependencies cannot change the selected compiler or compiler profile.
 
 ---
 
@@ -3571,39 +3666,57 @@ The default output directory is:
 <root-package>/.seal/build
 ```
 
-The build creates one generated C file per package:
+The build generates one C file per package and compiles generated and native C sources into object files:
 
 ```text
 .seal/build/app.c
 .seal/build/types.c
-.seal/build/mem.c
+.seal/build/obj/0000_app.o
+.seal/build/obj/0001_types.o
 ```
 
-The executable output defaults to:
+Only the root package selects the final artifact:
+
+```toml
+kind = "executable"
+kind = "library"
+kind = "shared_library"
+```
+
+The legacy value `library` means `library`.
+
+Dependency packages are source dependencies during a workspace build. They do not automatically produce separately installed intermediate libraries.
+
+### 38.1 Default artifact names
+
+For a package named `graphics`, default outputs are:
 
 ```text
-.seal/build/<root-package-name>
+Executable:
+    Windows: graphics.exe
+    Other:   graphics
+
+Static library:
+    MSVC/Windows: graphics.lib
+    Other:        libgraphics.a
+
+Shared library:
+    Windows: graphics.dll
+    Linux:   libgraphics.so
+    macOS:   libgraphics.dylib
 ```
 
-On Windows, `.exe` is added when the output has no extension.
+An explicit `-o` or `--output` path overrides the default output path.
 
-### 38.1 Build command
-
-The normal command is:
+### 38.2 Build command
 
 ```bash
 sealc build <path>
 ```
 
-The path is optional:
+The path is optional and defaults to the current directory.
 
-```bash
-sealc build
-```
-
-which builds the package containing the current directory.
-
-The current build options include:
+Supported options include:
 
 ```text
 --emit-c
@@ -3616,117 +3729,32 @@ The current build options include:
 Examples:
 
 ```bash
-sealc build ./
+sealc build
 sealc build ./ --emit-c
-sealc build ./ -o my_program
+sealc build ./ -o program
 sealc build ./ -compiler gcc
 sealc build ./ --compiler=clang
 ```
 
-Compiler options may appear before or after the package path:
-
-```bash
-sealc build -compiler gcc ./
-sealc build ./ -compiler gcc
-```
-
-Unknown build options are rejected.
-
-### 38.2 Emit-only mode
-
-Emit-only mode generates package C files without invoking a C compiler:
+### 38.3 Emit-only mode
 
 ```bash
 sealc build ./ --emit-c
 ```
 
-Conceptually:
+Emit-only mode writes generated package C files without compiling object files or producing a final artifact.
 
-```go
-BuildWorkspace(path, BuildOptions{
-    EmitOnly: true,
-})
-```
+### 38.4 Compiler selection
 
-### 38.3 Temporary compiler override
-
-The selected compiler can be overridden for one build:
-
-```bash
-sealc build ./ -compiler gcc
-```
-
-Conceptually:
-
-```go
-BuildWorkspace(path, BuildOptions{
-    Compiler: "gcc",
-})
-```
-
-The override changes the compiler profile selected for that invocation. It does not alter `seal.toml`.
-
-When the selected compiler has a named profile, that profile is applied:
-
-```toml
-[compiler.gcc]
-c_flags = [
-    "-Wall",
-    "-Wextra",
-    "-Wpedantic",
-]
-```
-
-When no named profile exists, the compiler still receives the common build settings and `[compiler.default]`.
-
-### 38.4 Executable compilation
-
-For an executable root package, the build command combines:
-
-* generated C files for all dependency packages;
-* native C files from all packages;
-* compiler executable arguments;
-* configured C standard;
-* configured target arguments;
-* include paths;
-* preprocessor definitions;
-* compilation flags;
-* library search paths;
-* libraries;
-* linker flags;
-* the requested output path.
-
-The conceptual command order is:
+Compiler selection follows:
 
 ```text
-compiler
-compiler_args
-generated and native C files
-standard and target settings
-include directories
-defines
-c_flags
-library directories
-libraries
-link_flags
--o output
-```
-
-The exact spelling may vary by compiler.
-
-Library packages do not independently produce final executables.
-
-### 38.5 Compiler command selection
-
-Compiler selection follows this process:
-
-```text
-command-line override, when present
+command-line override
 otherwise [build].compiler
 otherwise cc
 ```
 
-The selected configuration is then resolved through:
+The selected root configuration then applies:
 
 ```text
 [build]
@@ -3734,96 +3762,251 @@ The selected configuration is then resolved through:
 [compiler.default]
     ↓
 [compiler.<selected compiler>]
+    ↓
+transitive [native] requirements
 ```
 
-An explicit compiler path takes precedence over the compiler preset executable.
+Compiler profiles remain root-controlled. Native dependency requirements are additive.
 
-Examples:
+### 38.5 Native dependency aggregation
 
-```toml
-[compiler.gcc]
-path = "/usr/bin/gcc"
-```
-
-```toml
-[compiler.zigcc]
-path = "C:/tools/zig/zig.exe"
-args = ["cc"]
-```
-
-### 38.6 Package symbol names in C
-
-Imported names are prefixed to avoid collisions:
-
-```seal
-types.Player
-types.MakeBox<int>
-```
-
-may lower to names similar to:
+The build aggregates from every reachable package:
 
 ```text
-types_Player
-types_MakeBox_int
+generated package C files
+automatically discovered package C files
+explicit native.sources
+include directories
+preprocessor definitions
+C flags
+library directories
+libraries
+link flags
 ```
 
-These generated names are backend details and are not a stable external C ABI unless explicitly documented later.
+Package-relative native paths are resolved before compilation.
+
+Sources, include directories, library directories, and definitions are deduplicated where appropriate. Link requirements preserve dependency-sensitive ordering.
+
+### 38.6 Final artifact construction
+
+The build compiles each generated or native C source to an object file.
+
+The root kind then selects the final operation:
+
+```text
+executable       → link executable
+library   → archive object files
+shared_library   → link shared library
+```
+
+Shared-library builds request position-independent code automatically on platforms that require it.
+
+TCC, GCC, Clang, Zig CC, and MSVC use toolchain-specific command construction where supported.
+
+### 38.7 Running packages
+
+`sealc run` only accepts an executable root package:
+
+```bash
+sealc run ./app
+```
+
+Static and shared library packages may be built but cannot be run directly.
+
+### 38.8 Generated C symbol names
+
+Ordinary generated package symbols are backend details and may be package-prefixed.
+
+Extern declarations and foreign ABI templates can intentionally select stable external C names. Those mechanisms are described in the next section.
 
 ---
 
-## 38. Foreign ABI directives
+## 39. Foreign ABI directives
 
-Foreign ABI directives describe C types, constants, callback signatures, and task addresses that cannot be represented accurately by ordinary Seal declarations.
+Foreign ABI directives describe C declarations whose physical representation or calling convention cannot be expressed by ordinary Seal declarations alone.
 
-They are primarily intended for platform APIs such as threads, window systems, and operating-system callbacks.
+They are intended for vendor bridges, operating-system APIs, callbacks, C macros, typedefs, and platform-specific calling conventions.
 
-### 38.1 `@foreign_type`
+All declarations remain package-visible like other Seal declarations.
 
-`@foreign_type` declares a nominal Seal type backed directly by a C type:
+### 39.1 Choosing the correct mechanism
+
+Use these mechanisms for distinct purposes:
+
+```text
+@c_import      make C declarations visible to generated C
+extern         call an existing C function by link name
+@foreign_type  represent an existing C type exactly
+@foreign_value represent an existing typed C expression
+@foreign_task  define a reusable callback/task ABI template
+@foreign       apply that ABI to a Seal task
+@task_pointer  obtain the foreign address of such a task
+```
+
+An ordinary C function normally needs only `@c_import` and `extern`.
+
+A callback implemented in Seal normally needs `@foreign_task`, `@foreign`, and `@task_pointer`.
+
+### 39.2 `@c_import`
+
+A named C-import declaration emits include metadata:
 
 ```seal
-ThreadResult :: @foreign_type(
-    SEAL_THREAD_RESULT
+c :: @c_import {
+    include "vendor.h"
+    include "vendor_extra.h"
+}
+```
+
+The declaration name is metadata and is not a normal source namespace.
+
+The imported headers must declare every C type, macro, constant, and function referenced by the bridge.
+
+### 39.3 Extern tasks
+
+An extern task calls an existing C symbol:
+
+```seal
+OpenWindow :: extern("vendor_open_window") task(
+    width i32,
+    height i32,
+) bool
+```
+
+The quoted string is the physical C link name.
+
+The Seal declaration name may be different and is the name used from Seal:
+
+```seal
+if vendor.OpenWindow(800, 600) {
+}
+```
+
+Imported extern tasks continue to call their declared C link names rather than generated package-prefixed names.
+
+Use primitive Seal types when they have the required C ABI:
+
+```text
+i32     → int32_t
+u32     → uint32_t
+f32     → float
+f64     → double
+rawptr  → void *
+cstring → const char *
+```
+
+Do not use `string` for a C `const char *`; Seal `string` is a pointer-and-length structure.
+
+### 39.4 `@foreign_type`
+
+`@foreign_type` declares a nominal Seal type whose generated C spelling is an existing C type:
+
+```seal
+Vector2 :: @foreign_type(
+    Vector2
 )
 ```
 
-`ThreadResult` is a distinct type in Seal, while generated C uses `SEAL_THREAD_RESULT` directly.
+Seal treats `Vector2` as a distinct nominal type. Generated C uses the physical C type `Vector2` directly and does not emit a wrapper typedef or Seal structure.
 
-The compiler does not emit a wrapper structure or typedef.
-
-### 38.2 `@foreign_value`
-
-`@foreign_value` declares a typed Seal value backed by a C expression:
+Foreign types may be used in parameters, results, pointers, values, and generic instances:
 
 ```seal
-thread_success :: @foreign_value(
-    ThreadResult,
-    SEAL_THREAD_SUCCESS
+GetPosition :: extern("GetPosition") task() Vector2
+
+SetPosition :: extern("SetPosition") task(
+    value Vector2,
 )
 ```
 
-Use it like an ordinary value:
+A foreign type is opaque to Seal's struct checker. Its C fields are not imported:
 
 ```seal
-return thread_success
+position := GetPosition()
+
+// Invalid for a foreign type:
+x := position.x
 ```
 
-Generated C substitutes the configured expression directly.
+Do not replace a C struct typedef with an ordinary Seal struct merely because the fields have the same layout. C struct and typedef compatibility is nominal, and the generated Seal structure is a different C type.
 
-### 38.3 `@foreign_task`
+Use small native C wrappers for constructors, field access, conversions, or macros:
 
-`@foreign_task` defines a reusable foreign task ABI:
+```c
+Vector2 SealVendorVector2(float x, float y) {
+    Vector2 value = { x, y };
+    return value;
+}
+
+float SealVendorVector2X(Vector2 value) {
+    return value.x;
+}
+```
+
+```seal
+Vector2XY :: extern("SealVendorVector2") task(
+    x f32,
+    y f32,
+) Vector2
+
+Vector2X :: extern("SealVendorVector2X") task(
+    value Vector2,
+) f32
+```
+
+### 39.5 `@foreign_value`
+
+`@foreign_value` declares a typed value backed by a C expression:
+
+```seal
+White :: @foreign_value(
+    Color,
+    WHITE
+)
+
+KeyEscape :: @foreign_value(
+    i32,
+    KEY_ESCAPE
+)
+```
+
+The first argument is the Seal type. The second argument is emitted as a C expression.
+
+This is suitable for:
+
+```text
+C macros
+enum constants
+constant handles
+typed sentinel values
+compound constants supplied by a header
+```
+
+The header containing the expression must be present through `@c_import`.
+
+A foreign value behaves like a typed package value in Seal:
+
+```seal
+ClearBackground(vendor.White)
+```
+
+The compiler type-checks use according to the declared Seal type, but it does not reinterpret or validate the internal C expression. The bridge author is responsible for matching the declared Seal type to the actual C expression.
+
+### 39.6 `@foreign_task`
+
+`@foreign_task` defines a reusable C declaration template and address template for Seal-defined tasks:
 
 ```seal
 ThreadEntryABI :: @foreign_task(
-    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
-    address SEAL_THREAD_ADDRESS({name}),
+    declaration THREAD_RESULT THREAD_CALL {name}(void *{arg0_name}),
+    address THREAD_ADDRESS({name}),
 )
 ```
 
-The declaration template controls the generated C task declaration and definition.
+The declaration template controls the physical C declaration and definition generated for a Seal task using this ABI.
 
-The address template controls the expression produced by `@task_pointer`.
+The address template controls the expression emitted by `@task_pointer`.
 
 Supported placeholders include:
 
@@ -3834,23 +4017,42 @@ Supported placeholders include:
 ...
 ```
 
-Argument-name placeholders use the parameter names from the Seal task declaration.
+`{name}` becomes the generated C task name.
 
-### 38.4 `@foreign`
+`{argN_name}` becomes the corresponding Seal parameter name.
 
-Apply a foreign ABI to a task with `@foreign`:
+The template is emitted as C syntax. Seal checks the task's Seal-level parameter and result types, but it does not parse the template as a C declaration and prove that both signatures match. The bridge author must ensure that:
+
+```text
+parameter order
+parameter C types
+result C type
+calling convention
+pointer modifiers
+platform macros
+```
+
+match the foreign API exactly.
+
+### 39.7 `@foreign`
+
+Apply a foreign task ABI to a Seal-defined task:
 
 ```seal
 WorkerEntry :: @foreign(ThreadEntryABI) task(
     context rawptr,
 ) ThreadResult {
-    return thread_success
+    return ThreadSuccess
 }
 ```
 
-The task remains a normal statically checked Seal task, but its generated C signature follows the selected foreign ABI template.
+The task body is normal Seal code and is statically checked normally.
 
-Foreign tasks may also be generic:
+Only its generated physical C declaration and definition use the selected foreign ABI template.
+
+Foreign ABIs are primarily for callbacks or entry points implemented in Seal and called by C. They are not required for ordinary calls from Seal into C; use `extern` for those.
+
+Generic foreign tasks are permitted:
 
 ```seal
 WorkerEntry :: @foreign(ThreadEntryABI) task<
@@ -3859,29 +4061,120 @@ WorkerEntry :: @foreign(ThreadEntryABI) task<
 >(
     context rawptr,
 ) ThreadResult {
-    return thread_success
+    // ...
 }
 ```
 
-### 38.5 `@task_pointer`
+A generic callback must be fully specialized before its address is requested.
 
-`@task_pointer` returns the foreign address of a task as `rawptr`:
+### 39.8 `@task_pointer`
+
+`@task_pointer` obtains the address expression defined by a task's foreign ABI and returns it as `rawptr`:
 
 ```seal
-pointer := @task_pointer(WorkerEntry)
+entry := @task_pointer(
+    WorkerEntry
+)
 ```
 
-Generic tasks must be fully specialized:
+For a generic task:
 
 ```seal
-pointer := @task_pointer(
+entry := @task_pointer(
     WorkerEntry<int, ProcessInt>
 )
 ```
 
-The referenced task must have a foreign ABI with an address template.
+The referenced task must:
 
-Seal does not currently provide general runtime task values or indirect task calls. `@task_pointer` exists specifically for passing statically selected task entry points to foreign APIs.
+```text
+be statically known
+have a foreign ABI
+provide an address template
+be fully specialized when generic
+```
+
+Seal does not currently provide general runtime task values or indirect Seal task calls. `@task_pointer` exists specifically for passing statically selected Seal callbacks to foreign APIs.
+
+A C wrapper may still be required when the foreign API expects a concrete function-pointer type rather than `void *`, or when the platform forbids portable conversion between data pointers and function pointers.
+
+### 39.9 Typical vendor-bridge patterns
+
+#### Existing C function
+
+```seal
+c :: @c_import {
+    include "vendor.h"
+}
+
+Initialize :: extern("vendor_initialize") task() bool
+```
+
+#### C typedef or struct value passed opaquely
+
+```seal
+VendorHandle :: @foreign_type(
+    VendorHandle
+)
+
+CreateHandle :: extern("vendor_create_handle") task() VendorHandle
+```
+
+#### C macro or enum constant
+
+```seal
+DefaultFlags :: @foreign_value(
+    u32,
+    VENDOR_DEFAULT_FLAGS
+)
+```
+
+#### Seal callback passed to C
+
+```seal
+CallbackABI :: @foreign_task(
+    declaration void VENDOR_CALL {name}(void *{arg0_name}),
+    address VENDOR_CALLBACK_ADDRESS({name}),
+)
+
+OnEvent :: @foreign(CallbackABI) task(
+    context rawptr,
+) {
+}
+
+callback := @task_pointer(OnEvent)
+```
+
+#### Foreign structure fields
+
+Use a native C adaptation layer:
+
+```text
+foreign type
+    ↓
+extern constructor/accessor wrapper
+    ↓
+ordinary typed Seal call
+```
+
+This keeps platform headers and physical C layout inside the vendor package.
+
+### 39.10 Bridge-author checklist
+
+Before declaring a bridge, verify:
+
+```text
+1. The required header is included with @c_import.
+2. Existing C functions use extern with the exact link name.
+3. C typedefs and structs use @foreign_type when exact C identity matters.
+4. C macros and constants use @foreign_value with the correct Seal type.
+5. Foreign struct fields are accessed through C wrappers.
+6. Seal callbacks use an ABI template matching the exact C calling convention.
+7. Generic callbacks are fully specialized before @task_pointer.
+8. Ownership and lifetime of pointers and cstrings follow the C API contract.
+9. Mutable char * parameters use rawptr or a mutable buffer abstraction.
+10. The package's native sources, include paths, defines, and platform libraries are declared in seal.toml under [native].
+```
 
 ---
 
@@ -4068,6 +4361,18 @@ The compiler retains semantic information that can support:
 - signature help.
 
 A dedicated `seal-lsp` and Zed extension are logical next projects after the initial standard library.
+
+### 41.11 Foreign structure fields are opaque
+
+`@foreign_type` preserves the exact physical C type but does not import C field metadata. Foreign values cannot currently use Seal field selection or ordinary Seal compound literals.
+
+Vendor packages should provide small native C constructor, accessor, and conversion wrappers when structured C values must be inspected or created.
+
+### 41.12 Shared-library symbol export remains platform-dependent
+
+Seal can build a shared-library root package, but explicit symbol-visibility and export-list control are not yet language features.
+
+This is especially relevant to MSVC DLL exports. Producing the shared artifact and defining its public external ABI remain separate concerns.
 
 ---
 
@@ -4574,17 +4879,17 @@ malloc :: extern("malloc") task(size uint) rawptr
 ### Foreign C type
 
 ```seal
-ThreadResult :: @foreign_type(
-    SEAL_THREAD_RESULT
+Vector2 :: @foreign_type(
+    Vector2
 )
 ```
 
 ### Foreign C value
 
 ```seal
-thread_success :: @foreign_value(
-    ThreadResult,
-    SEAL_THREAD_SUCCESS
+White :: @foreign_value(
+    Color,
+    WHITE
 )
 ```
 
@@ -4592,8 +4897,8 @@ thread_success :: @foreign_value(
 
 ```seal
 ThreadEntryABI :: @foreign_task(
-    declaration SEAL_THREAD_RESULT SEAL_THREAD_CALL {name}(void *{arg0_name}),
-    address SEAL_THREAD_ADDRESS({name}),
+    declaration THREAD_RESULT THREAD_CALL {name}(void *{arg0_name}),
+    address THREAD_ADDRESS({name}),
 )
 ```
 
@@ -4603,7 +4908,7 @@ ThreadEntryABI :: @foreign_task(
 WorkerEntry :: @foreign(ThreadEntryABI) task(
     context rawptr,
 ) ThreadResult {
-    return thread_success
+    return ThreadSuccess
 }
 ```
 
@@ -4612,6 +4917,20 @@ WorkerEntry :: @foreign(ThreadEntryABI) task(
 ```seal
 pointer := @task_pointer(WorkerEntry)
 ```
+
+### Foreign structure adaptation
+
+```seal
+Vector2XY :: extern("SealVendorVector2") task(
+    x f32,
+    y f32,
+) Vector2
+
+Vector2X :: extern("SealVendorVector2X") task(
+    value Vector2,
+) f32
+```
+
 
 ### Specialized foreign task pointer
 
@@ -4625,6 +4944,64 @@ pointer := @task_pointer(
 
 ```toml
 dependencies = ["mem", "types"]
+```
+
+### Package artifact kinds
+
+```toml
+[package]
+kind = "executable"
+```
+
+```toml
+[package]
+kind = "static_library"
+```
+
+```toml
+[package]
+kind = "shared_library"
+```
+
+The legacy value `library` aliases `static_library`.
+
+### Native dependency contribution
+
+```toml
+[native]
+sources = [
+    "native.c",
+    "vendor/library/src/*.c",
+]
+
+include_dirs = [
+    "vendor/library/include",
+]
+
+defines = [
+    "LIBRARY_FEATURE=1",
+]
+```
+
+### Platform-native requirements
+
+```toml
+[native.windows]
+libraries = [
+    "user32",
+]
+
+[native.linux]
+libraries = [
+    "m",
+    "pthread",
+]
+
+[native.macos]
+link_flags = [
+    "-framework",
+    "Cocoa",
+]
 ```
 
 ### Package-qualified use
@@ -4718,6 +5095,8 @@ static typing
 C backend
 multi-package workspaces
 local dependency graph
+transitive package-native C sources and platform link requirements
+executable, static-library, and shared-library root artifacts
 monomorphized generic structs and tasks
 generic compile-time values
 generic task parameters
@@ -4734,18 +5113,4 @@ variadic tasks
 C interoperability
 cross-package generic fixed-point generation
 semantic side tables for exact lowering decisions
-```
-
-The next major stage is to make the language comfortable to use by building:
-
-```text
-a coherent standard library
-higher-level collections built on suitable storage abstractions
-string operations
-memory and I/O packages
-Option and Result
-a test runner
-a Tree-sitter grammar
-seal-lsp
-a Zed extension
 ```

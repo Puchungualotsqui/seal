@@ -1,0 +1,26 @@
+[package]
+name = "raylibBasic"
+version = "0.1.0"
+kind = "executable"
+dependencies = [
+    "raylib",
+]
+
+[build]
+compiler = "tcc"
+
+[compiler.default]
+standard = "c11"
+c_flags = []
+
+[compiler.tcc]
+path = "tcc"
+c_flags = []
+link_flags = []
+
+[compiler.gcc]
+c_flags = [
+    "-Wall",
+    "-Wextra",
+]
+link_flags = []

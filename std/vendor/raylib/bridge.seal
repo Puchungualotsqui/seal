@@ -1,0 +1,455 @@
+c :: @c_import {
+    include "raylib.h"
+}
+
+/*
+Foreign raylib value types.
+
+They retain raylib's exact C ABI. Because foreign types are nominal Seal types,
+a raylib.Color cannot accidentally be passed where another foreign structure
+is expected.
+*/
+Color :: @foreign_type(Color)
+Vector2 :: @foreign_type(Vector2)
+Rectangle :: @foreign_type(Rectangle)
+
+/*
+Color constants.
+*/
+LightGray :: @foreign_value(Color, LIGHTGRAY)
+Gray :: @foreign_value(Color, GRAY)
+DarkGray :: @foreign_value(Color, DARKGRAY)
+Yellow :: @foreign_value(Color, YELLOW)
+Gold :: @foreign_value(Color, GOLD)
+Orange :: @foreign_value(Color, ORANGE)
+Pink :: @foreign_value(Color, PINK)
+Red :: @foreign_value(Color, RED)
+Maroon :: @foreign_value(Color, MAROON)
+Green :: @foreign_value(Color, GREEN)
+Lime :: @foreign_value(Color, LIME)
+DarkGreen :: @foreign_value(Color, DARKGREEN)
+SkyBlue :: @foreign_value(Color, SKYBLUE)
+Blue :: @foreign_value(Color, BLUE)
+DarkBlue :: @foreign_value(Color, DARKBLUE)
+Purple :: @foreign_value(Color, PURPLE)
+Violet :: @foreign_value(Color, VIOLET)
+DarkPurple :: @foreign_value(Color, DARKPURPLE)
+Beige :: @foreign_value(Color, BEIGE)
+Brown :: @foreign_value(Color, BROWN)
+DarkBrown :: @foreign_value(Color, DARKBROWN)
+White :: @foreign_value(Color, WHITE)
+Black :: @foreign_value(Color, BLACK)
+Blank :: @foreign_value(Color, BLANK)
+Magenta :: @foreign_value(Color, MAGENTA)
+RayWhite :: @foreign_value(Color, RAYWHITE)
+
+/*
+Keyboard keys.
+
+The constants use i32 because raylib accepts KeyboardKey as an ordinary C int.
+*/
+KeyNull :: @foreign_value(i32, KEY_NULL)
+
+KeyApostrophe :: @foreign_value(i32, KEY_APOSTROPHE)
+KeyComma :: @foreign_value(i32, KEY_COMMA)
+KeyMinus :: @foreign_value(i32, KEY_MINUS)
+KeyPeriod :: @foreign_value(i32, KEY_PERIOD)
+KeySlash :: @foreign_value(i32, KEY_SLASH)
+
+KeyZero :: @foreign_value(i32, KEY_ZERO)
+KeyOne :: @foreign_value(i32, KEY_ONE)
+KeyTwo :: @foreign_value(i32, KEY_TWO)
+KeyThree :: @foreign_value(i32, KEY_THREE)
+KeyFour :: @foreign_value(i32, KEY_FOUR)
+KeyFive :: @foreign_value(i32, KEY_FIVE)
+KeySix :: @foreign_value(i32, KEY_SIX)
+KeySeven :: @foreign_value(i32, KEY_SEVEN)
+KeyEight :: @foreign_value(i32, KEY_EIGHT)
+KeyNine :: @foreign_value(i32, KEY_NINE)
+
+KeySemicolon :: @foreign_value(i32, KEY_SEMICOLON)
+KeyEqual :: @foreign_value(i32, KEY_EQUAL)
+
+KeyA :: @foreign_value(i32, KEY_A)
+KeyB :: @foreign_value(i32, KEY_B)
+KeyC :: @foreign_value(i32, KEY_C)
+KeyD :: @foreign_value(i32, KEY_D)
+KeyE :: @foreign_value(i32, KEY_E)
+KeyF :: @foreign_value(i32, KEY_F)
+KeyG :: @foreign_value(i32, KEY_G)
+KeyH :: @foreign_value(i32, KEY_H)
+KeyI :: @foreign_value(i32, KEY_I)
+KeyJ :: @foreign_value(i32, KEY_J)
+KeyK :: @foreign_value(i32, KEY_K)
+KeyL :: @foreign_value(i32, KEY_L)
+KeyM :: @foreign_value(i32, KEY_M)
+KeyN :: @foreign_value(i32, KEY_N)
+KeyO :: @foreign_value(i32, KEY_O)
+KeyP :: @foreign_value(i32, KEY_P)
+KeyQ :: @foreign_value(i32, KEY_Q)
+KeyR :: @foreign_value(i32, KEY_R)
+KeyS :: @foreign_value(i32, KEY_S)
+KeyT :: @foreign_value(i32, KEY_T)
+KeyU :: @foreign_value(i32, KEY_U)
+KeyV :: @foreign_value(i32, KEY_V)
+KeyW :: @foreign_value(i32, KEY_W)
+KeyX :: @foreign_value(i32, KEY_X)
+KeyY :: @foreign_value(i32, KEY_Y)
+KeyZ :: @foreign_value(i32, KEY_Z)
+
+KeyLeftBracket :: @foreign_value(i32, KEY_LEFT_BRACKET)
+KeyBackslash :: @foreign_value(i32, KEY_BACKSLASH)
+KeyRightBracket :: @foreign_value(i32, KEY_RIGHT_BRACKET)
+KeyGrave :: @foreign_value(i32, KEY_GRAVE)
+
+KeySpace :: @foreign_value(i32, KEY_SPACE)
+KeyEscape :: @foreign_value(i32, KEY_ESCAPE)
+KeyEnter :: @foreign_value(i32, KEY_ENTER)
+KeyTab :: @foreign_value(i32, KEY_TAB)
+KeyBackspace :: @foreign_value(i32, KEY_BACKSPACE)
+KeyInsert :: @foreign_value(i32, KEY_INSERT)
+KeyDelete :: @foreign_value(i32, KEY_DELETE)
+KeyRight :: @foreign_value(i32, KEY_RIGHT)
+KeyLeft :: @foreign_value(i32, KEY_LEFT)
+KeyDown :: @foreign_value(i32, KEY_DOWN)
+KeyUp :: @foreign_value(i32, KEY_UP)
+KeyPageUp :: @foreign_value(i32, KEY_PAGE_UP)
+KeyPageDown :: @foreign_value(i32, KEY_PAGE_DOWN)
+KeyHome :: @foreign_value(i32, KEY_HOME)
+KeyEnd :: @foreign_value(i32, KEY_END)
+
+KeyCapsLock :: @foreign_value(i32, KEY_CAPS_LOCK)
+KeyScrollLock :: @foreign_value(i32, KEY_SCROLL_LOCK)
+KeyNumLock :: @foreign_value(i32, KEY_NUM_LOCK)
+KeyPrintScreen :: @foreign_value(i32, KEY_PRINT_SCREEN)
+KeyPause :: @foreign_value(i32, KEY_PAUSE)
+
+KeyF1 :: @foreign_value(i32, KEY_F1)
+KeyF2 :: @foreign_value(i32, KEY_F2)
+KeyF3 :: @foreign_value(i32, KEY_F3)
+KeyF4 :: @foreign_value(i32, KEY_F4)
+KeyF5 :: @foreign_value(i32, KEY_F5)
+KeyF6 :: @foreign_value(i32, KEY_F6)
+KeyF7 :: @foreign_value(i32, KEY_F7)
+KeyF8 :: @foreign_value(i32, KEY_F8)
+KeyF9 :: @foreign_value(i32, KEY_F9)
+KeyF10 :: @foreign_value(i32, KEY_F10)
+KeyF11 :: @foreign_value(i32, KEY_F11)
+KeyF12 :: @foreign_value(i32, KEY_F12)
+
+KeyLeftShift :: @foreign_value(i32, KEY_LEFT_SHIFT)
+KeyLeftControl :: @foreign_value(i32, KEY_LEFT_CONTROL)
+KeyLeftAlt :: @foreign_value(i32, KEY_LEFT_ALT)
+KeyLeftSuper :: @foreign_value(i32, KEY_LEFT_SUPER)
+KeyRightShift :: @foreign_value(i32, KEY_RIGHT_SHIFT)
+KeyRightControl :: @foreign_value(i32, KEY_RIGHT_CONTROL)
+KeyRightAlt :: @foreign_value(i32, KEY_RIGHT_ALT)
+KeyRightSuper :: @foreign_value(i32, KEY_RIGHT_SUPER)
+
+/*
+Mouse buttons.
+*/
+MouseButtonLeft :: @foreign_value(i32, MOUSE_BUTTON_LEFT)
+MouseButtonRight :: @foreign_value(i32, MOUSE_BUTTON_RIGHT)
+MouseButtonMiddle :: @foreign_value(i32, MOUSE_BUTTON_MIDDLE)
+MouseButtonSide :: @foreign_value(i32, MOUSE_BUTTON_SIDE)
+MouseButtonExtra :: @foreign_value(i32, MOUSE_BUTTON_EXTRA)
+MouseButtonForward :: @foreign_value(i32, MOUSE_BUTTON_FORWARD)
+MouseButtonBack :: @foreign_value(i32, MOUSE_BUTTON_BACK)
+
+/*
+Window lifecycle.
+*/
+InitWindow :: extern("InitWindow") task(
+    width i32,
+    height i32,
+    title cstring,
+)
+
+CloseWindow :: extern("CloseWindow") task()
+
+WindowShouldClose :: extern("WindowShouldClose") task() bool
+
+IsWindowReady :: extern("IsWindowReady") task() bool
+
+IsWindowFullscreen :: extern("IsWindowFullscreen") task() bool
+
+IsWindowHidden :: extern("IsWindowHidden") task() bool
+
+IsWindowMinimized :: extern("IsWindowMinimized") task() bool
+
+IsWindowMaximized :: extern("IsWindowMaximized") task() bool
+
+IsWindowFocused :: extern("IsWindowFocused") task() bool
+
+IsWindowResized :: extern("IsWindowResized") task() bool
+
+ToggleFullscreen :: extern("ToggleFullscreen") task()
+
+MaximizeWindow :: extern("MaximizeWindow") task()
+
+MinimizeWindow :: extern("MinimizeWindow") task()
+
+RestoreWindow :: extern("RestoreWindow") task()
+
+SetWindowTitle :: extern("SetWindowTitle") task(
+    title cstring,
+)
+
+SetWindowPosition :: extern("SetWindowPosition") task(
+    x i32,
+    y i32,
+)
+
+SetWindowSize :: extern("SetWindowSize") task(
+    width i32,
+    height i32,
+)
+
+GetScreenWidth :: extern("GetScreenWidth") task() i32
+
+GetScreenHeight :: extern("GetScreenHeight") task() i32
+
+/*
+Drawing lifecycle.
+*/
+BeginDrawing :: extern("BeginDrawing") task()
+
+EndDrawing :: extern("EndDrawing") task()
+
+ClearBackground :: extern("ClearBackground") task(
+    color Color,
+)
+
+/*
+Timing.
+*/
+SetTargetFPS :: extern("SetTargetFPS") task(
+    fps i32,
+)
+
+GetFPS :: extern("GetFPS") task() i32
+
+GetFrameTime :: extern("GetFrameTime") task() f32
+
+GetTime :: extern("GetTime") task() f64
+
+/*
+Keyboard input.
+*/
+IsKeyPressed :: extern("IsKeyPressed") task(
+    key i32,
+) bool
+
+IsKeyPressedRepeat :: extern("IsKeyPressedRepeat") task(
+    key i32,
+) bool
+
+IsKeyDown :: extern("IsKeyDown") task(
+    key i32,
+) bool
+
+IsKeyReleased :: extern("IsKeyReleased") task(
+    key i32,
+) bool
+
+IsKeyUp :: extern("IsKeyUp") task(
+    key i32,
+) bool
+
+GetKeyPressed :: extern("GetKeyPressed") task() i32
+
+GetCharPressed :: extern("GetCharPressed") task() i32
+
+SetExitKey :: extern("SetExitKey") task(
+    key i32,
+)
+
+/*
+Mouse input.
+*/
+IsMouseButtonPressed :: extern("IsMouseButtonPressed") task(
+    button i32,
+) bool
+
+IsMouseButtonDown :: extern("IsMouseButtonDown") task(
+    button i32,
+) bool
+
+IsMouseButtonReleased :: extern("IsMouseButtonReleased") task(
+    button i32,
+) bool
+
+IsMouseButtonUp :: extern("IsMouseButtonUp") task(
+    button i32,
+) bool
+
+GetMouseX :: extern("GetMouseX") task() i32
+
+GetMouseY :: extern("GetMouseY") task() i32
+
+GetMousePosition :: extern("GetMousePosition") task() Vector2
+
+GetMouseDelta :: extern("GetMouseDelta") task() Vector2
+
+SetMousePosition :: extern("SetMousePosition") task(
+    x i32,
+    y i32,
+)
+
+GetMouseWheelMove :: extern("GetMouseWheelMove") task() f32
+
+/*
+Basic drawing.
+*/
+DrawPixel :: extern("DrawPixel") task(
+    x i32,
+    y i32,
+    color Color,
+)
+
+DrawLine :: extern("DrawLine") task(
+    startX i32,
+    startY i32,
+    endX i32,
+    endY i32,
+    color Color,
+)
+
+DrawLineV :: extern("DrawLineV") task(
+    startPosition Vector2,
+    endPosition Vector2,
+    color Color,
+)
+
+DrawCircle :: extern("DrawCircle") task(
+    centerX i32,
+    centerY i32,
+    radius f32,
+    color Color,
+)
+
+DrawCircleV :: extern("DrawCircleV") task(
+    center Vector2,
+    radius f32,
+    color Color,
+)
+
+DrawCircleLines :: extern("DrawCircleLines") task(
+    centerX i32,
+    centerY i32,
+    radius f32,
+    color Color,
+)
+
+DrawRectangle :: extern("DrawRectangle") task(
+    x i32,
+    y i32,
+    width i32,
+    height i32,
+    color Color,
+)
+
+DrawRectangleV :: extern("DrawRectangleV") task(
+    position Vector2,
+    size Vector2,
+    color Color,
+)
+
+DrawRectangleRec :: extern("DrawRectangleRec") task(
+    rectangle Rectangle,
+    color Color,
+)
+
+DrawRectangleLines :: extern("DrawRectangleLines") task(
+    x i32,
+    y i32,
+    width i32,
+    height i32,
+    color Color,
+)
+
+DrawTriangle :: extern("DrawTriangle") task(
+    first Vector2,
+    second Vector2,
+    third Vector2,
+    color Color,
+)
+
+/*
+Text.
+*/
+DrawText :: extern("DrawText") task(
+    text cstring,
+    x i32,
+    y i32,
+    fontSize i32,
+    color Color,
+)
+
+MeasureText :: extern("MeasureText") task(
+    text cstring,
+    fontSize i32,
+) i32
+
+/*
+Foreign value constructors and accessors implemented in native.c.
+*/
+ColorRGBA :: extern("SealRaylibColor") task(
+    red u8,
+    green u8,
+    blue u8,
+    alpha u8,
+) Color
+
+ColorRed :: extern("SealRaylibColorRed") task(
+    color Color,
+) u8
+
+ColorGreen :: extern("SealRaylibColorGreen") task(
+    color Color,
+) u8
+
+ColorBlue :: extern("SealRaylibColorBlue") task(
+    color Color,
+) u8
+
+ColorAlpha :: extern("SealRaylibColorAlpha") task(
+    color Color,
+) u8
+
+Vector2XY :: extern("SealRaylibVector2") task(
+    x f32,
+    y f32,
+) Vector2
+
+Vector2X :: extern("SealRaylibVector2X") task(
+    vector Vector2,
+) f32
+
+Vector2Y :: extern("SealRaylibVector2Y") task(
+    vector Vector2,
+) f32
+
+RectangleXYWH :: extern("SealRaylibRectangle") task(
+    x f32,
+    y f32,
+    width f32,
+    height f32,
+) Rectangle
+
+RectangleX :: extern("SealRaylibRectangleX") task(
+    rectangle Rectangle,
+) f32
+
+RectangleY :: extern("SealRaylibRectangleY") task(
+    rectangle Rectangle,
+) f32
+
+RectangleWidth :: extern("SealRaylibRectangleWidth") task(
+    rectangle Rectangle,
+) f32
+
+RectangleHeight :: extern("SealRaylibRectangleHeight") task(
+    rectangle Rectangle,
+) f32

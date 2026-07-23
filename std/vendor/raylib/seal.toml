@@ -1,0 +1,71 @@
+[package]
+name = "raylib"
+version = "6.0.0"
+kind = "static_library"
+dependencies = []
+
+[native]
+sources = [
+    "native.c",
+
+    "vendor/raylib/src/rcore.c",
+    "vendor/raylib/src/rglfw.c",
+    "vendor/raylib/src/rshapes.c",
+    "vendor/raylib/src/rtextures.c",
+    "vendor/raylib/src/rtext.c",
+    "vendor/raylib/src/rmodels.c",
+    "vendor/raylib/src/raudio.c",
+]
+
+include_dirs = [
+    "vendor/raylib/src",
+    "vendor/raylib/src/external/glfw/include",
+]
+
+defines = [
+    "PLATFORM_DESKTOP",
+    "GRAPHICS_API_OPENGL_33",
+]
+
+[native.windows]
+libraries = [
+    "winmm",
+    "gdi32",
+    "opengl32",
+    "shell32",
+    "user32",
+]
+
+[native.linux]
+libraries = [
+    "GL",
+    "m",
+    "pthread",
+    "dl",
+    "rt",
+    "X11",
+    "Xrandr",
+    "Xinerama",
+    "Xcursor",
+    "Xi",
+]
+
+[native.freebsd]
+libraries = [
+    "GL",
+    "m",
+    "pthread",
+    "X11",
+]
+
+[native.macos]
+link_flags = [
+    "-framework",
+    "Cocoa",
+    "-framework",
+    "IOKit",
+    "-framework",
+    "CoreVideo",
+    "-framework",
+    "OpenGL",
+]

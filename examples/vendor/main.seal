@@ -1,0 +1,103 @@
+c :: @c_import {
+    include "raylib.h"
+}
+
+Main :: task() {
+    raylib.InitWindow(
+        800,
+        450,
+        c"Seal + raylib",
+    )
+
+    raylib.SetTargetFPS(
+        60,
+    )
+
+    position :=
+        raylib.Vector2XY(
+            400.0,
+            225.0,
+        )
+
+    background :=
+        raylib.ColorRGBA(
+            24,
+            28,
+            36,
+            255,
+        )
+
+    for !raylib.WindowShouldClose() {
+        if raylib.IsKeyDown(
+            raylib.KeyRight,
+        ) {
+            position =
+                raylib.Vector2XY(
+                    raylib.Vector2X(position) + 3.0,
+                    raylib.Vector2Y(position),
+                )
+        }
+
+        if raylib.IsKeyDown(
+            raylib.KeyLeft,
+        ) {
+            position =
+                raylib.Vector2XY(
+                    raylib.Vector2X(position) - 3.0,
+                    raylib.Vector2Y(position),
+                )
+        }
+
+        if raylib.IsKeyDown(
+            raylib.KeyDown,
+        ) {
+            position =
+                raylib.Vector2XY(
+                    raylib.Vector2X(position),
+                    raylib.Vector2Y(position) + 3.0,
+                )
+        }
+
+        if raylib.IsKeyDown(
+            raylib.KeyUp,
+        ) {
+            position =
+                raylib.Vector2XY(
+                    raylib.Vector2X(position),
+                    raylib.Vector2Y(position) - 3.0,
+                )
+        }
+
+        raylib.BeginDrawing()
+
+        raylib.ClearBackground(
+            background,
+        )
+
+        raylib.DrawText(
+            c"Seal is using raylib as a normal dependency",
+            120,
+            80,
+            24,
+            raylib.RayWhite,
+        )
+
+        raylib.DrawCircleV(
+            position,
+            32.0,
+            raylib.Gold,
+        )
+
+        raylib.DrawText(
+            c"Move the circle with the arrow keys",
+            195,
+            360,
+            20,
+            raylib.LightGray,
+        )
+
+        raylib.EndDrawing()
+    }
+
+    raylib.CloseWindow()
+}

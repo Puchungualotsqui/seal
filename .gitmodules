@@ -1,3 +1,6 @@
 [submodule "std/base/simdNative/vendor/simde"]
 	path = std/base/simdNative/vendor/simde
 	url = https://github.com/simd-everywhere/simde.git
+[submodule "std/vendor/raylib/vendor/raylib"]
+	path = std/vendor/raylib/vendor/raylib
+	url = https://github.com/raysan5/raylib.git
