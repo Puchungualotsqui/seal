@@ -4711,8 +4711,6 @@ Main :: task() {
 }
 
 func TestGenerateChainedInterfaceDelegation(t *testing.T) {
-	t.Skip("chained delegated implementation code generation is not supported yet")
-
 	out, reporter := generate(t, `
 Positioned :: interface {
 	Position :: task(value *self) int
@@ -4775,6 +4773,89 @@ Main :: task() {
 		"->components",
 
 		".tag = Positioned_Tag_Entity",
+		"Positioned_Position(positioned)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(out, want) {
+			t.Fatalf(
+				"expected generated C to contain %q, got:\n%s",
+				want,
+				out,
+			)
+		}
+	}
+}
+
+func TestGenerateNestedFieldInterfaceDelegation(t *testing.T) {
+	out, reporter := generate(t, `
+Positioned :: interface {
+	Position :: task(value *self) int
+}
+
+PositionValue :: struct {
+	x int
+}
+
+ReadPosition :: task(
+	position *PositionValue,
+) int {
+	return position.x
+}
+
+Positioned :: impl PositionValue {
+	Position :: ReadPosition
+}
+
+Transform :: struct {
+	position PositionValue
+}
+
+Components :: struct {
+	transform Transform
+}
+
+Positioned :: impl Components using transform.position
+
+Main :: task() {
+	components := Components{
+		transform = Transform{
+			position = PositionValue{
+				x = 42,
+			},
+		},
+	}
+
+	positioned :=
+		cast<Positioned>(
+			&components,
+		)
+
+	position :=
+		Position(
+			positioned,
+		)
+
+	assert(
+		position == 42,
+	)
+}
+`)
+
+	if reporter.HasErrors() {
+		t.Fatalf(
+			"unexpected diagnostics for nested delegated implementation:\n%s",
+			reporter.String(),
+		)
+	}
+
+	checks := []string{
+		"Positioned_PositionValue_Position(void *data)",
+		"Positioned_Components_Position(void *data)",
+		"return Positioned_PositionValue_Position(",
+		"->transform",
+		".position",
+		".tag = Positioned_Tag_Components",
 		"Positioned_Position(positioned)",
 	}
 
