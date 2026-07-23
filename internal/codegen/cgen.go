@@ -2,6 +2,7 @@ package cgen
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"seal/internal/ast"
@@ -38,6 +39,11 @@ type TaskInfo struct {
 	ForeignABI *ForeignTaskABIInfo
 }
 
+type CImportFileInfo struct {
+	PackageName string
+	File        *ast.File
+}
+
 type PackageInfo struct {
 	Name      string
 	Tasks     map[string]TaskInfo
@@ -52,6 +58,7 @@ type PackageInfo struct {
 	ForeignTypes    map[string]*ForeignTypeInfo
 	ForeignValues   map[string]*ForeignValueInfo
 	ForeignTaskABIs map[string]*ForeignTaskABIInfo
+	CImportFiles    []CImportFileInfo
 
 	Impls []*ast.ImplDecl
 
@@ -299,6 +306,178 @@ func packageInfoBySemanticName(
 	return nil
 }
 
+type namedPackageInfo struct {
+	Name   string
+	MapKey string
+	Info   *PackageInfo
+}
+
+func sortedPackageInfoEntries(
+	packages map[string]*PackageInfo,
+) []namedPackageInfo {
+	if len(packages) == 0 {
+		return nil
+	}
+
+	entries := make(
+		[]namedPackageInfo,
+		0,
+		len(packages),
+	)
+
+	for mapKey, info := range packages {
+		if info == nil {
+			continue
+		}
+
+		name :=
+			strings.TrimSpace(
+				info.Name,
+			)
+
+		if name == "" {
+			name =
+				strings.TrimSpace(
+					mapKey,
+				)
+		}
+
+		entries = append(
+			entries,
+			namedPackageInfo{
+				Name:   name,
+				MapKey: mapKey,
+				Info:   info,
+			},
+		)
+	}
+
+	sort.Slice(
+		entries,
+		func(
+			left int,
+			right int,
+		) bool {
+			if entries[left].Name !=
+				entries[right].Name {
+				return entries[left].Name <
+					entries[right].Name
+			}
+
+			return entries[left].MapKey <
+				entries[right].MapKey
+		},
+	)
+
+	/*
+		The same PackageInfo may occasionally be reachable through more than
+		one metadata-map key. Keep only one entry for each semantic package.
+	*/
+	seen := map[string]bool{}
+
+	result := make(
+		[]namedPackageInfo,
+		0,
+		len(entries),
+	)
+
+	for _, entry := range entries {
+		key := entry.Name
+
+		if key == "" {
+			key =
+				fmt.Sprintf(
+					"%p",
+					entry.Info,
+				)
+		}
+
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+
+		result = append(
+			result,
+			entry,
+		)
+	}
+
+	return result
+}
+
+func collectPackageCImportFiles(
+	packageName string,
+	file *ast.File,
+	packages map[string]*PackageInfo,
+) []CImportFileInfo {
+	var result []CImportFileInfo
+
+	seen := map[string]bool{}
+
+	add := func(
+		source CImportFileInfo,
+	) {
+		if source.File == nil {
+			return
+		}
+
+		key :=
+			strings.TrimSpace(
+				source.PackageName,
+			)
+
+		if key == "" {
+			key =
+				fmt.Sprintf(
+					"%p",
+					source.File,
+				)
+		}
+
+		if seen[key] {
+			return
+		}
+
+		seen[key] = true
+
+		result = append(
+			result,
+			source,
+		)
+	}
+
+	/*
+		PackageInfo from every direct dependency already contains its own
+		transitive import list. Flatten those lists before adding the current
+		package's file.
+	*/
+	for _, entry := range sortedPackageInfoEntries(
+		packages,
+	) {
+		for _, source := range entry.Info.CImportFiles {
+			if source.PackageName == "" {
+				source.PackageName =
+					entry.Name
+			}
+
+			add(source)
+		}
+	}
+
+	if file != nil {
+		add(
+			CImportFileInfo{
+				PackageName: packageName,
+				File:        file,
+			},
+		)
+	}
+
+	return result
+}
+
 func cloneExprTypes(
 	input map[ast.Expr]*checker.Type,
 ) map[ast.Expr]*checker.Type {
@@ -498,12 +677,13 @@ func ExportPackageInfoWithSemanticInfo(
 	packages map[string]*PackageInfo,
 	semantic checker.SemanticInfo,
 ) *PackageInfo {
-	g := NewWithPackagesAndSemanticInfo(
-		reporter,
-		packageName,
-		packages,
-		semantic,
-	)
+	g :=
+		NewWithPackagesAndSemanticInfo(
+			reporter,
+			packageName,
+			packages,
+			semantic,
+		)
 
 	g.collect(file)
 
@@ -520,6 +700,12 @@ func ExportPackageInfoWithSemanticInfo(
 		ForeignTypes:    g.foreignTypes,
 		ForeignValues:   g.foreignValues,
 		ForeignTaskABIs: g.foreignTaskABIs,
+
+		CImportFiles: collectPackageCImportFiles(
+			packageName,
+			file,
+			packages,
+		),
 
 		Impls: append(
 			[]*ast.ImplDecl(nil),
@@ -538,7 +724,71 @@ func (g *Generator) newTemp(prefix string) string {
 	return name
 }
 
-func (g *Generator) Generate(file *ast.File) string {
+func (g *Generator) emitImportedCImports() {
+	if g == nil ||
+		len(g.packages) == 0 {
+		return
+	}
+
+	seen := map[string]bool{}
+
+	for _, entry := range sortedPackageInfoEntries(
+		g.packages,
+	) {
+		if entry.Info == nil {
+			continue
+		}
+
+		for _, source := range entry.Info.CImportFiles {
+			if source.File == nil {
+				continue
+			}
+
+			packageName :=
+				strings.TrimSpace(
+					source.PackageName,
+				)
+
+			if packageName == "" {
+				packageName = entry.Name
+			}
+
+			/*
+				Do not emit the current package through imported metadata. Its
+				own imports are emitted directly from the current AST afterward.
+			*/
+			if packageName != "" &&
+				packageName ==
+					g.packageName {
+				continue
+			}
+
+			key := packageName
+
+			if key == "" {
+				key =
+					fmt.Sprintf(
+						"%p",
+						source.File,
+					)
+			}
+
+			if seen[key] {
+				continue
+			}
+
+			seen[key] = true
+
+			g.emitCImports(
+				source.File,
+			)
+		}
+	}
+}
+
+func (g *Generator) Generate(
+	file *ast.File,
+) string {
 	g.collect(file)
 
 	g.seedNonGenericInterfaceInstances()
@@ -556,29 +806,43 @@ func (g *Generator) Generate(file *ast.File) string {
 	// A package can be available through workspacePackages without being
 	// present in packages. This happens, for example, when listsExample uses
 	// mem interfaces and concrete types reached through another package.
-	g.collectInterfaceInstancesFromFile(file)
+	g.collectInterfaceInstancesFromFile(
+		file,
+	)
 
 	// Promote workspace packages that contain implementations for interfaces
 	// used by the current translation unit. Re-run imported interface
 	// discovery after each promotion because a promoted package may expose
 	// additional interface references.
 	for {
-		beforePackages := len(g.packages)
-		beforeInterfaces := len(g.interfaceInstances)
-		beforeTemplates := len(g.implTemplates)
+		beforePackages :=
+			len(g.packages)
+
+		beforeInterfaces :=
+			len(g.interfaceInstances)
+
+		beforeTemplates :=
+			len(g.implTemplates)
 
 		g.collectImportedImplTemplates()
 		g.collectImportedInterfaceInstances()
-		g.collectInterfaceInstancesFromFile(file)
+		g.collectInterfaceInstancesFromFile(
+			file,
+		)
 
-		if beforePackages == len(g.packages) &&
-			beforeInterfaces == len(g.interfaceInstances) &&
-			beforeTemplates == len(g.implTemplates) {
+		if beforePackages ==
+			len(g.packages) &&
+			beforeInterfaces ==
+				len(g.interfaceInstances) &&
+			beforeTemplates ==
+				len(g.implTemplates) {
 			break
 		}
 	}
 
-	g.finalizeInterfaceAndGenericInstances(file)
+	g.finalizeInterfaceAndGenericInstances(
+		file,
+	)
 
 	// Nested specializations discovered during finalization may introduce more
 	// caller-owned concrete types.
@@ -593,20 +857,42 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.line("#include <string.h>")
 	g.line("#include <assert.h>")
 	g.line("")
+
 	g.line("#ifndef NULL")
 	g.line("#define NULL ((void*)0)")
 	g.line("#endif")
 	g.line("")
 
-	g.emitCImports(file)
+	/*
+		A dependency's exported API may use native C types, constants, macros,
+		or declarations supplied by its @c_import headers.
+
+		Emit dependency imports before any imported foreign type is used by a
+		prototype or generated expression.
+	*/
+	g.emitImportedCImports()
+
+	/*
+		Emit imports declared directly by the package currently being
+		generated.
+	*/
+	g.emitCImports(
+		file,
+	)
+
 	g.emitRuntimeSupport()
 
 	// Imported distinct aliases must exist before imported task prototypes and
 	// before switch statements using imported integer-backed distinct values.
 	g.emitImportedDistincts()
-	g.emitDistincts(file)
+	g.emitDistincts(
+		file,
+	)
 
-	g.emitEnums(file)
+	g.emitEnums(
+		file,
+	)
+
 	g.emitImportedEnums()
 
 	/*
@@ -667,7 +953,9 @@ func (g *Generator) Generate(file *ast.File) string {
 	*/
 	g.emitRequiredExternalUnions()
 
-	g.emitUnions(file)
+	g.emitUnions(
+		file,
+	)
 
 	// Interface result structures and dynamic vtables can depend on concrete
 	// struct types, so emit them after all concrete struct definitions.
@@ -675,16 +963,27 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitDynamicInterfaceVTableTypes()
 
 	g.emitTaskVariadicRuntimeTypes()
-	g.emitConstants(file)
+
+	g.emitConstants(
+		file,
+	)
 
 	g.emitImportedResultStructs()
 	g.emitImportedGenericResultStructs()
-	g.emitResultStructs(file)
+
+	g.emitResultStructs(
+		file,
+	)
+
 	g.emitGenericResultStructs()
 
 	g.emitImportedTaskPrototypes()
 	g.emitImportedGenericTaskPrototypes()
-	g.emitTaskPrototypes(file)
+
+	g.emitTaskPrototypes(
+		file,
+	)
+
 	g.emitGenericTaskPrototypes()
 
 	// Inline interface implementation wrappers can call another interface
@@ -694,7 +993,11 @@ func (g *Generator) Generate(file *ast.File) string {
 	g.emitImplVTables()
 	g.emitDynamicInterfaceDispatchers()
 	g.emitStaticInterfaceDispatchers()
-	g.emitTasks(file)
+
+	g.emitTasks(
+		file,
+	)
+
 	g.emitGenericTasks()
 
 	return g.out.String()

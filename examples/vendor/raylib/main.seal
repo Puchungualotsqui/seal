@@ -1,7 +1,3 @@
-c :: @c_import {
-    include "raylib.h"
-}
-
 Main :: task() {
     raylib.InitWindow(
         800,

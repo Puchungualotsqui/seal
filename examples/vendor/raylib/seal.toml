@@ -7,7 +7,7 @@ dependencies = [
 ]
 
 [build]
-compiler = "tcc"
+compiler = "gcc"
 
 [compiler.default]
 standard = "c11"
