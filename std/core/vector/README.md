@@ -1,18 +1,18 @@
 # vector
 
-The `vector` package provides element-wise vector operations and reductions over `lists.Slice` values.
+The `vector` package provides element-wise vector operations over borrowed `lists.Slice` values.
 
-Its implementation delegates low-level arithmetic to the `simd` package while exposing a slice-based API with argument validation.
-
-Supported element types are:
+It currently supports:
 
 * `f32`
 * `f64`
 * `u32`
 
-## Error handling
+The implementation delegates low-level arithmetic to the `simd` package while exposing a stable public API based on `lists.Slice`.
 
-Vector operations return a `vector.Error`.
+## Errors
+
+Vector operations return `vector.Error`.
 
 ```seal
 Error :: enum {
@@ -22,13 +22,7 @@ Error :: enum {
 }
 ```
 
-Possible errors are:
-
-* `None`: the operation completed successfully;
-* `InvalidArgument`: a slice pointer or its data is invalid;
-* `LengthMismatch`: the input and destination slices do not have equal lengths.
-
-Check an error with `ErrorIsNone`:
+Use `ErrorIsNone` to test whether an operation succeeded:
 
 ```seal
 error :=
@@ -41,8 +35,7 @@ error :=
 if !vector.ErrorIsNone(
     error,
 ) {
-    fmt.Println(
-        "vector operation failed: %v",
+    panic(
         vector.ErrorString(
             error,
         ),
@@ -52,26 +45,38 @@ if !vector.ErrorIsNone(
 
 `ErrorString` returns a human-readable description:
 
-```seal
-message :=
-    vector.ErrorString(
-        error,
-    )
-```
+* `None`: no error
+* `InvalidArgument`: one of the supplied slices is invalid
+* `LengthMismatch`: the supplied slices do not have compatible lengths
 
 ## Slice requirements
 
-All operations use `lists.Slice` values.
+All operations accept borrowed `lists.Slice` values.
 
 A slice is valid when:
 
-* the slice itself exists;
-* an empty slice has any data pointer, including `nil`;
-* a non-empty slice has a non-`nil` data pointer.
+* its slice pointer is not `nil`;
+* and either its length is zero or its data pointer is not `nil`.
 
-Operations with multiple slices require equal lengths.
+Operations that write into a destination require the destination and source lengths to match.
 
-The destination may be exactly the same slice as one of the sources:
+Binary operations require all three slices to have the same length:
+
+```seal
+vector.AddF32(
+    destination,
+    left,
+    right,
+)
+```
+
+Reduction operations such as `DotF32` require both input slices to have the same length.
+
+## Aliasing
+
+The destination may be exactly the same slice as one of the sources.
+
+This allows in-place operations:
 
 ```seal
 error :=
@@ -118,12 +123,6 @@ error :=
     )
 ```
 
-For every valid index:
-
-```text
-destination[index] = left[index] - right[index]
-```
-
 ### `MulF32`
 
 Multiplies two vectors element by element.
@@ -135,12 +134,6 @@ error :=
         left,
         right,
     )
-```
-
-For every valid index:
-
-```text
-destination[index] = left[index] * right[index]
 ```
 
 ### `DivF32`
@@ -156,12 +149,6 @@ error :=
     )
 ```
 
-For every valid index:
-
-```text
-destination[index] = left[index] / right[index]
-```
-
 ### `ScaleF32`
 
 Multiplies every source element by one scalar.
@@ -171,32 +158,24 @@ error :=
     vector.ScaleF32(
         destination,
         source,
-        cast<f32>(2.0),
+        cast<f32>(2),
     )
-```
-
-For every valid index:
-
-```text
-destination[index] = source[index] * scalar
 ```
 
 ### `SumF32`
 
-Returns the sum of all vector elements.
+Returns the sum of all elements.
 
 ```seal
 sum, error :=
     vector.SumF32(
-        source,
+        values,
     )
 ```
 
-An empty vector returns zero and `Error.None`.
-
 ### `DotF32`
 
-Returns the dot product of two equally sized vectors.
+Returns the dot product of two vectors.
 
 ```seal
 dot, error :=
@@ -206,87 +185,48 @@ dot, error :=
     )
 ```
 
-The result is equivalent to:
-
-```text
-left[0] * right[0] +
-left[1] * right[1] +
-...
-```
-
-An empty pair of vectors returns zero and `Error.None`.
+The vectors must have the same length.
 
 ## `f64` operations
 
-The `f64` API has the same behavior as the `f32` API.
-
-### `AddF64`
+The `f64` API mirrors the `f32` API:
 
 ```seal
-error :=
-    vector.AddF64(
-        destination,
-        left,
-        right,
-    )
-```
+vector.AddF64(
+    destination,
+    left,
+    right,
+)
 
-### `SubF64`
+vector.SubF64(
+    destination,
+    left,
+    right,
+)
 
-```seal
-error :=
-    vector.SubF64(
-        destination,
-        left,
-        right,
-    )
-```
+vector.MulF64(
+    destination,
+    left,
+    right,
+)
 
-### `MulF64`
+vector.DivF64(
+    destination,
+    left,
+    right,
+)
 
-```seal
-error :=
-    vector.MulF64(
-        destination,
-        left,
-        right,
-    )
-```
+vector.ScaleF64(
+    destination,
+    source,
+    scalar,
+)
 
-### `DivF64`
-
-```seal
-error :=
-    vector.DivF64(
-        destination,
-        left,
-        right,
-    )
-```
-
-### `ScaleF64`
-
-```seal
-error :=
-    vector.ScaleF64(
-        destination,
-        source,
-        cast<f64>(2.0),
-    )
-```
-
-### `SumF64`
-
-```seal
 sum, error :=
     vector.SumF64(
         source,
     )
-```
 
-### `DotF64`
-
-```seal
 dot, error :=
     vector.DotF64(
         left,
@@ -296,198 +236,188 @@ dot, error :=
 
 ## `u32` operations
 
-Unsigned operations use normal wrapping arithmetic.
+Unsigned arithmetic uses normal wrapping behavior.
 
-### `AddU32`
-
-Adds two vectors element by element.
+### Arithmetic
 
 ```seal
-error :=
-    vector.AddU32(
-        destination,
-        left,
-        right,
-    )
+vector.AddU32(
+    destination,
+    left,
+    right,
+)
+
+vector.SubU32(
+    destination,
+    left,
+    right,
+)
+
+vector.MulU32(
+    destination,
+    left,
+    right,
+)
 ```
 
-### `SubU32`
-
-Subtracts the right vector from the left vector element by element.
+### Bitwise operations
 
 ```seal
-error :=
-    vector.SubU32(
-        destination,
-        left,
-        right,
-    )
+vector.BitAndU32(
+    destination,
+    left,
+    right,
+)
+
+vector.BitOrU32(
+    destination,
+    left,
+    right,
+)
+
+vector.BitXorU32(
+    destination,
+    left,
+    right,
+)
 ```
 
-Unsigned underflow wraps normally.
-
-### `MulU32`
-
-Multiplies two vectors element by element.
-
-```seal
-error :=
-    vector.MulU32(
-        destination,
-        left,
-        right,
-    )
-```
-
-Unsigned overflow wraps normally.
-
-### `BitAndU32`
-
-Applies bitwise AND element by element.
-
-```seal
-error :=
-    vector.BitAndU32(
-        destination,
-        left,
-        right,
-    )
-```
-
-For every valid index:
-
-```text
-destination[index] = left[index] & right[index]
-```
-
-### `BitOrU32`
-
-Applies bitwise OR element by element.
-
-```seal
-error :=
-    vector.BitOrU32(
-        destination,
-        left,
-        right,
-    )
-```
-
-For every valid index:
-
-```text
-destination[index] = left[index] | right[index]
-```
-
-### `BitXorU32`
-
-Applies bitwise XOR element by element.
-
-```seal
-error :=
-    vector.BitXorU32(
-        destination,
-        left,
-        right,
-    )
-```
-
-For every valid index:
-
-```text
-destination[index] = left[index] ^ right[index]
-```
+Each operation applies the corresponding operator element by element.
 
 ## Complete example
 
 ```seal
-leftValues :=
-    @inline_array<f32, 4>(
-        cast<f32>(1.0),
-        cast<f32>(2.0),
-        cast<f32>(3.0),
-        cast<f32>(4.0),
+allocatorValue :=
+    mem.NewCAllocator()
+
+zeroAllocator :=
+    cast<mem.ZeroAllocator>(
+        &allocatorValue,
     )
 
-rightValues :=
-    @inline_array<f32, 4>(
-        cast<f32>(5.0),
-        cast<f32>(6.0),
-        cast<f32>(7.0),
-        cast<f32>(8.0),
-    )
-
-resultValues :=
-    @inline_array<f32, 4>(
-        cast<f32>(0.0),
-        cast<f32>(0.0),
-        cast<f32>(0.0),
-        cast<f32>(0.0),
+deallocator :=
+    cast<mem.Deallocator>(
+        &allocatorValue,
     )
 
 left :=
-    lists.SliceFromInlineArray<f32, 4>(
-        &leftValues,
+    lists.ArrayWithLength<f32>(
+        zeroAllocator,
+        deallocator,
+        3,
     )
 
 right :=
-    lists.SliceFromInlineArray<f32, 4>(
-        &rightValues,
+    lists.ArrayWithLength<f32>(
+        zeroAllocator,
+        deallocator,
+        3,
     )
 
 result :=
-    lists.SliceFromInlineArray<f32, 4>(
-        &resultValues,
+    lists.ArrayWithLength<f32>(
+        zeroAllocator,
+        deallocator,
+        3,
+    )
+
+defer lists.DestroyArray<f32>(
+    &result,
+)
+
+defer lists.DestroyArray<f32>(
+    &right,
+)
+
+defer lists.DestroyArray<f32>(
+    &left,
+)
+
+left[0] = cast<f32>(1)
+left[1] = cast<f32>(2)
+left[2] = cast<f32>(3)
+
+right[0] = cast<f32>(4)
+right[1] = cast<f32>(5)
+right[2] = cast<f32>(6)
+
+leftValues :=
+    lists.ArraySlice<f32>(
+        &left,
+    )
+
+rightValues :=
+    lists.ArraySlice<f32>(
+        &right,
+    )
+
+resultValues :=
+    lists.ArraySlice<f32>(
+        &result,
     )
 
 error :=
     vector.AddF32(
-        result,
-        left,
-        right,
+        resultValues,
+        leftValues,
+        rightValues,
     )
 
 if !vector.ErrorIsNone(
     error,
 ) {
-    fmt.Println(
-        "vector addition failed: %v",
+    panic(
         vector.ErrorString(
             error,
         ),
     )
-
-    return
 }
 
-sum, sumError :=
-    vector.SumF32(
-        result,
+dot, dotError :=
+    vector.DotF32(
+        leftValues,
+        rightValues,
     )
 
 if !vector.ErrorIsNone(
-    sumError,
+    dotError,
 ) {
-    fmt.Println(
-        "vector sum failed: %v",
+    panic(
         vector.ErrorString(
-            sumError,
+            dotError,
         ),
     )
-
-    return
 }
 
 fmt.Println(
-    "sum: %v",
-    sum,
+    "sum: %v %v %v",
+    result[0],
+    result[1],
+    result[2],
+)
+
+fmt.Println(
+    "dot: %v",
+    dot,
 )
 ```
 
-## Performance
+This produces an element-wise sum of:
 
-The package forwards arithmetic operations to `simd`.
+```text
+5 7 9
+```
 
-The concrete implementation may use platform-specific SIMD instructions when supported by the selected backend. Callers should depend on the behavior of the `vector` API rather than a particular instruction set.
+and a dot product of:
 
-The package does not allocate memory for operation results. Callers provide destination slices for element-wise operations.
+```text
+32
+```
+
+## Allocation
+
+The `vector` package does not allocate memory.
+
+Callers own all input and destination arrays or slices and remain responsible for their lifetime.
+
+Operations borrow the supplied slices only for the duration of the call.
