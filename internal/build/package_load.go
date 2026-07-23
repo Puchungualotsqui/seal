@@ -100,7 +100,8 @@ func LoadAndCheckPackageWithSemanticInfo(
 	}
 
 	if len(files) == 0 &&
-		pkg.Config.Kind != KindLibrary {
+		pkg.Config.Kind ==
+			KindExecutable {
 		return nil,
 			nil,
 			nil,

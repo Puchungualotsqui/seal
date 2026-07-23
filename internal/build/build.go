@@ -12,9 +12,49 @@ import (
 type Kind string
 
 const (
-	KindExecutable Kind = "executable"
-	KindLibrary    Kind = "library"
+	KindExecutable    Kind = "executable"
+	KindStaticLibrary Kind = "static_library"
+	KindSharedLibrary Kind = "shared_library"
+
+	// KindLibrary is retained as a source-level compatibility alias.
+	KindLibrary Kind = KindStaticLibrary
 )
+
+func normalizePackageKind(
+	kind Kind,
+) (Kind, error) {
+	normalized :=
+		strings.ToLower(
+			strings.TrimSpace(
+				string(kind),
+			),
+		)
+
+	switch normalized {
+	case "",
+		"library",
+		"static_library":
+		return KindStaticLibrary, nil
+
+	case "executable":
+		return KindExecutable, nil
+
+	case "shared_library":
+		return KindSharedLibrary, nil
+
+	default:
+		return "",
+			fmt.Errorf(
+				"unknown package kind %q; expected executable, static_library, shared_library, or legacy library",
+				kind,
+			)
+	}
+}
+
+func (kind Kind) IsLibrary() bool {
+	return kind == KindStaticLibrary ||
+		kind == KindSharedLibrary
+}
 
 type Dependency struct {
 	Name    string
@@ -35,6 +75,16 @@ type CompilerProfile struct {
 	Target   *string
 	Standard *string
 	Linkage  *string
+}
+
+type NativeConfig struct {
+	Sources     []string
+	IncludeDirs []string
+	LibraryDirs []string
+	Libraries   []string
+	Defines     []string
+	CFlags      []string
+	LinkFlags   []string
 }
 
 type Config struct {
@@ -59,6 +109,9 @@ type Config struct {
 	Target      string
 	Standard    string
 	Linkage     string
+
+	Native          NativeConfig
+	NativePlatforms map[string]NativeConfig
 
 	AutoInitializeVariables        bool
 	AllowUninitializedVariables    bool

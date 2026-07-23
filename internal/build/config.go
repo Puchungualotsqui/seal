@@ -7,18 +7,47 @@ import (
 	"strings"
 )
 
-func ReadConfig(path string) (Config, error) {
-	bytes, err := os.ReadFile(path)
+func ReadConfig(
+	path string,
+) (Config, error) {
+	bytes, err :=
+		os.ReadFile(
+			path,
+		)
+
 	if err != nil {
 		return Config{}, err
 	}
 
-	cfg := defaultConfig()
-	parser := newConfigParser(path, string(bytes), &cfg)
+	cfg :=
+		defaultConfig()
+
+	parser :=
+		newConfigParser(
+			path,
+			string(bytes),
+			&cfg,
+		)
 
 	if err := parser.parse(); err != nil {
 		return Config{}, err
 	}
+
+	kind, err :=
+		normalizePackageKind(
+			cfg.Kind,
+		)
+
+	if err != nil {
+		return Config{},
+			fmt.Errorf(
+				"%s: %w",
+				path,
+				err,
+			)
+	}
+
+	cfg.Kind = kind
 
 	return cfg, nil
 }
@@ -26,7 +55,7 @@ func ReadConfig(path string) (Config, error) {
 func defaultConfig() Config {
 	return Config{
 		Version: "0.1.0",
-		Kind:    KindLibrary,
+		Kind:    KindStaticLibrary,
 
 		Compiler:         "",
 		CompilerPath:     "",
@@ -42,6 +71,10 @@ func defaultConfig() Config {
 		Target:      "",
 		Standard:    "c11",
 		Linkage:     "static",
+
+		Native: NativeConfig{},
+
+		NativePlatforms: map[string]NativeConfig{},
 
 		AutoInitializeVariables:        true,
 		AllowUninitializedVariables:    false,
@@ -80,51 +113,120 @@ func newConfigParser(path string, text string, cfg *Config) *configParser {
 
 func (p *configParser) parse() error {
 	for p.index < len(p.lines) {
-		line := p.cleanLine(p.lines[p.index])
+		line :=
+			p.cleanLine(
+				p.lines[p.index],
+			)
+
 		p.index++
 
 		if line == "" {
 			continue
 		}
 
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			p.section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+		if strings.HasPrefix(
+			line,
+			"[",
+		) && strings.HasSuffix(
+			line,
+			"]",
+		) {
+			p.section =
+				strings.TrimSpace(
+					strings.TrimSuffix(
+						strings.TrimPrefix(
+							line,
+							"[",
+						),
+						"]",
+					),
+				)
+
 			if p.section == "" {
-				return p.err("section name cannot be empty")
+				return p.err(
+					"section name cannot be empty",
+				)
 			}
+
 			continue
 		}
 
-		key, value, ok := strings.Cut(line, "=")
+		key, value, ok :=
+			strings.Cut(
+				line,
+				"=",
+			)
+
 		if !ok {
-			return p.err("expected key = value")
+			return p.err(
+				"expected key = value",
+			)
 		}
 
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
+		key =
+			strings.TrimSpace(
+				key,
+			)
+
+		value =
+			strings.TrimSpace(
+				value,
+			)
 
 		var err error
 
-		value, err = p.collectMultilineValue(value)
+		value, err =
+			p.collectMultilineValue(
+				value,
+			)
+
 		if err != nil {
 			return err
 		}
 
 		if p.section != "" {
-			key = p.section + "." + key
+			key =
+				p.section +
+					"." +
+					key
 		}
 
-		if key == "dependencies" || key == "package.dependencies" {
-			deps, err := p.parseDependencies(value)
+		if key == "dependencies" ||
+			key == "package.dependencies" {
+			deps, err :=
+				p.parseDependencies(
+					value,
+				)
+
 			if err != nil {
 				return err
 			}
 
 			p.cfg.Dependencies = deps
+
 			continue
 		}
 
-		if err := p.assign(key, value); err != nil {
+		if strings.HasPrefix(
+			key,
+			"native.",
+		) {
+			if err :=
+				p.assignNativeConfig(
+					key,
+					value,
+				); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		if err :=
+			p.assign(
+				key,
+				value,
+			); err != nil {
 			return err
 		}
 	}
@@ -297,6 +399,171 @@ func (p *configParser) parseDependencies(
 	}
 
 	return dependencies, nil
+}
+
+func (p *configParser) assignNativeConfig(
+	key string,
+	value string,
+) error {
+	parts :=
+		strings.Split(
+			key,
+			".",
+		)
+
+	platform := ""
+	field := ""
+
+	switch len(parts) {
+	case 2:
+		if parts[0] != "native" {
+			return p.err(
+				fmt.Sprintf(
+					"invalid native configuration key %q",
+					key,
+				),
+			)
+		}
+
+		field = parts[1]
+
+	case 3:
+		if parts[0] != "native" {
+			return p.err(
+				fmt.Sprintf(
+					"invalid native configuration key %q",
+					key,
+				),
+			)
+		}
+
+		platform =
+			normalizeNativePlatformName(
+				parts[1],
+			)
+
+		if !supportedNativePlatform(
+			platform,
+		) {
+			return p.err(
+				fmt.Sprintf(
+					"unknown native platform %q",
+					parts[1],
+				),
+			)
+		}
+
+		field = parts[2]
+
+	default:
+		return p.err(
+			fmt.Sprintf(
+				"invalid native configuration key %q",
+				key,
+			),
+		)
+	}
+
+	values, err :=
+		parseStringArray(
+			value,
+		)
+
+	if err != nil {
+		return err
+	}
+
+	config :=
+		p.cfg.Native
+
+	if platform != "" {
+		if p.cfg.NativePlatforms == nil {
+			p.cfg.NativePlatforms =
+				map[string]NativeConfig{}
+		}
+
+		config =
+			p.cfg.NativePlatforms[platform]
+	}
+
+	switch field {
+	case "sources":
+		config.Sources = values
+
+	case "include_dirs":
+		config.IncludeDirs = values
+
+	case "library_dirs":
+		config.LibraryDirs = values
+
+	case "libraries":
+		config.Libraries = values
+
+	case "defines":
+		config.Defines = values
+
+	case "c_flags":
+		config.CFlags = values
+
+	case "link_flags":
+		config.LinkFlags = values
+
+	default:
+		return p.err(
+			fmt.Sprintf(
+				"unknown native configuration field %q",
+				field,
+			),
+		)
+	}
+
+	if platform == "" {
+		p.cfg.Native = config
+	} else {
+		p.cfg.NativePlatforms[platform] =
+			config
+	}
+
+	return nil
+}
+
+func normalizeNativePlatformName(
+	name string,
+) string {
+	name =
+		strings.ToLower(
+			strings.TrimSpace(
+				name,
+			),
+		)
+
+	switch name {
+	case "win",
+		"win32":
+		return "windows"
+
+	case "darwin",
+		"osx":
+		return "macos"
+
+	default:
+		return name
+	}
+}
+
+func supportedNativePlatform(
+	platform string,
+) bool {
+	switch platform {
+	case "windows",
+		"linux",
+		"macos",
+		"freebsd":
+		return true
+
+	default:
+		return false
+	}
 }
 
 func (p *configParser) assign(
